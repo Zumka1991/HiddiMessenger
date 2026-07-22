@@ -1,0 +1,91 @@
+# API, ранний контракт
+
+Все ответы и запросы — JSON. Production API доступен только по HTTPS.
+
+## `GET /health`
+
+Возвращает `{"status":"ok"}`.
+
+## `POST /v1/admin/invites`
+
+Требует заголовок `Authorization: Bearer <HIDDI_BOOTSTRAP_SECRET>`. Создаёт
+одноразовое приглашение. Этот bootstrap-механизм предназначен только для
+первого администратора; затем он будет заменён E2EE-авторизацией администратора.
+
+Ответ: `{"invite_code":"..."}`. Код показывается только в этом ответе, в
+БД остаётся SHA-256-хеш.
+
+## `POST /v1/auth/register`
+
+```json
+{
+  "nickname": "alice",
+  "invite_code": "код-приглашения",
+  "registration_id": 1234,
+  "identity_public_key": "base64-публичный-ключ-устройства"
+}
+```
+
+Запрос также обязан содержать созданный клиентом `registration_id` (целое от 1 до 16380).
+Возвращает `account_id`, `device_id`, тот же `registration_id` и временный `access_token`. Токен нельзя
+логировать или сохранять в открытом виде; для него в БД хранится только хеш.
+
+## Авторизованные transport endpoints
+
+Переходная авторизация использует `Authorization: Bearer <access_token>`.
+
+* `GET /v1/users/{nickname}` — точный поиск по нормализованному нику; возвращает
+  ник и первый публичный identity key пользователя.
+* `POST /v1/messages` — принимает `recipient_nickname` и URL-safe Base64
+  `ciphertext` (до 2 MiB) и хранит его без расшифровки.
+* `GET /v1/messages` — возвращает до 100 входящих шифротекстов.
+* `POST /v1/messages/{message_id}` — отмечает ciphertext доставленным, но не
+  удаляет его.
+* `DELETE /v1/messages/{message_id}` — явно и необратимо удаляет ciphertext;
+  доступен отправителю или получателю.
+
+## Зашифрованные вложения
+
+`POST /v1/attachments` принимает `recipient_nickname` и URL-safe Base64
+`ciphertext` размером до 8 MiB. Сервер не получает MIME-тип,
+имя, ключ или IV. Ответ: `{"attachment_id":"uuid"}`.
+
+`GET /v1/attachments/{attachment_id}` доступен только отправителю и
+получателю. Скачивание не удаляет blob: `DELETE` по тому же адресу явно
+удаляет серверную копию. На каждого отправителя действует квота 1 GiB.
+Ключ и метаданные передаются отдельно внутри Signal E2EE-сообщения.
+
+Для изображения клиент создаёт два объекта — небольшое превью и очищенный
+полноразмерный JPEG — с независимыми AES-256-GCM ключами и IV. API не знает,
+какой blob является превью, и не получает связь между объектами в открытом виде.
+
+Текущая реализация хранит бинарный шифротекст в SQLite BLOB. Контракт endpoint
+не зависит от backend: при переходе на закрытый S3/MinIO bucket основная БД
+будет хранить только владельцев, получателей, размеры и object key.
+
+Это временный транспортный API: в следующем этапе токен будет заменён
+подписанным challenge-response, а содержимое `ciphertext` станет результатом
+Signal Protocol на клиенте.
+
+## Pre-key API
+
+Клиент кодирует публичный материал URL-safe Base64. Сервер не расшифровывает и
+не генерирует ключи.
+
+`PUT /v1/devices/prekeys` заменяет набор prekeys текущего устройства:
+
+```json
+{
+  "signed_prekey": {"id": 1, "public_key": "...", "signature": "..."},
+  "kyber_signed_prekey": {"id": 2, "public_key": "...", "signature": "..."},
+  "one_time_prekeys": [{"id": 3, "public_key": "..."}],
+  "kyber_one_time_prekeys": [{"id": 4, "public_key": "...", "signature": "..."}]
+}
+```
+
+`GET /v1/users/{nickname}/prekey-bundle` выдаёт identity key, signed prekeys и
+по одному classical/Kyber one-time prekey. Выданные одноразовые ключи удаляются
+в той же транзакции и не могут быть выданы повторно.
+
+Ответ также содержит `registration_id` устройства — это значение используется
+Signal Protocol при построении сессии и не является секретом.

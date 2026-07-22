@@ -1,0 +1,16 @@
+**/target/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/.idea/
+**/local.properties
+*.iml
+
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
