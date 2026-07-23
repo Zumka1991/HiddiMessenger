@@ -101,10 +101,13 @@ class GroupMlsCoordinator(
 
     suspend fun publishKeyPackage(profile: AccountProfile) {
         val deviceId = requireNotNull(profile.deviceId) { "Не найден device_id для MLS" }
-        val keyPackage = requireNotNull(NativeMlsBridge.createKeyPackage(deviceId)) {
-            "Не удалось создать MLS KeyPackage"
+        var available = 0
+        while (available < KEY_PACKAGE_RESERVE) {
+            val keyPackage = requireNotNull(NativeMlsBridge.createKeyPackage(deviceId)) {
+                "Не удалось создать MLS KeyPackage"
+            }
+            available = api.uploadMlsKeyPackage(profile, keyPackage)
         }
-        api.uploadMlsKeyPackage(profile, keyPackage)
     }
 
     suspend fun processWelcomes(profile: AccountProfile): List<ByteArray> {
@@ -607,6 +610,7 @@ class GroupMlsCoordinator(
         const val KIND_COMMIT = 2
         const val KIND_APPLICATION = 3
         const val CONTEXT_CREATE_GROUP = "create_group"
+        const val KEY_PACKAGE_RESERVE = 10
         const val CONTEXT_INVITE_MEMBER = "invite_member"
         const val CONTEXT_REMOVE_MEMBER = "remove_member"
     }

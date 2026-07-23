@@ -122,6 +122,7 @@ fun ConversationsScreen(
     connection: ServerConnection,
     groups: List<LocalGroupChat>,
     groupBusy: Boolean,
+    groupCreationError: String?,
     selfProfile: UserSearchResult?,
     selfAvatar: ByteArray?,
     knownProfiles: Map<String, UserSearchResult>,
@@ -131,6 +132,7 @@ fun ConversationsScreen(
     onRefreshConnection: () -> Unit,
     onOpenConversation: (String) -> Unit,
     onCreateGroup: (String, String) -> Unit,
+    onClearGroupCreationError: () -> Unit,
     onOpenGroup: (ByteArray) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenProfile: (String) -> Unit,
@@ -186,6 +188,7 @@ fun ConversationsScreen(
                         leadingIcon = { Icon(Icons.Rounded.GroupAdd, contentDescription = null) },
                         onClick = {
                             mainMenuExpanded = false
+                            onClearGroupCreationError()
                             showCreateGroup = true
                         },
                     )
@@ -401,7 +404,10 @@ fun ConversationsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = newGroupName,
-                        onValueChange = { newGroupName = it.take(80) },
+                        onValueChange = {
+                            newGroupName = it.take(80)
+                            onClearGroupCreationError()
+                        },
                         label = { Text("Название группы") },
                         singleLine = true,
                     )
@@ -414,7 +420,10 @@ fun ConversationsScreen(
                         ) {
                             items(availableContacts, key = { "new-group:$it" }) { nickname ->
                                 Surface(
-                                    onClick = { firstMember = nickname },
+                                    onClick = {
+                                        firstMember = nickname
+                                        onClearGroupCreationError()
+                                    },
                                     shape = RoundedCornerShape(14.dp),
                                     color = if (firstMember == nickname) {
                                         MaterialTheme.colorScheme.primaryContainer
@@ -433,7 +442,10 @@ fun ConversationsScreen(
                     }
                     OutlinedTextField(
                         value = firstMember,
-                        onValueChange = { firstMember = it.trim().removePrefix("@").take(32) },
+                        onValueChange = {
+                            firstMember = it.trim().removePrefix("@").take(32)
+                            onClearGroupCreationError()
+                        },
                         label = { Text("Или найдите по @nickname") },
                         prefix = { Text("@") },
                         singleLine = true,
@@ -443,6 +455,20 @@ fun ConversationsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (groupBusy) {
+                        Text(
+                            "Создаём MLS-группу и защищённое приглашение…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    groupCreationError?.let { error ->
+                        Text(
+                            error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -453,9 +479,6 @@ fun ConversationsScreen(
                     onClick = {
                         val name = newGroupName.trim()
                         val nickname = firstMember.trim().removePrefix("@").lowercase()
-                        showCreateGroup = false
-                        newGroupName = ""
-                        firstMember = ""
                         onCreateGroup(nickname, name)
                     },
                 ) { Text("Создать") }

@@ -27,14 +27,16 @@ import java.net.URL
 import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
-    suspend fun uploadMlsKeyPackage(profile: AccountProfile, keyPackage: ByteArray) = withContext(Dispatchers.IO) {
+    suspend fun uploadMlsKeyPackage(profile: AccountProfile, keyPackage: ByteArray): Int = withContext(Dispatchers.IO) {
         require(keyPackage.isNotEmpty()) { "Пустой MLS KeyPackage" }
-        request(
-            "PUT",
-            "${profile.serverUrl}/v1/groups/key-package",
-            JSONObject().put("key_package", keyPackage.b64()).toString(),
-            profile.accessToken,
-        )
+        JSONObject(
+            request(
+                "PUT",
+                "${profile.serverUrl}/v1/groups/key-package",
+                JSONObject().put("key_package", keyPackage.b64()).toString(),
+                profile.accessToken,
+            ),
+        ).getInt("available")
     }
 
     suspend fun takeMlsKeyPackage(profile: AccountProfile, nickname: String): ByteArray = withContext(Dispatchers.IO) {

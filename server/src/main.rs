@@ -249,6 +249,12 @@ struct GroupEventResponse {
 struct UploadMlsKeyPackageRequest {
     key_package: String,
 }
+
+#[derive(Serialize)]
+struct UploadMlsKeyPackageResponse {
+    available: i64,
+}
+
 #[derive(Serialize)]
 struct MlsKeyPackageResponse {
     nickname: String,
@@ -1906,7 +1912,7 @@ async fn upload_mls_key_package(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<UploadMlsKeyPackageRequest>,
-) -> Result<StatusCode, Error> {
+) -> Result<(StatusCode, Json<UploadMlsKeyPackageResponse>), Error> {
     let account = authenticate(&state, &headers)?;
     if request.key_package.len() < 4
         || request.key_package.len() > 65_536
@@ -1918,9 +1924,64 @@ async fn upload_mls_key_package(
         .db
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    db.execute("INSERT INTO mls_key_packages (device_id, key_package) VALUES (?1, ?2) ON CONFLICT(device_id) DO UPDATE SET key_package = excluded.key_package, created_at = CURRENT_TIMESTAMP", params![account.device_id, request.key_package])
-        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store MLS key package"))?;
-    Ok(StatusCode::NO_CONTENT)
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO mls_key_packages (id, device_id, key_package)
+             VALUES (?1, ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                account.device_id,
+                request.key_package
+            ],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not store MLS key package",
+            )
+        })?;
+    transaction
+        .execute(
+            "DELETE FROM mls_key_packages
+             WHERE id IN (
+                SELECT id FROM mls_key_packages
+                WHERE device_id = ?1
+                ORDER BY created_at ASC, id ASC
+                LIMIT -1 OFFSET 32
+             )",
+            params![account.device_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not prune MLS key packages",
+            )
+        })?;
+    let available: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM mls_key_packages WHERE device_id = ?1",
+            params![account.device_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not count MLS key packages",
+            )
+        })?;
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store MLS key package",
+        )
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadMlsKeyPackageResponse { available }),
+    ))
 }
 
 async fn take_mls_key_package(
@@ -1938,13 +1999,13 @@ async fn take_mls_key_package(
     let transaction = db
         .unchecked_transaction()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    let (device_id, key_package): (String, String) = transaction.query_row(
-        "SELECT devices.id, mls_key_packages.key_package FROM accounts JOIN devices ON devices.account_id = accounts.id JOIN mls_key_packages ON mls_key_packages.device_id = devices.id WHERE accounts.nickname = ?1 ORDER BY mls_key_packages.created_at ASC LIMIT 1", params![nickname], |row| Ok((row.get(0)?, row.get(1)?)))
+    let (key_package_id, key_package): (String, String) = transaction.query_row(
+        "SELECT mls_key_packages.id, mls_key_packages.key_package FROM accounts JOIN devices ON devices.account_id = accounts.id JOIN mls_key_packages ON mls_key_packages.device_id = devices.id WHERE accounts.nickname = ?1 ORDER BY mls_key_packages.created_at ASC, mls_key_packages.id ASC LIMIT 1", params![nickname], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "MLS key package not found"), _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load MLS key package") })?;
     transaction
         .execute(
-            "DELETE FROM mls_key_packages WHERE device_id = ?1",
-            params![device_id],
+            "DELETE FROM mls_key_packages WHERE id = ?1",
+            params![key_package_id],
         )
         .map_err(|_| {
             Error(
@@ -3119,8 +3180,9 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             removes_recipient INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS mls_key_packages (
-            device_id TEXT PRIMARY KEY NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-            key_package TEXT NOT NULL,
+            id TEXT PRIMARY KEY NOT NULL,
+            device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            key_package TEXT UNIQUE NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS attachments (
@@ -3176,6 +3238,30 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             signature TEXT,
             UNIQUE(device_id, key_kind, key_id)
          );",
+    )?;
+    let mls_key_package_columns = db
+        .prepare("PRAGMA table_info(mls_key_packages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !mls_key_package_columns.iter().any(|column| column == "id") {
+        db.execute_batch(
+            "ALTER TABLE mls_key_packages RENAME TO mls_key_packages_legacy;
+             CREATE TABLE mls_key_packages (
+                id TEXT PRIMARY KEY NOT NULL,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                key_package TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             INSERT INTO mls_key_packages (id, device_id, key_package, created_at)
+             SELECT lower(hex(randomblob(16))), device_id, key_package, created_at
+             FROM mls_key_packages_legacy;
+             DROP TABLE mls_key_packages_legacy;",
+        )?;
+    }
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mls_key_packages_device
+         ON mls_key_packages(device_id, created_at)",
+        [],
     )?;
     let has_registration_id = db
         .prepare("PRAGMA table_info(devices)")?
@@ -3846,6 +3932,65 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&downloaded).unwrap()["image"],
             avatar
         );
+    }
+
+    #[tokio::test]
+    async fn mls_key_packages_are_buffered_and_consumed_once() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let packages = (1_u8..=3)
+            .map(|value| URL_SAFE_NO_PAD.encode([value; 32]))
+            .collect::<Vec<_>>();
+
+        for (index, key_package) in packages.iter().enumerate() {
+            let (status, response) = request(
+                &app,
+                "PUT",
+                "/v1/groups/key-package",
+                Some(&bob),
+                serde_json::json!({"key_package": key_package}).to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response).unwrap()["available"],
+                index + 1
+            );
+        }
+
+        let mut consumed = Vec::new();
+        for _ in 0..3 {
+            let (status, response) = request(
+                &app,
+                "GET",
+                "/v1/users/bob/mls-key-package",
+                Some(&alice),
+                String::new(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            consumed.push(
+                serde_json::from_str::<serde_json::Value>(&response).unwrap()["key_package"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        consumed.sort();
+        let mut expected = packages;
+        expected.sort();
+        assert_eq!(consumed, expected);
+
+        let (status, _) = request(
+            &app,
+            "GET",
+            "/v1/users/bob/mls-key-package",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

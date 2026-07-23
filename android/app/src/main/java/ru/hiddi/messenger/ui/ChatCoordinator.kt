@@ -159,6 +159,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var groupDraft by rememberSaveable { mutableStateOf("") }
     var groupStatus by rememberSaveable { mutableStateOf("OpenMLS · сквозное шифрование") }
     var groupBusy by remember { mutableStateOf(false) }
+    var groupCreationError by rememberSaveable { mutableStateOf<String?>(null) }
     val safetyQrPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
@@ -256,6 +257,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     fun createGroup(nickname: String, name: String) {
         if (groupBusy) return
         groupBusy = true
+        groupCreationError = null
         status = "Создаём защищённую группу «${name.trim()}»…"
         scope.launch {
             try {
@@ -266,11 +268,13 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 openGroup(groupId)
                 groupStatus = "Группа создана · приглашение отправлено"
             } catch (error: Exception) {
-                status = when {
+                val message = when {
                     error.message?.contains("key package", ignoreCase = true) == true ->
-                        "@$nickname ещё не подготовил устройство для групп"
+                        "@$nickname пока недоступен для приглашения. Попросите его открыть обновлённый Hiddi."
                     else -> error.message ?: "Не удалось создать MLS-группу"
                 }
+                groupCreationError = message
+                status = message
             } finally {
                 groupBusy = false
             }
@@ -982,6 +986,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 connection = connection,
                 groups = groups,
                 groupBusy = groupBusy,
+                groupCreationError = groupCreationError,
                 selfProfile = currentPublicProfile,
                 selfAvatar = currentAvatar,
                 knownProfiles = knownProfiles,
@@ -995,6 +1000,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onRefreshConnection = ::refreshConnection,
                 onOpenConversation = ::openConversation,
                 onCreateGroup = ::createGroup,
+                onClearGroupCreationError = { groupCreationError = null },
                 onOpenGroup = ::openGroup,
                 onOpenSettings = { showSettings = true },
                 onOpenProfile = { viewedProfileNickname = it },

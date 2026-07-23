@@ -40,17 +40,20 @@ object GroupCommand {
     }
 
     private fun publishKeyPackage(session: MlsSession) {
-        val keyPackage = requireNotNull(
-            NativeMlsBridge.createKeyPackage(session.state.getString("device_id")),
-        ) { "OpenMLS не создал KeyPackage" }
-        request(
-            session.client,
-            "PUT",
-            "${session.server}/v1/groups/key-package",
-            JSONObject().put("key_package", keyPackage.base64Url()),
-            session.token,
-        )
-        println("Одноразовый MLS KeyPackage опубликован. Теперь это устройство можно пригласить в группу.")
+        var available = 0
+        while (available < KEY_PACKAGE_RESERVE) {
+            val keyPackage = requireNotNull(
+                NativeMlsBridge.createKeyPackage(session.state.getString("device_id")),
+            ) { "OpenMLS не создал KeyPackage" }
+            available = (request(
+                session.client,
+                "PUT",
+                "${session.server}/v1/groups/key-package",
+                JSONObject().put("key_package", keyPackage.base64Url()),
+                session.token,
+            ) as JSONObject).getInt("available")
+        }
+        println("Запас MLS KeyPackage пополнен: $available. Устройство готово к приглашениям.")
     }
 
     private fun create(session: MlsSession, args: List<String>) {
@@ -898,6 +901,7 @@ object GroupCommand {
     private const val KIND_COMMIT = 2
     private const val KIND_APPLICATION = 3
     private const val CONTEXT_CREATE_GROUP = "create_group"
+    private const val KEY_PACKAGE_RESERVE = 10
     private const val CONTEXT_INVITE_MEMBER = "invite_member"
     private const val CONTEXT_REMOVE_MEMBER = "remove_member"
     private const val GROUP_PAYLOAD_PREFIX = "HIDDI_GROUP_V1:"
