@@ -107,6 +107,7 @@ import java.time.format.DateTimeFormatter
 fun ConversationScreen(
     recipient: String,
     displayName: String?,
+    avatar: ByteArray?,
     history: List<ChatHistoryItem>,
     draft: String,
     status: String,
@@ -161,7 +162,7 @@ fun ConversationScreen(
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад")
             }
             Box(Modifier.clickable(onClick = onOpenProfile)) {
-                HiddiAvatar(recipient, 44)
+                ProfileAvatar(displayName?.ifBlank { recipient } ?: recipient, avatar, 44)
             }
             Spacer(Modifier.size(11.dp))
             Column(Modifier.weight(1f).clickable(onClick = onOpenProfile)) {

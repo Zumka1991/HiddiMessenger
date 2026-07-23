@@ -121,6 +121,7 @@ fun ConversationsScreen(
     selfProfile: UserSearchResult?,
     selfAvatar: ByteArray?,
     knownProfiles: Map<String, UserSearchResult>,
+    knownAvatars: Map<String, ByteArray>,
     onSearchChange: (String) -> Unit,
     onSearch: () -> Unit,
     onRefreshConnection: () -> Unit,
@@ -215,7 +216,11 @@ fun ConversationsScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        HiddiAvatar(user.displayName.ifBlank { user.nickname }, 44)
+                        ProfileAvatar(
+                            user.displayName.ifBlank { user.nickname },
+                            knownAvatars[user.nickname],
+                            44,
+                        )
                         Spacer(Modifier.size(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -315,6 +320,7 @@ fun ConversationsScreen(
                     ConversationRow(
                         peer = peer,
                         profile = knownProfiles[peer],
+                        avatar = knownAvatars[peer],
                         lastMessage = lastMessage,
                         unreadCount = historyStore.unreadCount(peer),
                         onClick = { onOpenConversation(peer) },
@@ -380,6 +386,7 @@ private fun GroupConversationRow(
 private fun ConversationRow(
     peer: String,
     profile: UserSearchResult?,
+    avatar: ByteArray?,
     lastMessage: ChatHistoryItem?,
     unreadCount: Int,
     onClick: () -> Unit,
@@ -393,7 +400,7 @@ private fun ConversationRow(
     ) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.clickable(onClick = onOpenProfile)) {
-                HiddiAvatar(profile?.displayName?.ifBlank { peer } ?: peer, 54)
+                ProfileAvatar(profile?.displayName?.ifBlank { peer } ?: peer, avatar, 54)
             }
             Spacer(Modifier.size(14.dp))
             Column(Modifier.weight(1f)) {

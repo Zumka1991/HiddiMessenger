@@ -138,6 +138,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var currentPublicProfile by remember { mutableStateOf<UserSearchResult?>(null) }
     var currentAvatar by remember { mutableStateOf<ByteArray?>(null) }
     var knownProfiles by remember { mutableStateOf(emptyMap<String, UserSearchResult>()) }
+    var knownAvatars by remember { mutableStateOf(emptyMap<String, ByteArray>()) }
+    var knownAvatarVersions by remember { mutableStateOf(emptyMap<String, String>()) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var viewedProfileNickname by rememberSaveable { mutableStateOf<String?>(null) }
     var showClearHistoryDialog by rememberSaveable { mutableStateOf(false) }
@@ -524,6 +526,18 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         }
     }
 
+    LaunchedEffect(knownProfiles.mapValues { it.value.avatarVersion }) {
+        knownProfiles.values.forEach { user ->
+            val version = user.avatarVersion ?: return@forEach
+            if (knownAvatarVersions[user.nickname] != version) {
+                runCatching { api.avatar(profile, user.nickname) }.getOrNull()?.let { image ->
+                    knownAvatars = knownAvatars + (user.nickname to image)
+                    knownAvatarVersions = knownAvatarVersions + (user.nickname to version)
+                }
+            }
+        }
+    }
+
     LaunchedEffect(resumeRevision) {
         refreshGroups()
     }
@@ -611,6 +625,14 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 api = api,
                 onBack = { viewedProfileNickname = null },
                 onMessage = { openConversation(nickname) },
+                onProfileLoaded = { loaded, avatar ->
+                    knownProfiles = knownProfiles + (loaded.nickname to loaded)
+                    if (avatar != null && loaded.avatarVersion != null) {
+                        knownAvatars = knownAvatars + (loaded.nickname to avatar)
+                        knownAvatarVersions =
+                            knownAvatarVersions + (loaded.nickname to loaded.avatarVersion)
+                    }
+                },
             )
         } else if (selectedGroup != null) {
             GroupConversationScreen(
@@ -800,6 +822,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 selfProfile = currentPublicProfile,
                 selfAvatar = currentAvatar,
                 knownProfiles = knownProfiles,
+                knownAvatars = knownAvatars,
                 onSearchChange = {
                     search = it
                     foundUsers = emptyList()
@@ -817,6 +840,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             ConversationScreen(
                 recipient = recipient!!,
                 displayName = knownProfiles[recipient!!]?.displayName,
+                avatar = knownAvatars[recipient!!],
                 history = history,
                 draft = draft,
                 status = status,

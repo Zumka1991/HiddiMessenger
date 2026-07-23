@@ -51,6 +51,7 @@ fun UserProfileScreen(
     api: SignalMessagingApi,
     onBack: () -> Unit,
     onMessage: () -> Unit,
+    onProfileLoaded: (UserSearchResult, ByteArray?) -> Unit,
 ) {
     var profile by remember(nickname) { mutableStateOf<UserSearchResult?>(null) }
     var avatar by remember(nickname) { mutableStateOf<ByteArray?>(null) }
@@ -63,6 +64,7 @@ fun UserProfileScreen(
             avatar = loaded.avatarVersion?.let {
                 runCatching { api.avatar(account, nickname) }.getOrNull()
             }
+            onProfileLoaded(loaded, avatar)
         } catch (failure: Exception) {
             error = failure.message ?: "Не удалось загрузить профиль"
         }

@@ -339,6 +339,23 @@ fun HiddiAvatar(seed: String, size: Int) {
     }
 }
 
+@androidx.compose.runtime.Composable
+fun ProfileAvatar(seed: String, image: ByteArray?, size: Int) {
+    val bitmap = remember(image?.contentHashCode()) {
+        image?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Аватар",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size.dp).clip(CircleShape),
+        )
+    } else {
+        HiddiAvatar(seed, size)
+    }
+}
+
 fun messageTime(value: String): String = runCatching {
     DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()).format(Instant.parse(value))
 }.getOrElse {
