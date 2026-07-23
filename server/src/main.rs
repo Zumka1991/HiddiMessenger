@@ -1613,4 +1613,66 @@ mod tests {
             0
         );
     }
+
+    #[tokio::test]
+    async fn attachment_is_available_only_to_participants_and_can_be_deleted() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let charlie = register_account(&app, "charlie").await;
+        let ciphertext = URL_SAFE_NO_PAD.encode([9_u8; 64]);
+        let (uploaded, body) = request(
+            &app,
+            "POST",
+            "/v1/attachments",
+            Some(&alice),
+            serde_json::json!({"recipient_nickname":"bob","ciphertext":ciphertext}).to_string(),
+        )
+        .await;
+        assert_eq!(uploaded, StatusCode::CREATED);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["attachment_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (downloaded, downloaded_body) = request(
+            &app,
+            "GET",
+            &format!("/v1/attachments/{id}"),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(downloaded, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&downloaded_body).unwrap()["ciphertext"],
+            ciphertext
+        );
+        let (forbidden, _) = request(
+            &app,
+            "GET",
+            &format!("/v1/attachments/{id}"),
+            Some(&charlie),
+            String::new(),
+        )
+        .await;
+        assert_eq!(forbidden, StatusCode::NOT_FOUND);
+        let (removed, _) = request(
+            &app,
+            "DELETE",
+            &format!("/v1/attachments/{id}"),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+        let (missing, _) = request(
+            &app,
+            "GET",
+            &format!("/v1/attachments/{id}"),
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(missing, StatusCode::NOT_FOUND);
+    }
 }
