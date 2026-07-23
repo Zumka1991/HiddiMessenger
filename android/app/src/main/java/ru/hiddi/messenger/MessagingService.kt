@@ -40,7 +40,10 @@ class MessagingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (pollingJob?.isActive != true) pollingJob = serviceScope.launch { poll() }
+        if (pollingJob?.isActive != true) {
+            publishConnection(STATE_CONNECTING)
+            pollingJob = serviceScope.launch { poll() }
+        }
         return START_STICKY
     }
 
@@ -70,6 +73,12 @@ class MessagingService : Service() {
 
         while (serviceScope.isActive) {
             try {
+                api.pendingConversationDeletions(profile).forEach { peer ->
+                    history.clearConversation(peer).forEach { descriptor ->
+                        runCatching { attachments.delete(descriptor.attachmentId) }
+                    }
+                    sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
+                }
                 if (api.waitForIncoming(profile)) {
                     val messages = api.inbox(profile)
                     messages.forEach { message ->
@@ -102,9 +111,11 @@ class MessagingService : Service() {
                         sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
                     }
                 }
+                publishConnection(STATE_ONLINE)
                 retryDelay = 1_000L
             } catch (error: Exception) {
                 Log.w(TAG, "Background receive failed: ${error.javaClass.simpleName}")
+                publishConnection(STATE_OFFLINE)
                 delay(retryDelay)
                 retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
             }
@@ -157,10 +168,26 @@ class MessagingService : Service() {
         )
     }
 
-    private fun foregroundNotification() = NotificationCompat.Builder(this, CONNECTION_CHANNEL)
+    private fun publishConnection(state: String) {
+        sendBroadcast(
+            Intent(ACTION_CONNECTION_CHANGED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_CONNECTION_STATE, state),
+        )
+        getSystemService(NotificationManager::class.java)
+            .notify(FOREGROUND_NOTIFICATION_ID, foregroundNotification(state))
+    }
+
+    private fun foregroundNotification(state: String = STATE_CONNECTING) = NotificationCompat.Builder(this, CONNECTION_CHANNEL)
         .setSmallIcon(R.drawable.ic_hiddi_notification)
         .setContentTitle("Hiddi")
-        .setContentText("Защищённое подключение активно")
+        .setContentText(
+            when (state) {
+                STATE_ONLINE -> "Защищённое подключение активно"
+                STATE_OFFLINE -> "Нет связи с сервером — повторяем подключение"
+                else -> "Проверяем защищённое подключение…"
+            },
+        )
         .setContentIntent(openAppIntent())
         .setOngoing(true)
         .setSilent(true)
@@ -194,7 +221,12 @@ class MessagingService : Service() {
 
     companion object {
         const val ACTION_MESSAGES_UPDATED = "ru.hiddi.messenger.MESSAGES_UPDATED"
+        const val ACTION_CONNECTION_CHANGED = "ru.hiddi.messenger.CONNECTION_CHANGED"
         const val EXTRA_OPEN_PEER = "ru.hiddi.messenger.extra.OPEN_PEER"
+        const val EXTRA_CONNECTION_STATE = "ru.hiddi.messenger.extra.CONNECTION_STATE"
+        const val STATE_CONNECTING = "connecting"
+        const val STATE_ONLINE = "online"
+        const val STATE_OFFLINE = "offline"
         private const val CONNECTION_CHANNEL = "hiddi_connection_v1"
         private const val MESSAGE_CHANNEL = "hiddi_messages_v1"
         private const val FOREGROUND_NOTIFICATION_ID = 1001

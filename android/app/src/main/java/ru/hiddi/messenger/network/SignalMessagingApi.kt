@@ -20,13 +20,21 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 import ru.hiddi.messenger.security.AndroidSignalProtocolStore
 import ru.hiddi.messenger.security.SignalStateRepository
 import java.net.HttpURLConnection
+import java.net.URLEncoder
 import java.net.URL
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
-    suspend fun findUser(profile: AccountProfile, nickname: String): UserSearchResult = withContext(Dispatchers.IO) {
+    suspend fun findUsers(profile: AccountProfile, nickname: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
         val normalized = nickname.trim().removePrefix("@").lowercase()
-        val user = JSONObject(request("GET", "${profile.serverUrl}/v1/users/$normalized", null, profile.accessToken))
-        UserSearchResult(user.getString("nickname"))
+        val encodedQuery = URLEncoder.encode(normalized, Charsets.UTF_8.name())
+        JSONArray(request("GET", "${profile.serverUrl}/v1/users?query=$encodedQuery", null, profile.accessToken))
+            .let { items -> (0 until items.length()).map { UserSearchResult(items.getJSONObject(it).getString("nickname")) } }
+    }
+
+    suspend fun serverReachable(profile: AccountProfile): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            JSONObject(request("GET", "${profile.serverUrl}/health", null, null)).getString("status") == "ok"
+        }.getOrDefault(false)
     }
 
     suspend fun waitForIncoming(profile: AccountProfile): Boolean = withContext(Dispatchers.IO) {
@@ -71,7 +79,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             )
         }
 
-    suspend fun send(profile: AccountProfile, recipient: String, message: String) = withContext(Dispatchers.IO) {
+    suspend fun send(profile: AccountProfile, recipient: String, message: String): String = withContext(Dispatchers.IO) {
         SIGNAL_STATE_MUTEX.withLock {
             val normalized = recipient.trim().removePrefix("@").lowercase()
             val state = resolveRegistrationId(profile, repository.load())
@@ -82,9 +90,34 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             val cipher = SessionCipher(store, local, remote).encrypt(message.encodeToByteArray())
             repository.save(store.snapshot())
             val envelope = byteArrayOf(cipher.type.toByte()) + cipher.serialize()
-            request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
-                .put("recipient_nickname", normalized).put("ciphertext", envelope.b64()).toString(), profile.accessToken)
+            JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
+                .put("recipient_nickname", normalized).put("ciphertext", envelope.b64()).toString(), profile.accessToken))
+                .getString("message_id")
         }
+    }
+
+    suspend fun messageStatus(profile: AccountProfile, messageId: String): DeliveryStatus = withContext(Dispatchers.IO) {
+        val response = JSONObject(request("GET", "${profile.serverUrl}/v1/messages/$messageId", null, profile.accessToken))
+        when {
+            response.getBoolean("read") -> DeliveryStatus.READ
+            response.getBoolean("delivered") -> DeliveryStatus.DELIVERED
+            else -> DeliveryStatus.SENT
+        }
+    }
+
+    suspend fun markPeerMessagesRead(profile: AccountProfile, peer: String) = withContext(Dispatchers.IO) {
+        val normalized = peer.trim().removePrefix("@").lowercase()
+        request("POST", "${profile.serverUrl}/v1/messages/read/$normalized", null, profile.accessToken)
+    }
+
+    suspend fun deleteConversationForBoth(profile: AccountProfile, peer: String) = withContext(Dispatchers.IO) {
+        val normalized = peer.trim().removePrefix("@").lowercase()
+        request("DELETE", "${profile.serverUrl}/v1/conversations/$normalized", null, profile.accessToken)
+    }
+
+    suspend fun pendingConversationDeletions(profile: AccountProfile): List<String> = withContext(Dispatchers.IO) {
+        val response = JSONArray(request("GET", "${profile.serverUrl}/v1/conversations/deletions", null, profile.accessToken))
+        List(response.length()) { response.getJSONObject(it).getString("peer_nickname") }
     }
 
     suspend fun inbox(profile: AccountProfile): List<DecryptedMessage> = withContext(Dispatchers.IO) {
@@ -135,10 +168,10 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         return migrated
     }
 
-    private fun request(method: String, url: String, body: String?, token: String): String {
+    private fun request(method: String, url: String, body: String?, token: String?): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method; connectTimeout = 15_000; readTimeout = 30_000
-            setRequestProperty("Authorization", "Bearer $token")
+            token?.let { setRequestProperty("Authorization", "Bearer $it") }
             body?.let { doOutput = true; setRequestProperty("Content-Type", "application/json") }
         }
         body?.let { connection.outputStream.use { stream -> stream.write(it.encodeToByteArray()) } }
@@ -155,5 +188,6 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
 
 data class DecryptedMessage(val senderNickname: String, val text: String, val createdAt: String)
 data class UserSearchResult(val nickname: String)
+enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

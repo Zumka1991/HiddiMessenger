@@ -25,6 +25,8 @@ class EncryptedChatHistory(context: Context) {
                         it.getString("time"),
                         it.optBoolean("unread", false),
                         it.optJSONObject("attachment")?.toAttachmentDescriptor(),
+                        it.optString("message_id").takeIf(String::isNotBlank),
+                        it.optString("delivery_status", "sent"),
                     )
                 }
         }
@@ -39,6 +41,8 @@ class EncryptedChatHistory(context: Context) {
                 .put("outgoing", item.outgoing)
                 .put("time", item.time)
                 .put("unread", item.unread)
+                .apply { item.messageId?.let { put("message_id", it) } }
+                .put("delivery_status", item.deliveryStatus)
                 .apply { item.attachment?.let { put("attachment", it.toJson()) } },
         )
         store.write(entries.toString().encodeToByteArray())
@@ -63,6 +67,39 @@ class EncryptedChatHistory(context: Context) {
             }
         }
         if (changed) store.write(entries.toString().encodeToByteArray())
+    }
+
+    fun updateDeliveryStatus(messageId: String, status: String) = synchronized(historyLock) {
+        val entries = read()
+        var changed = false
+        for (index in 0 until entries.length()) {
+            val item = entries.getJSONObject(index)
+            if (item.optString("message_id") == messageId && item.optString("delivery_status", "sent") != status) {
+                item.put("delivery_status", status)
+                changed = true
+            }
+        }
+        if (changed) store.write(entries.toString().encodeToByteArray())
+    }
+
+    /** Removes this dialogue only from this device and returns ciphertext blobs safe to discard locally. */
+    fun clearConversation(nickname: String): List<AttachmentDescriptor> = synchronized(historyLock) {
+        val entries = read()
+        val retained = JSONArray()
+        val attachments = mutableListOf<AttachmentDescriptor>()
+        for (index in 0 until entries.length()) {
+            val item = entries.getJSONObject(index)
+            if (item.getString("peer") == nickname) {
+                item.optJSONObject("attachment")?.toAttachmentDescriptor()?.let { descriptor ->
+                    attachments += descriptor
+                    descriptor.preview?.let(attachments::add)
+                }
+            } else {
+                retained.put(item)
+            }
+        }
+        if (retained.length() != entries.length()) store.write(retained.toString().encodeToByteArray())
+        attachments.distinctBy { it.attachmentId }
     }
 
     fun peers(): List<String> = synchronized(historyLock) {
@@ -94,6 +131,10 @@ data class ChatHistoryItem(
     val time: String,
     val unread: Boolean = false,
     val attachment: AttachmentDescriptor? = null,
+    /** Server id is ciphertext metadata, never message plaintext. */
+    val messageId: String? = null,
+    /** sent, delivered, or read. Only meaningful for outgoing messages. */
+    val deliveryStatus: String = "sent",
 )
 
 private fun AttachmentDescriptor.toJson(): JSONObject = JSONObject()
