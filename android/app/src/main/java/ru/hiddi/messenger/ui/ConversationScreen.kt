@@ -49,6 +49,8 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -117,10 +119,12 @@ fun ConversationScreen(
     onStopVoice: () -> Unit,
     onVoicePermissionDenied: () -> Unit,
     onClearHistory: () -> Unit,
+    onVerifyKey: () -> Unit,
     onSend: () -> Unit,
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    var menuExpanded by remember { mutableStateOf(false) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(onImageSelected)
     }
@@ -156,8 +160,22 @@ fun ConversationScreen(
                     Text("сквозное шифрование", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                 }
             }
-            IconButton(onClick = onClearHistory) {
-                Icon(Icons.Rounded.MoreVert, contentDescription = "Очистить историю на устройстве", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "Меню диалога", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Проверить ключ") },
+                        leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
+                        onClick = { menuExpanded = false; onVerifyKey() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Очистить историю") },
+                        leadingIcon = { Icon(Icons.Rounded.Close, contentDescription = null) },
+                        onClick = { menuExpanded = false; onClearHistory() },
+                    )
+                }
             }
         }
 

@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.signal.libsignal.protocol.IdentityKey
+import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
@@ -22,6 +23,7 @@ import ru.hiddi.messenger.security.SignalStateRepository
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
+import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
     suspend fun findUsers(profile: AccountProfile, nickname: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
@@ -118,6 +120,20 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     suspend fun pendingConversationDeletions(profile: AccountProfile): List<String> = withContext(Dispatchers.IO) {
         val response = JSONArray(request("GET", "${profile.serverUrl}/v1/conversations/deletions", null, profile.accessToken))
         List(response.length()) { response.getJSONObject(it).getString("peer_nickname") }
+    }
+
+    /** Deterministic code for an out-of-band identity-key comparison. No secret leaves the device. */
+    suspend fun safetyNumber(profile: AccountProfile, peer: String): String = withContext(Dispatchers.IO) {
+        val normalized = peer.trim().removePrefix("@").lowercase()
+        val remote = JSONObject(request("GET", "${profile.serverUrl}/v1/users/$normalized", null, profile.accessToken))
+        val localPublic = IdentityKeyPair(repository.load().keys.identity).publicKey.serialize()
+        val participants = listOf(
+            "${profile.nickname}\u0000${localPublic.b64()}",
+            "${remote.getString("nickname")}\u0000${remote.getString("identity_public_key")}",
+        ).sorted()
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(("hiddi-safety-number-v1\u0000" + participants.joinToString("\u0000")).encodeToByteArray())
+        digest.take(30).joinToString("") { "%02x".format(it) }.chunked(5).joinToString(" ")
     }
 
     suspend fun inbox(profile: AccountProfile): List<DecryptedMessage> = withContext(Dispatchers.IO) {

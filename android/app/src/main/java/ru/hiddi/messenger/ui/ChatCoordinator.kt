@@ -127,6 +127,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var connection by remember { mutableStateOf(ServerConnection.CHECKING) }
     var showClearHistoryDialog by rememberSaveable { mutableStateOf(false) }
     var clearForBothSides by rememberSaveable { mutableStateOf(false) }
+    var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
+    var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
@@ -486,6 +488,17 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onStopVoice = ::stopAndSendVoice,
                 onVoicePermissionDenied = { status = "Без доступа к микрофону нельзя записать войс" },
                 onClearHistory = { clearForBothSides = false; showClearHistoryDialog = true },
+                onVerifyKey = {
+                    val target = recipient ?: return@ConversationScreen
+                    safetyNumber = null
+                    showSafetyNumberDialog = true
+                    scope.launch {
+                        safetyNumber = runCatching { api.safetyNumber(profile, target) }.getOrElse {
+                            status = it.message ?: "Не удалось получить ключ собеседника"
+                            "Ошибка получения кода"
+                        }
+                    }
+                },
                 onSend = {
                     val target = recipient ?: return@ConversationScreen
                     val text = draft.trim()
@@ -529,6 +542,23 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             dismissButton = {
                 TextButton(onClick = { showClearHistoryDialog = false }) { Text("Отмена") }
             },
+        )
+    }
+
+    if (showSafetyNumberDialog && recipient != null) {
+        AlertDialog(
+            onDismissRequest = { showSafetyNumberDialog = false },
+            title = { Text("Проверка ключа @$recipient") },
+            text = {
+                Column {
+                    Text("Сверьте этот код у себя и у @$recipient по голосу или лично. Совпадение подтверждает ключи этого диалога.")
+                    Spacer(Modifier.height(16.dp))
+                    Text(safetyNumber ?: "Получаем код…", style = MaterialTheme.typography.titleMedium, letterSpacing = 1.sp)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Если код изменился неожиданно, не отправляйте секретные данные до проверки.", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSafetyNumberDialog = false }) { Text("Готово") } },
         )
     }
 }
