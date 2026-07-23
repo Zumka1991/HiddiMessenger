@@ -1,0 +1,9 @@
+[package]
+name = "hiddi-group-mls-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+openmls = { version = "0.8.1", features = ["openmls_rust_crypto"] }
+

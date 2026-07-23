@@ -10,6 +10,10 @@
 Android/desktop через небольшой Rust bridge. Сервер Rust не расшифровывает MLS
 состояние, application messages, commits или welcomes.
 
+Первый crate `group-mls-core` уже закрепляет OpenMLS 0.8.1, MLS 1.0 и
+версионированный opaque envelope. Он ещё не создаёт группы: это намеренная
+граница, пока Android bridge и персистентное MLS state не пройдут тесты.
+
 ## Что видит сервер
 
 * Случайный `group_id`, аккаунты текущих участников и их роли.
