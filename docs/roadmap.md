@@ -70,6 +70,7 @@
 * [x] Выбран OpenMLS (RFC 9420) как общий Rust core для Android и desktop.
 * [x] Выделен `group-mls-core`: OpenMLS 0.8.1, MLS 1.0 и versioned opaque
   envelopes с unit-тестами.
+* [x] Android Keystore storage boundary для непрозрачного MLS group state.
 * [ ] Rust bridge OpenMLS для Android и локальное зашифрованное group state.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.
