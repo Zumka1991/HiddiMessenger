@@ -11,7 +11,7 @@ pub mod storage;
 use jni::{
     EnvUnowned,
     objects::{JByteArray, JClass, JString},
-    sys::jboolean,
+    sys::{jboolean, jbyteArray},
 };
 
 pub const ENVELOPE_VERSION: u8 = 1;
@@ -141,6 +141,25 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIn
                     .and_then(|path| storage::initialize_persistent_provider(path).ok())
                     .is_some() as jboolean,
             )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+/// Creates a one-member MLS group in the initialized encrypted provider and
+/// returns its random MLS group id. No network operation happens here.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCreateLocalGroup(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    device_identity: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let identity = env.convert_byte_array(&device_identity)?;
+            let group_id = storage::create_local_group(&identity)
+                .map_err(|_| jni::errors::Error::NullPtr("could not create MLS group"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&group_id)?.into_raw())
         })
         .resolve::<jni::errors::LogErrorAndDefault>()
 }

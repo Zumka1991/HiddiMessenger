@@ -245,7 +245,7 @@ private fun RegistrationScreen(
                     try {
                         val crypto = SignalCryptoBoundary(AndroidKeystoreSecretStore(context))
                         val device = RegistrationApi(crypto).register(serverUrl, nickname, inviteCode)
-                        val profile = AccountProfile(serverUrl, nickname, device.accessToken)
+                        val profile = AccountProfile(serverUrl, nickname, device.accessToken, device.deviceId)
                         AccountStore(context).save(profile)
                         onRegistered(profile)
                         message = "Устройство зарегистрировано: @${nickname.removePrefix("@")}"

@@ -26,6 +26,36 @@ import java.net.URL
 import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
+    /** Sends only group routing metadata; MLS state and keys never leave the native core. */
+    suspend fun createGroup(
+        profile: AccountProfile,
+        mlsGroupId: ByteArray,
+        members: List<GroupMember>,
+    ): String = withContext(Dispatchers.IO) {
+        require(mlsGroupId.size in 8..64) { "Некорректный MLS group id" }
+        require(members.size <= 31) { "Слишком много участников группы" }
+        val memberJson = JSONArray().also { output ->
+            members.forEach { member ->
+                output.put(
+                    JSONObject()
+                        .put("nickname", member.nickname.trim().removePrefix("@").lowercase())
+                        .put("role", member.role),
+                )
+            }
+        }
+        JSONObject(
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/groups",
+                JSONObject()
+                    .put("group_id", mlsGroupId.b64())
+                    .put("members", memberJson)
+                    .toString(),
+                profile.accessToken,
+            ),
+        ).getString("group_id")
+    }
+
     suspend fun findUsers(profile: AccountProfile, nickname: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
         val normalized = nickname.trim().removePrefix("@").lowercase()
         val encodedQuery = URLEncoder.encode(normalized, Charsets.UTF_8.name())
@@ -204,6 +234,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
 
 data class DecryptedMessage(val senderNickname: String, val text: String, val createdAt: String)
 data class UserSearchResult(val nickname: String)
+data class GroupMember(val nickname: String, val role: String = "member")
 enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

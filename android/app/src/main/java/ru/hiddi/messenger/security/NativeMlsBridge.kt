@@ -27,7 +27,12 @@ object NativeMlsBridge {
                 )
         }.getOrDefault(false)
 
+    /** Creates a local one-member MLS group; transport is handled separately. */
+    fun createLocalGroup(deviceId: String): ByteArray? =
+        if (loaded) nativeCreateLocalGroup(deviceId.encodeToByteArray()) else null
+
     private external fun nativeIsValidEnvelope(encoded: ByteArray): Boolean
     private external fun nativeConfigureStorageKey(key: ByteArray): Boolean
     private external fun nativeInitializePersistentStorage(path: String): Boolean
+    private external fun nativeCreateLocalGroup(deviceIdentity: ByteArray): ByteArray?
 }

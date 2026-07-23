@@ -80,12 +80,18 @@ class AccountStore(context: android.content.Context) {
             .put("server", profile.serverUrl.trimEnd('/'))
             .put("nickname", profile.nickname.removePrefix("@").lowercase())
             .put("token", profile.accessToken)
+            .put("device_id", profile.deviceId)
             .toString().encodeToByteArray(),
     )
 
     fun read(): AccountProfile? = runCatching {
         store.read()?.decodeToString()?.let(::JSONObject)?.let {
-            AccountProfile(it.getString("server"), it.getString("nickname"), it.getString("token"))
+            AccountProfile(
+                it.getString("server"),
+                it.getString("nickname"),
+                it.getString("token"),
+                it.optString("device_id").takeIf(String::isNotBlank),
+            )
         }
     }.getOrNull()
 
@@ -107,7 +113,12 @@ data class RegisteredDevice(
     val accessToken: String,
 )
 
-data class AccountProfile(val serverUrl: String, val nickname: String, val accessToken: String)
+data class AccountProfile(
+    val serverUrl: String,
+    val nickname: String,
+    val accessToken: String,
+    val deviceId: String? = null,
+)
 
 private fun ByteArray.base64Url(): String = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun PublicPreKey.toJson(): JSONObject = JSONObject().put("id", id).put("public_key", publicKey.base64Url()).also { json ->
