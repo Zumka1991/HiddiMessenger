@@ -12,7 +12,7 @@ use aes_siv::{
     aead::{Aead, KeyInit, Payload},
 };
 use openmls::prelude::{
-    BasicCredential, Ciphersuite, CredentialWithKey, MlsGroup, MlsGroupCreateConfig,
+    BasicCredential, Ciphersuite, CredentialWithKey, GroupId, MlsGroup, MlsGroupCreateConfig,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
@@ -93,6 +93,27 @@ pub fn create_local_group(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.create_group(device_identity)
+}
+
+/// Permanently removes a locally stored MLS group. This is for an explicit
+/// user cancellation/deletion only; transient network failures must retain the
+/// state for a durable registration retry.
+pub fn delete_local_group(group_id: &[u8]) -> Result<(), StorageError> {
+    if !(8..=64).contains(&group_id.len()) {
+        return Err(StorageError::OpenMls("invalid MLS group id".to_owned()));
+    }
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+        .map_err(|error| StorageError::OpenMls(error.to_string()))?
+        .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
+    group
+        .delete(provider.storage())
+        .map_err(|error| StorageError::OpenMls(error.to_string()))
 }
 
 /// Codec used by OpenMLS' upstream SQLite provider. Query keys must remain

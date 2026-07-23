@@ -164,6 +164,25 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCr
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeDeleteLocalGroup(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+) -> jboolean {
+    unowned_env
+        .with_env(|env| {
+            Ok::<jboolean, jni::errors::Error>(
+                env.convert_byte_array(&group_id)
+                    .ok()
+                    .and_then(|bytes| storage::delete_local_group(&bytes).ok())
+                    .is_some() as jboolean,
+            )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

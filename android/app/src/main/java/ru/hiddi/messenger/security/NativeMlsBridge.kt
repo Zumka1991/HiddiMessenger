@@ -31,8 +31,12 @@ object NativeMlsBridge {
     fun createLocalGroup(deviceId: String): ByteArray? =
         if (loaded) nativeCreateLocalGroup(deviceId.encodeToByteArray()) else null
 
+    /** Explicit deletion only; failed network registration must be retried, not erased. */
+    fun deleteLocalGroup(groupId: ByteArray): Boolean = loaded && nativeDeleteLocalGroup(groupId)
+
     private external fun nativeIsValidEnvelope(encoded: ByteArray): Boolean
     private external fun nativeConfigureStorageKey(key: ByteArray): Boolean
     private external fun nativeInitializePersistentStorage(path: String): Boolean
     private external fun nativeCreateLocalGroup(deviceIdentity: ByteArray): ByteArray?
+    private external fun nativeDeleteLocalGroup(groupId: ByteArray): Boolean
 }
