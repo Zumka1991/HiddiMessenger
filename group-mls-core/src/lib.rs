@@ -10,7 +10,7 @@ pub mod storage;
 #[cfg(target_os = "android")]
 use jni::{
     EnvUnowned,
-    objects::{JByteArray, JClass},
+    objects::{JByteArray, JClass, JString},
     sys::jboolean,
 };
 
@@ -116,6 +116,29 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCo
                 env.convert_byte_array(&key)
                     .ok()
                     .and_then(|bytes| storage::configure_storage_key(&bytes).ok())
+                    .is_some() as jboolean,
+            )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+/// Opens the process-local encrypted MLS SQLite provider at an app-private
+/// Android path. The path carries no user-visible data; all MLS records remain
+/// encrypted by the already configured Keystore-backed profile key.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeInitializePersistentStorage(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    path: JString,
+) -> jboolean {
+    unowned_env
+        .with_env(|env| {
+            Ok::<jboolean, jni::errors::Error>(
+                path.try_to_string(&env)
+                    .ok()
+                    .filter(|value| !value.is_empty())
+                    .and_then(|path| storage::initialize_persistent_provider(path).ok())
                     .is_some() as jboolean,
             )
         })

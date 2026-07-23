@@ -18,12 +18,16 @@ object NativeMlsBridge {
 
     fun isValidEnvelope(encoded: ByteArray): Boolean = loaded && nativeIsValidEnvelope(encoded)
 
-    /** Prepares the encrypted OpenMLS SQLite storage for this app process. */
+    /** Prepares and opens the encrypted OpenMLS SQLite storage for this app process. */
     fun preparePersistentStorage(context: Context): Boolean =
         loaded && runCatching {
-            nativeConfigureStorageKey(MlsStorageKeyStore(context.applicationContext).loadOrCreate())
+            nativeConfigureStorageKey(MlsStorageKeyStore(context.applicationContext).loadOrCreate()) &&
+                nativeInitializePersistentStorage(
+                    context.applicationContext.noBackupFilesDir.resolve("group-mls.sqlite").absolutePath,
+                )
         }.getOrDefault(false)
 
     private external fun nativeIsValidEnvelope(encoded: ByteArray): Boolean
     private external fun nativeConfigureStorageKey(key: ByteArray): Boolean
+    private external fun nativeInitializePersistentStorage(path: String): Boolean
 }

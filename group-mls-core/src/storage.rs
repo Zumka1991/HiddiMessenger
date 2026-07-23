@@ -4,6 +4,7 @@
 //! encrypts opaque serialized records before they reach SQLite.  This avoids a
 //! fragile, home-grown serialization of ratchet and epoch secrets.
 
+use std::sync::Mutex;
 use std::{path::Path, sync::OnceLock};
 
 use aes_siv::{
@@ -21,6 +22,7 @@ const STORAGE_AAD: &[u8] = b"hiddi-openmls-sqlite-v1";
 const MIN_ENCRYPTED_RECORD_BYTES: usize = 1 + 16;
 
 static STORAGE_KEY: OnceLock<[u8; 64]> = OnceLock::new();
+static PERSISTENT_PROVIDER: OnceLock<Mutex<EncryptedSqliteMlsProvider>> = OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -59,6 +61,19 @@ pub fn configure_storage_key(key: &[u8]) -> Result<(), StorageError> {
     STORAGE_KEY
         .set(key)
         .map_err(|_| StorageError::KeyAlreadyConfigured)
+}
+
+/// Opens the per-profile database after its key has been supplied. The provider
+/// stays process-local, which prevents a second path or a second profile from
+/// silently replacing active MLS state.
+pub fn initialize_persistent_provider(path: impl AsRef<Path>) -> Result<(), StorageError> {
+    storage_key()?;
+    if PERSISTENT_PROVIDER.get().is_some() {
+        return Ok(());
+    }
+    let provider = Mutex::new(EncryptedSqliteMlsProvider::open(path)?);
+    let _ = PERSISTENT_PROVIDER.set(provider);
+    Ok(())
 }
 
 /// Codec used by OpenMLS' upstream SQLite provider. Query keys must remain
