@@ -100,6 +100,28 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIs
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
 
+/// Receives a 64-byte profile key only after Kotlin has unwrapped it using the
+/// Android Keystore. The Rust core keeps it in process memory and never writes
+/// it itself; a different configured key fails closed.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeConfigureStorageKey(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    key: JByteArray,
+) -> jboolean {
+    unowned_env
+        .with_env(|env| {
+            Ok::<jboolean, jni::errors::Error>(
+                env.convert_byte_array(&key)
+                    .ok()
+                    .and_then(|bytes| storage::configure_storage_key(&bytes).ok())
+                    .is_some() as jboolean,
+            )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

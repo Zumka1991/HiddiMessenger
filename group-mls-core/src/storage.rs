@@ -50,6 +50,12 @@ pub enum StorageError {
 /// OS keychain). The key is never persisted by this crate.
 pub fn configure_storage_key(key: &[u8]) -> Result<(), StorageError> {
     let key: [u8; 64] = key.try_into().map_err(|_| StorageError::InvalidKeyLength)?;
+    if STORAGE_KEY
+        .get()
+        .is_some_and(|configured| configured == &key)
+    {
+        return Ok(());
+    }
     STORAGE_KEY
         .set(key)
         .map_err(|_| StorageError::KeyAlreadyConfigured)
@@ -181,6 +187,11 @@ pub(crate) mod tests {
     #[test]
     fn encrypted_codec_round_trips_and_rejects_tampering() {
         configure_test_storage_key();
+        assert!(configure_storage_key(&[0xA5; 64]).is_ok());
+        assert!(matches!(
+            configure_storage_key(&[0x5A; 64]),
+            Err(StorageError::KeyAlreadyConfigured)
+        ));
 
         let encoded = EncryptedJsonCodec::to_vec(&"family MLS state").unwrap();
         assert!(!encoded.windows(6).any(|window| window == b"family"));

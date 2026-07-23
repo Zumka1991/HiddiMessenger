@@ -108,6 +108,7 @@ import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
+import ru.hiddi.messenger.security.NativeMlsBridge
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
 
@@ -117,6 +118,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        NativeMlsBridge.preparePersistentStorage(applicationContext)
         requestedPeer = intent.getStringExtra(MessagingService.EXTRA_OPEN_PEER)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED

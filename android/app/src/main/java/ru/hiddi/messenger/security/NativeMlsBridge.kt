@@ -1,5 +1,7 @@
 package ru.hiddi.messenger.security
 
+import android.content.Context
+
 /**
  * Deliberately tiny JNI boundary for the Rust/OpenMLS core.
  *
@@ -16,5 +18,12 @@ object NativeMlsBridge {
 
     fun isValidEnvelope(encoded: ByteArray): Boolean = loaded && nativeIsValidEnvelope(encoded)
 
+    /** Prepares the encrypted OpenMLS SQLite storage for this app process. */
+    fun preparePersistentStorage(context: Context): Boolean =
+        loaded && runCatching {
+            nativeConfigureStorageKey(MlsStorageKeyStore(context.applicationContext).loadOrCreate())
+        }.getOrDefault(false)
+
     private external fun nativeIsValidEnvelope(encoded: ByteArray): Boolean
+    private external fun nativeConfigureStorageKey(key: ByteArray): Boolean
 }
