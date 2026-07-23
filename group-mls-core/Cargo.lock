@@ -476,6 +476,9 @@ version = "0.1.0"
 dependencies = [
  "jni",
  "openmls",
+ "openmls_basic_credential",
+ "openmls_rust_crypto",
+ "openmls_traits",
 ]
 
 [[package]]
@@ -939,6 +942,20 @@ dependencies = [
  "thiserror",
  "tls_codec",
  "zeroize",
+]
+
+[[package]]
+name = "openmls_basic_credential"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "983e8be1457dd6f316f409292cec334af3b57b49a19deadc925c83c3c35e15b6"
+dependencies = [
+ "ed25519-dalek",
+ "openmls_traits",
+ "p256",
+ "rand 0.8.7",
+ "serde",
+ "tls_codec",
 ]
 
 [[package]]
