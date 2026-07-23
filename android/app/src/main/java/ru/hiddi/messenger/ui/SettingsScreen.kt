@@ -1,6 +1,7 @@
 package ru.hiddi.messenger
 
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -20,11 +21,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -50,6 +53,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -70,6 +75,7 @@ fun SettingsScreen(
     onLogout: () -> Unit,
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var profile by remember { mutableStateOf<UserSearchResult?>(null) }
     var displayName by remember { mutableStateOf("") }
@@ -79,6 +85,9 @@ fun SettingsScreen(
     var saving by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showLinkDialog by remember { mutableStateOf(false) }
+    var linkCode by remember { mutableStateOf<String?>(null) }
+    var creatingLinkCode by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
     suspend fun reload() {
@@ -374,12 +383,35 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(14.dp))
             Text(
-                "СЕССИЯ УСТРОЙСТВА",
+                "УСТРОЙСТВА",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
             )
+            OutlinedButton(
+                onClick = {
+                    if (creatingLinkCode) return@OutlinedButton
+                    creatingLinkCode = true
+                    scope.launch {
+                        try {
+                            linkCode = api.createDeviceLinkCode(account).code
+                            showLinkDialog = true
+                        } catch (error: Exception) {
+                            status = error.message ?: "Не удалось создать код привязки"
+                        } finally {
+                            creatingLinkCode = false
+                        }
+                    }
+                },
+                enabled = !saving && !loggingOut && !creatingLinkCode,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(Icons.Rounded.Computer, contentDescription = null)
+                Spacer(Modifier.size(9.dp))
+                Text(if (creatingLinkCode) "Создаём код…" else "Привязать компьютер")
+            }
+            Spacer(Modifier.height(10.dp))
             OutlinedButton(
                 onClick = { showLogoutDialog = true },
                 enabled = !saving && !loggingOut,
@@ -398,6 +430,51 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (showLinkDialog && linkCode != null) {
+        AlertDialog(
+            onDismissRequest = { showLinkDialog = false },
+            title = { Text("Привязать Linux-клиент") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Введите этот одноразовый код в Hiddi Desktop. Код действует 10 минут. " +
+                            "Компьютер создаст собственные Signal-ключи; приватные ключи телефона " +
+                            "никуда не передаются.",
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                linkCode!!,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(14.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(linkCode!!))
+                        Toast.makeText(context, "Код скопирован", Toast.LENGTH_SHORT).show()
+                    },
+                ) {
+                    Text("Копировать")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLinkDialog = false }) {
+                    Text("Закрыть")
+                }
+            },
+        )
     }
 
     if (showLogoutDialog) {

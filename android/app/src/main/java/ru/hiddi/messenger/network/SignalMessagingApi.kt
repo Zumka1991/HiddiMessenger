@@ -27,6 +27,40 @@ import java.net.URL
 import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
+    suspend fun createDeviceLinkCode(profile: AccountProfile): DeviceLinkCode =
+        withContext(Dispatchers.IO) {
+            val response = JSONObject(
+                request(
+                    "POST",
+                    "${profile.serverUrl}/v1/devices/link-code",
+                    null,
+                    profile.accessToken,
+                ),
+            )
+            DeviceLinkCode(
+                code = response.getString("link_code"),
+                expiresAt = response.getLong("expires_at"),
+            )
+        }
+
+    suspend fun linkedDevices(profile: AccountProfile): List<LinkedDevice> =
+        withContext(Dispatchers.IO) {
+            val response = JSONArray(
+                request("GET", "${profile.serverUrl}/v1/devices", null, profile.accessToken),
+            )
+            List(response.length()) { index ->
+                response.getJSONObject(index).let {
+                    LinkedDevice(
+                        deviceId = it.getString("device_id"),
+                        deviceNumber = it.getInt("device_number"),
+                        deviceName = it.getString("device_name"),
+                        current = it.getBoolean("current"),
+                        createdAt = it.getString("created_at"),
+                    )
+                }
+            }
+        }
+
     suspend fun deleteCurrentDevice(profile: AccountProfile) = withContext(Dispatchers.IO) {
         request(
             "DELETE",
@@ -552,7 +586,10 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                 val store = AndroidSignalProtocolStore(state)
                 val sender = item.getString("sender_nickname")
                 val local = SignalProtocolAddress(profile.nickname, DEVICE_ID)
-                val remote = SignalProtocolAddress(sender, DEVICE_ID)
+                val remote = SignalProtocolAddress(
+                    sender,
+                    item.optInt("sender_device_number", DEVICE_ID),
+                )
                 val raw = item.getString("ciphertext").decode()
                 require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
                 val plain = when (raw.first().toInt()) {
@@ -580,7 +617,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         val kyberSigned = bundle.getJSONObject("kyber_signed_prekey")
         val oneTime = bundle.optJSONObject("one_time_prekey")
         val kyberOneTime = bundle.optJSONObject("kyber_one_time_prekey")
-        return PreKeyBundle(bundle.getInt("registration_id"), DEVICE_ID,
+        return PreKeyBundle(bundle.getInt("registration_id"), bundle.optInt("device_number", DEVICE_ID),
             oneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID, oneTime?.let { ECPublicKey(it.getString("public_key").decode()) },
             signed.getInt("id"), ECPublicKey(signed.getString("public_key").decode()), signed.getString("signature").decode(), IdentityKey(bundle.getString("identity_public_key").decode()),
             kyberOneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID,
@@ -618,6 +655,14 @@ data class DecryptedMessage(
     val messageId: String,
     val senderNickname: String,
     val text: String,
+    val createdAt: String,
+)
+data class DeviceLinkCode(val code: String, val expiresAt: Long)
+data class LinkedDevice(
+    val deviceId: String,
+    val deviceNumber: Int,
+    val deviceName: String,
+    val current: Boolean,
     val createdAt: String,
 )
 data class MessageDeletion(val deletionId: String, val messageId: String)

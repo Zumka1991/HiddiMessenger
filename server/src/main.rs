@@ -6,7 +6,7 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -85,12 +85,15 @@ struct RegisterRequest {
     invite_code: String,
     identity_public_key: String,
     registration_id: u32,
+    #[serde(default)]
+    device_name: String,
 }
 
 #[derive(Serialize)]
 struct RegisterResponse {
     account_id: Uuid,
     device_id: Uuid,
+    device_number: u32,
     registration_id: u32,
     access_token: String,
 }
@@ -98,7 +101,41 @@ struct RegisterResponse {
 #[derive(Serialize)]
 struct CurrentDeviceResponse {
     device_id: Uuid,
+    device_number: u32,
     registration_id: u32,
+}
+
+#[derive(Serialize)]
+struct DeviceResponse {
+    device_id: Uuid,
+    device_number: u32,
+    device_name: String,
+    current: bool,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct DeviceLinkCodeResponse {
+    link_code: String,
+    expires_at: i64,
+}
+
+#[derive(Deserialize)]
+struct LinkDeviceRequest {
+    link_code: String,
+    identity_public_key: String,
+    registration_id: u32,
+    device_name: String,
+}
+
+#[derive(Serialize)]
+struct LinkDeviceResponse {
+    account_id: Uuid,
+    nickname: String,
+    device_id: Uuid,
+    device_number: u32,
+    registration_id: u32,
+    access_token: String,
 }
 
 #[derive(Serialize)]
@@ -265,6 +302,7 @@ struct MlsKeyPackageResponse {
 struct MessageResponse {
     message_id: Uuid,
     sender_nickname: String,
+    sender_device_number: u32,
     ciphertext: String,
     created_at: String,
 }
@@ -337,6 +375,7 @@ struct PrekeyBundleResponse {
     account_id: Uuid,
     nickname: String,
     device_id: Uuid,
+    device_number: u32,
     registration_id: u32,
     identity_public_key: String,
     signed_prekey: StoredPreKey,
@@ -429,6 +468,9 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/admin/invites", post(create_invite))
         .route("/v1/auth/register", post(register))
+        .route("/v1/devices", get(list_devices))
+        .route("/v1/devices/link-code", post(create_device_link_code))
+        .route("/v1/devices/link", post(link_device))
         .route("/v1/devices/prekeys", put(upload_prekeys))
         .route(
             "/v1/devices/current",
@@ -611,16 +653,17 @@ async fn current_device(
         .db
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    let registration_id = db
+    let (registration_id, device_number) = db
         .query_row(
-            "SELECT registration_id FROM devices WHERE id = ?1",
+            "SELECT registration_id, device_number FROM devices WHERE id = ?1",
             params![device.device_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load device"))?;
     Ok(Json(CurrentDeviceResponse {
         device_id: Uuid::parse_str(&device.device_id)
             .expect("authenticated device id is a valid UUID"),
+        device_number,
         registration_id,
     }))
 }
@@ -667,7 +710,8 @@ async fn take_prekey_bundle(
         .unchecked_transaction()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let bundle = transaction.query_row(
-        "SELECT accounts.id, accounts.nickname, devices.id, devices.registration_id, devices.identity_public_key,
+        "SELECT accounts.id, accounts.nickname, devices.id, devices.device_number,
+                devices.registration_id, devices.identity_public_key,
                 prekey_bundles.signed_prekey_id, prekey_bundles.signed_prekey,
                 prekey_bundles.signed_prekey_signature, prekey_bundles.kyber_signed_prekey_id,
                 prekey_bundles.kyber_signed_prekey, prekey_bundles.kyber_signed_prekey_signature
@@ -682,17 +726,18 @@ async fn take_prekey_bundle(
                 account_id: Uuid::parse_str(&account_id).expect("database contains valid UUIDs"),
                 nickname: row.get(1)?,
                 device_id: Uuid::parse_str(&device_id).expect("database contains valid UUIDs"),
-                registration_id: row.get(3)?,
-                identity_public_key: row.get(4)?,
+                device_number: row.get(3)?,
+                registration_id: row.get(4)?,
+                identity_public_key: row.get(5)?,
                 signed_prekey: StoredPreKey {
-                    id: row.get(5)?,
-                    public_key: row.get(6)?,
-                    signature: row.get(7)?,
+                    id: row.get(6)?,
+                    public_key: row.get(7)?,
+                    signature: row.get(8)?,
                 },
                 kyber_signed_prekey: StoredPreKey {
-                    id: row.get(8)?,
-                    public_key: row.get(9)?,
-                    signature: row.get(10)?,
+                    id: row.get(9)?,
+                    public_key: row.get(10)?,
+                    signature: row.get(11)?,
                 },
                 one_time_prekey: None,
                 kyber_one_time_prekey: None,
@@ -802,15 +847,8 @@ async fn register(
         .check("register", 12, Duration::from_secs(60))?;
     let nickname = normalize_nickname(&request.nickname)
         .ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
-    if request.identity_public_key.len() < 20 || request.identity_public_key.len() > 4096 {
-        return Err(Error(
-            StatusCode::BAD_REQUEST,
-            "invalid identity public key",
-        ));
-    }
-    if !(1..=16_380).contains(&request.registration_id) {
-        return Err(Error(StatusCode::BAD_REQUEST, "invalid registration id"));
-    }
+    validate_device_material(&request.identity_public_key, request.registration_id)?;
+    let device_name = normalize_device_name(&request.device_name, "Android");
     let account_id = Uuid::new_v4();
     let device_id = Uuid::new_v4();
     let access_token = random_token(48);
@@ -849,8 +887,17 @@ async fn register(
         };
     }
     transaction.execute(
-        "INSERT INTO devices (id, account_id, identity_public_key, access_token_hash, registration_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![device_id.to_string(), account_id.to_string(), request.identity_public_key, token_hash, request.registration_id],
+        "INSERT INTO devices
+         (id, account_id, identity_public_key, access_token_hash, registration_id, device_number, device_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+        params![
+            device_id.to_string(),
+            account_id.to_string(),
+            request.identity_public_key,
+            token_hash,
+            request.registration_id,
+            device_name,
+        ],
     ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not create device"))?;
     transaction.commit().map_err(|_| {
         Error(
@@ -863,10 +910,216 @@ async fn register(
         Json(RegisterResponse {
             account_id,
             device_id,
+            device_number: 1,
             registration_id: request.registration_id,
             access_token,
         }),
     ))
+}
+
+async fn create_device_link_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<DeviceLinkCodeResponse>), Error> {
+    let account = authenticate(&state, &headers)?;
+    state.rate_limiter.check(
+        format!("device-link:{}", account.account_id),
+        6,
+        Duration::from_secs(60),
+    )?;
+    let link_code = random_token(32);
+    let expires_at = unix_time() + 10 * 60;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    transaction
+        .execute(
+            "DELETE FROM device_link_sessions
+             WHERE account_id = ?1 AND (consumed_at IS NOT NULL OR expires_at < ?2)",
+            params![account.account_id, unix_time()],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not clean device link sessions",
+            )
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO device_link_sessions
+             (id, account_id, authorized_by_device_id, code_hash, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                account.account_id,
+                account.device_id,
+                hash(&link_code),
+                expires_at,
+            ],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create device link code",
+            )
+        })?;
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not finalize device link code",
+        )
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(DeviceLinkCodeResponse {
+            link_code,
+            expires_at,
+        }),
+    ))
+}
+
+async fn link_device(
+    State(state): State<AppState>,
+    Json(request): Json<LinkDeviceRequest>,
+) -> Result<(StatusCode, Json<LinkDeviceResponse>), Error> {
+    state
+        .rate_limiter
+        .check("device-link-consume", 20, Duration::from_secs(60))?;
+    validate_device_material(&request.identity_public_key, request.registration_id)?;
+    if request.link_code.len() < 32 || request.link_code.len() > 128 {
+        return Err(Error(StatusCode::UNAUTHORIZED, "invalid device link code"));
+    }
+    let device_name = normalize_device_name(&request.device_name, "Desktop");
+    let access_token = random_token(48);
+    let device_id = Uuid::new_v4();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let (session_id, account_id, nickname): (String, String, String) = transaction
+        .query_row(
+            "SELECT device_link_sessions.id, accounts.id, accounts.nickname
+             FROM device_link_sessions
+             JOIN accounts ON accounts.id = device_link_sessions.account_id
+             WHERE device_link_sessions.code_hash = ?1
+               AND device_link_sessions.consumed_at IS NULL
+               AND device_link_sessions.expires_at >= ?2",
+            params![hash(&request.link_code), unix_time()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Error(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired device link code",
+            ),
+            _ => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not validate device link code",
+            ),
+        })?;
+    let device_number: u32 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(device_number), 0) + 1 FROM devices WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not allocate device number",
+            )
+        })?;
+    if device_number > 127 {
+        return Err(Error(StatusCode::CONFLICT, "device limit reached"));
+    }
+    transaction
+        .execute(
+            "INSERT INTO devices
+             (id, account_id, identity_public_key, access_token_hash, registration_id,
+              device_number, device_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                device_id.to_string(),
+                account_id,
+                request.identity_public_key,
+                hash(&access_token),
+                request.registration_id,
+                device_number,
+                device_name,
+            ],
+        )
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not link device"))?;
+    let consumed = transaction
+        .execute(
+            "UPDATE device_link_sessions SET consumed_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND consumed_at IS NULL",
+            params![session_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not consume device link code",
+            )
+        })?;
+    if consumed != 1 {
+        return Err(Error(StatusCode::CONFLICT, "device link code already used"));
+    }
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not finalize linked device",
+        )
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(LinkDeviceResponse {
+            account_id: Uuid::parse_str(&account_id).expect("database contains valid UUID"),
+            nickname,
+            device_id,
+            device_number,
+            registration_id: request.registration_id,
+            access_token,
+        }),
+    ))
+}
+
+async fn list_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DeviceResponse>>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT id, device_number, device_name, created_at
+             FROM devices WHERE account_id = ?1 ORDER BY device_number",
+        )
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not list devices"))?;
+    let devices = statement
+        .query_map(params![account.account_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(DeviceResponse {
+                current: id == account.device_id,
+                device_id: Uuid::parse_str(&id).expect("database contains valid UUID"),
+                device_number: row.get(1)?,
+                device_name: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not list devices"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not list devices"))?;
+    Ok(Json(devices))
 }
 
 async fn find_user(
@@ -1281,11 +1534,13 @@ async fn send_message(
         ));
     }
     db.execute(
-        "INSERT INTO messages (id, sender_account_id, recipient_account_id, ciphertext)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO messages
+         (id, sender_account_id, sender_device_id, recipient_account_id, ciphertext)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             message_id.to_string(),
             sender.account_id,
+            sender.device_id,
             recipient_id,
             request.ciphertext
         ],
@@ -2552,7 +2807,12 @@ async fn inbox(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let mut statement = db
         .prepare(
-            "SELECT messages.id, accounts.nickname, messages.ciphertext, messages.created_at
+            "SELECT messages.id, accounts.nickname,
+                    COALESCE((
+                      SELECT device_number FROM devices
+                      WHERE devices.id = messages.sender_device_id
+                    ), 1),
+                    messages.ciphertext, messages.created_at
          FROM messages JOIN accounts ON accounts.id = messages.sender_account_id
          WHERE messages.recipient_account_id = ?1 AND messages.delivered_at IS NULL
          ORDER BY messages.created_at ASC LIMIT 100",
@@ -2564,8 +2824,9 @@ async fn inbox(
             Ok(MessageResponse {
                 message_id: Uuid::parse_str(&id).expect("database contains valid UUIDs"),
                 sender_nickname: row.get(1)?,
-                ciphertext: row.get(2)?,
-                created_at: row.get(3)?,
+                sender_device_number: row.get(2)?,
+                ciphertext: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load inbox"))?
@@ -3178,6 +3439,17 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             identity_public_key TEXT NOT NULL,
             access_token_hash TEXT NOT NULL UNIQUE,
             registration_id INTEGER NOT NULL DEFAULT 0,
+            device_number INTEGER NOT NULL DEFAULT 1,
+            device_name TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS device_link_sessions (
+            id TEXT PRIMARY KEY NOT NULL,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            authorized_by_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL UNIQUE,
+            expires_at INTEGER NOT NULL,
+            consumed_at TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS blocks (
@@ -3190,6 +3462,7 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY NOT NULL,
             sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            sender_device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
             recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             ciphertext BLOB NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -3313,6 +3586,52 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    let device_columns = db
+        .prepare("PRAGMA table_info(devices)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !device_columns
+        .iter()
+        .any(|column| column == "device_number")
+    {
+        db.execute(
+            "ALTER TABLE devices ADD COLUMN device_number INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        db.execute(
+            "UPDATE devices
+             SET device_number = (
+               SELECT COUNT(*) FROM devices AS earlier
+               WHERE earlier.account_id = devices.account_id
+                 AND (earlier.created_at < devices.created_at
+                      OR (earlier.created_at = devices.created_at AND earlier.id <= devices.id))
+             )",
+            [],
+        )?;
+    }
+    if !device_columns.iter().any(|column| column == "device_name") {
+        db.execute(
+            "ALTER TABLE devices ADD COLUMN device_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    db.execute(
+        "UPDATE devices SET device_name = CASE
+           WHEN device_number = 1 THEN 'Android'
+           ELSE 'Device ' || device_number
+         END WHERE device_name = ''",
+        [],
+    )?;
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_account_number
+         ON devices(account_id, device_number)",
+        [],
+    )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_link_sessions_expiry
+         ON device_link_sessions(account_id, expires_at)",
+        [],
+    )?;
     let has_delivered_at = db
         .prepare("PRAGMA table_info(messages)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -3330,6 +3649,19 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
         .any(|column| column == "read_at");
     if !has_read_at {
         db.execute("ALTER TABLE messages ADD COLUMN read_at TEXT", [])?;
+    }
+    let message_columns = db
+        .prepare("PRAGMA table_info(messages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !message_columns
+        .iter()
+        .any(|column| column == "sender_device_id")
+    {
+        db.execute(
+            "ALTER TABLE messages ADD COLUMN sender_device_id TEXT REFERENCES devices(id) ON DELETE SET NULL",
+            [],
+        )?;
     }
     let has_group_client_event_id = db
         .prepare("PRAGMA table_info(group_events)")?
@@ -3413,6 +3745,35 @@ fn authorized(headers: &HeaderMap, secret: &str) -> bool {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         == Some(expected.as_str())
+}
+
+fn unix_time() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after Unix epoch")
+        .as_secs() as i64
+}
+
+fn validate_device_material(identity_public_key: &str, registration_id: u32) -> Result<(), Error> {
+    if identity_public_key.len() < 20 || identity_public_key.len() > 4096 {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid identity public key",
+        ));
+    }
+    if !(1..=16_380).contains(&registration_id) {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid registration id"));
+    }
+    Ok(())
+}
+
+fn normalize_device_name(value: &str, fallback: &str) -> String {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        fallback.to_owned()
+    } else {
+        normalized.chars().take(64).collect()
+    }
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthenticatedAccount, Error> {
@@ -3862,6 +4223,57 @@ mod tests {
             String::new(),
         )
         .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authenticated_device_can_link_one_new_device_with_single_use_code() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+
+        let (status, link) = request(
+            &app,
+            "POST",
+            "/v1/devices/link-code",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let link_code = serde_json::from_str::<serde_json::Value>(&link).unwrap()["link_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let body = serde_json::json!({
+            "link_code": link_code,
+            "identity_public_key": URL_SAFE_NO_PAD.encode([7_u8; 33]),
+            "registration_id": 77,
+            "device_name": "Linux desktop",
+        })
+        .to_string();
+        let (status, linked) = request(&app, "POST", "/v1/devices/link", None, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let linked = serde_json::from_str::<serde_json::Value>(&linked).unwrap();
+        assert_eq!(linked["nickname"], "alice");
+        assert_eq!(linked["device_number"], 2);
+        let desktop_token = linked["access_token"].as_str().unwrap();
+
+        let (status, devices) = request(
+            &app,
+            "GET",
+            "/v1/devices",
+            Some(desktop_token),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let devices = serde_json::from_str::<serde_json::Value>(&devices).unwrap();
+        assert_eq!(devices.as_array().unwrap().len(), 2);
+        assert_eq!(devices[1]["device_name"], "Linux desktop");
+        assert_eq!(devices[1]["current"], true);
+
+        let (status, _) = request(&app, "POST", "/v1/devices/link", None, body).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
