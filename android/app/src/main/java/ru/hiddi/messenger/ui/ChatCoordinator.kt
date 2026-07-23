@@ -98,6 +98,8 @@ import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.TrustedSafetyNumberStore
+import ru.hiddi.messenger.security.readSafetyQr
+import ru.hiddi.messenger.security.safetyQrBitmap
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
 import java.time.Instant
@@ -132,6 +134,20 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
     var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
     var safetyNumberTrusted by rememberSaveable { mutableStateOf(false) }
+    val safetyQrPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val scanned = withContext(Dispatchers.IO) { readSafetyQr(context.contentResolver, uri) }
+            val expected = safetyNumber?.replace(" ", "")
+            if (scanned != null && scanned == expected && recipient != null) {
+                trustedSafetyNumbers.trust(recipient!!, safetyNumber!!)
+                safetyNumberTrusted = true
+                status = "QR-код совпал · ключ подтверждён"
+            } else {
+                status = "QR-код не совпадает с ключом этого диалога"
+            }
+        }
+    }
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
@@ -559,6 +575,13 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     Text("Сверьте этот код у себя и у @$recipient по голосу или лично. Совпадение подтверждает ключи этого диалога.")
                     Spacer(Modifier.height(16.dp))
                     Text(safetyNumber ?: "Получаем код…", style = MaterialTheme.typography.titleMedium, letterSpacing = 1.sp)
+                    safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let { code ->
+                        Image(
+                            bitmap = remember(code) { safetyQrBitmap(code).asImageBitmap() },
+                            contentDescription = "QR-код проверки ключа",
+                            modifier = Modifier.size(220.dp).align(Alignment.CenterHorizontally).padding(top = 14.dp),
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     Text(if (safetyNumberTrusted) "✓ Этот ключ уже подтверждён на устройстве." else "Если код изменился неожиданно, не отправляйте секретные данные до проверки.", style = MaterialTheme.typography.bodySmall)
                 }
@@ -571,6 +594,12 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     }
                     showSafetyNumberDialog = false
                 }) { Text(if (safetyNumberTrusted) "Готово" else "Ключ совпадает") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { safetyQrPicker.launch("image/*") },
+                    enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
+                ) { Text("Сканировать QR из фото") }
             },
         )
     }

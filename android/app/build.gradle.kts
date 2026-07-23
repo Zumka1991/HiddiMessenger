@@ -66,5 +66,6 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.libsignal.client)
     implementation(libs.libsignal.android)
+    implementation(libs.zxing.core)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

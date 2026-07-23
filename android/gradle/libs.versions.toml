@@ -7,6 +7,7 @@ activityCompose = "1.10.0"
 lifecycle = "2.8.7"
 libsignal = "0.98.0"
 desugar = "2.1.5"
+zxing = "3.5.4"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -23,6 +24,7 @@ androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 libsignal-client = { module = "org.signal:libsignal-client", version.ref = "libsignal" }
 libsignal-android = { module = "org.signal:libsignal-android", version.ref = "libsignal" }
 desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugar" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
