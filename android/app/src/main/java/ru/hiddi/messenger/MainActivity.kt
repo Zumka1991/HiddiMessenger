@@ -100,6 +100,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import ru.hiddi.messenger.network.AccountProfile
 import ru.hiddi.messenger.network.AccountStore
+import ru.hiddi.messenger.network.GroupMlsCoordinator
 import ru.hiddi.messenger.network.RegistrationApi
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
@@ -109,6 +110,7 @@ import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.NativeMlsBridge
+import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
 
@@ -160,8 +162,16 @@ private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: 
     var account by remember { mutableStateOf(accountStore.read()) }
     val hasLegacyToken = remember { accountStore.hasLegacyToken() }
     LaunchedEffect(account?.nickname) {
-        if (account != null) {
+        account?.let { current ->
             ContextCompat.startForegroundService(context, Intent(context, MessagingService::class.java))
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val api = SignalMessagingApi(SignalStateRepository(context))
+                    GroupMlsCoordinator(context, api).prepare(current)
+                }
+            }.getOrNull()?.let { prepared ->
+                if (prepared != account) account = prepared
+            }
         }
     }
     MaterialTheme(colorScheme = hiddiColors) {

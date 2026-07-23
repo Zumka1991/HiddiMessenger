@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.hiddi.messenger.network.AccountStore
+import ru.hiddi.messenger.network.GroupMlsCoordinator
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
@@ -32,6 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class MessagingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pollingJob: Job? = null
+    private var groupPollingJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -44,6 +46,9 @@ class MessagingService : Service() {
             publishConnection(STATE_CONNECTING)
             pollingJob = serviceScope.launch { poll() }
         }
+        if (groupPollingJob?.isActive != true) {
+            groupPollingJob = serviceScope.launch { pollGroups() }
+        }
         return START_STICKY
     }
 
@@ -51,6 +56,7 @@ class MessagingService : Service() {
 
     override fun onDestroy() {
         pollingJob?.cancel()
+        groupPollingJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -116,6 +122,30 @@ class MessagingService : Service() {
             } catch (error: Exception) {
                 Log.w(TAG, "Background receive failed: ${error.javaClass.simpleName}")
                 publishConnection(STATE_OFFLINE)
+                delay(retryDelay)
+                retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
+            }
+        }
+    }
+
+    private suspend fun pollGroups() {
+        val profile = AccountStore(this).read() ?: return
+        val api = SignalMessagingApi(SignalStateRepository(this))
+        val coordinator = GroupMlsCoordinator(this, api)
+        var retryDelay = 1_000L
+        // Startup prepares the native provider and publishes a KeyPackage first.
+        delay(2_000)
+        while (serviceScope.isActive) {
+            try {
+                val changed = coordinator.synchronize(profile)
+                if (changed.isNotEmpty()) {
+                    sendBroadcast(Intent(ACTION_GROUPS_UPDATED).setPackage(packageName))
+                    if (!MainActivity.isVisible) showGroupNotification()
+                }
+                retryDelay = 1_000L
+                if (!api.waitForGroupEvent(profile)) delay(1_000)
+            } catch (error: Exception) {
+                Log.w(TAG, "Background MLS receive failed: ${error.javaClass.simpleName}")
                 delay(retryDelay)
                 retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
             }
@@ -209,6 +239,21 @@ class MessagingService : Service() {
         getSystemService(NotificationManager::class.java).notify(nextNotificationId.incrementAndGet(), notification)
     }
 
+    private fun showGroupNotification() {
+        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL)
+            .setSmallIcon(R.drawable.ic_hiddi_notification)
+            .setContentTitle("Hiddi")
+            .setContentText("Новое сообщение в защищённой группе")
+            .setContentIntent(openAppIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .build()
+        getSystemService(NotificationManager::class.java)
+            .notify(nextNotificationId.incrementAndGet(), notification)
+    }
+
     private fun openAppIntent(peer: String? = null): PendingIntent = PendingIntent.getActivity(
         this,
         peer?.hashCode() ?: 0,
@@ -221,6 +266,7 @@ class MessagingService : Service() {
 
     companion object {
         const val ACTION_MESSAGES_UPDATED = "ru.hiddi.messenger.MESSAGES_UPDATED"
+        const val ACTION_GROUPS_UPDATED = "ru.hiddi.messenger.GROUPS_UPDATED"
         const val ACTION_CONNECTION_CHANGED = "ru.hiddi.messenger.CONNECTION_CHANGED"
         const val EXTRA_OPEN_PEER = "ru.hiddi.messenger.extra.OPEN_PEER"
         const val EXTRA_CONNECTION_STATE = "ru.hiddi.messenger.extra.CONNECTION_STATE"

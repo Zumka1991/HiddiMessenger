@@ -26,9 +26,13 @@ class GroupRegistrationOutbox(context: Context, private val api: SignalMessaging
         val groupId = requireNotNull(NativeMlsBridge.createLocalGroup(deviceId)) {
             "Не удалось создать локальное MLS-состояние"
         }
+        register(profile, groupId, members)
+        return groupId.b64()
+    }
+
+    suspend fun register(profile: AccountProfile, groupId: ByteArray, members: List<GroupMember>) {
         enqueue(groupId, members)
         retry(profile)
-        return groupId.b64()
     }
 
     suspend fun retry(profile: AccountProfile) {
@@ -40,8 +44,13 @@ class GroupRegistrationOutbox(context: Context, private val api: SignalMessaging
 
     private fun enqueue(groupId: ByteArray, members: List<GroupMember>) = synchronized(lock) {
         val id = groupId.b64()
-        require(read().none { it.groupId == id }) { "MLS-группа уже ожидает регистрации" }
-        write(read() + PendingGroupRegistration(id, members))
+        val entries = read()
+        val existing = entries.firstOrNull { it.groupId == id }
+        if (existing == null) {
+            write(entries + PendingGroupRegistration(id, members))
+        } else {
+            require(existing.members == members) { "MLS-группа ожидает регистрацию с другим составом" }
+        }
     }
 
     private fun remove(groupId: String) = synchronized(lock) {

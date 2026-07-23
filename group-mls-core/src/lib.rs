@@ -7,7 +7,12 @@ use openmls::versions::ProtocolVersion;
 
 pub mod storage;
 
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 use jni::{
     EnvUnowned,
     objects::{JByteArray, JClass, JString},
@@ -79,9 +84,41 @@ fn validate_payload(bytes: &[u8]) -> Result<(), EnvelopeError> {
     Ok(())
 }
 
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    test
+))]
+fn encode_add_member_bundle(output: storage::AddMemberOutput) -> Result<Vec<u8>, EnvelopeError> {
+    let commit = MlsEnvelope {
+        kind: MlsEnvelopeKind::Commit,
+        bytes: output.commit,
+    }
+    .encode()?;
+    let welcome = MlsEnvelope {
+        kind: MlsEnvelopeKind::Welcome,
+        bytes: output.welcome,
+    }
+    .encode()?;
+    let commit_len = u32::try_from(commit.len()).map_err(|_| EnvelopeError::TooLarge)?;
+    let mut encoded = Vec::with_capacity(1 + 4 + commit.len() + welcome.len());
+    encoded.push(ENVELOPE_VERSION);
+    encoded.extend_from_slice(&commit_len.to_be_bytes());
+    encoded.extend(commit);
+    encoded.extend(welcome);
+    Ok(encoded)
+}
+
 /// Minimal JNI boundary smoke-tested before any group key material crosses it.
 /// It handles opaque bytes only and fails closed on malformed JVM input.
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIsValidEnvelope(
     mut unowned_env: EnvUnowned,
@@ -103,7 +140,12 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIs
 /// Receives a 64-byte profile key only after Kotlin has unwrapped it using the
 /// Android Keystore. The Rust core keeps it in process memory and never writes
 /// it itself; a different configured key fails closed.
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeConfigureStorageKey(
     mut unowned_env: EnvUnowned,
@@ -125,7 +167,12 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCo
 /// Opens the process-local encrypted MLS SQLite provider at an app-private
 /// Android path. The path carries no user-visible data; all MLS records remain
 /// encrypted by the already configured Keystore-backed profile key.
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeInitializePersistentStorage(
     mut unowned_env: EnvUnowned,
@@ -135,7 +182,7 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIn
     unowned_env
         .with_env(|env| {
             Ok::<jboolean, jni::errors::Error>(
-                path.try_to_string(&env)
+                path.try_to_string(env)
                     .ok()
                     .filter(|value| !value.is_empty())
                     .and_then(|path| storage::initialize_persistent_provider(path).ok())
@@ -147,7 +194,12 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIn
 
 /// Creates a one-member MLS group in the initialized encrypted provider and
 /// returns its random MLS group id. No network operation happens here.
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCreateLocalGroup(
     mut unowned_env: EnvUnowned,
@@ -164,7 +216,12 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCr
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeDeleteLocalGroup(
     mut unowned_env: EnvUnowned,
@@ -183,7 +240,12 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeDe
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCreateKeyPackage(
     mut unowned_env: EnvUnowned,
@@ -198,6 +260,147 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCr
             Ok::<jbyteArray, jni::errors::Error>(
                 env.byte_array_from_slice(&key_package)?.into_raw(),
             )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeAddMember(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+    key_package: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let group_id = env.convert_byte_array(&group_id)?;
+            let key_package = env.convert_byte_array(&key_package)?;
+            let output = storage::add_member(&group_id, &key_package)
+                .map_err(|_| jni::errors::Error::NullPtr("could not add MLS member"))?;
+            let encoded = encode_add_member_bundle(output)
+                .map_err(|_| jni::errors::Error::NullPtr("could not encode MLS member bundle"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&encoded)?.into_raw())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeProcessWelcome(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    encoded_envelope: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let encoded = env.convert_byte_array(&encoded_envelope)?;
+            let envelope = MlsEnvelope::decode(&encoded)
+                .map_err(|_| jni::errors::Error::NullPtr("invalid MLS envelope"))?;
+            if envelope.kind != MlsEnvelopeKind::Welcome {
+                return Err(jni::errors::Error::NullPtr("expected MLS Welcome"));
+            }
+            let group_id = storage::join_from_welcome(&envelope.bytes)
+                .map_err(|_| jni::errors::Error::NullPtr("could not process MLS Welcome"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&group_id)?.into_raw())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCreateApplicationMessage(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+    plaintext: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let group_id = env.convert_byte_array(&group_id)?;
+            let plaintext = env.convert_byte_array(&plaintext)?;
+            let message = storage::create_application_message(&group_id, &plaintext)
+                .map_err(|_| jni::errors::Error::NullPtr("could not create MLS message"))?;
+            let envelope = MlsEnvelope {
+                kind: MlsEnvelopeKind::Application,
+                bytes: message,
+            }
+            .encode()
+            .map_err(|_| jni::errors::Error::NullPtr("could not encode MLS message"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&envelope)?.into_raw())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeProcessApplicationMessage(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+    encoded_envelope: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let group_id = env.convert_byte_array(&group_id)?;
+            let encoded = env.convert_byte_array(&encoded_envelope)?;
+            let envelope = MlsEnvelope::decode(&encoded)
+                .map_err(|_| jni::errors::Error::NullPtr("invalid MLS envelope"))?;
+            if envelope.kind != MlsEnvelopeKind::Application {
+                return Err(jni::errors::Error::NullPtr(
+                    "expected MLS application message",
+                ));
+            }
+            let plaintext = storage::process_application_message(&group_id, &envelope.bytes)
+                .map_err(|_| jni::errors::Error::NullPtr("could not process MLS message"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&plaintext)?.into_raw())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeProcessCommit(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+    encoded_envelope: JByteArray,
+) -> jboolean {
+    unowned_env
+        .with_env(|env| {
+            let group_id = env.convert_byte_array(&group_id)?;
+            let encoded = env.convert_byte_array(&encoded_envelope)?;
+            let accepted = MlsEnvelope::decode(&encoded)
+                .ok()
+                .filter(|envelope| envelope.kind == MlsEnvelopeKind::Commit)
+                .and_then(|envelope| storage::process_commit(&group_id, &envelope.bytes).ok())
+                .is_some();
+            Ok::<jboolean, jni::errors::Error>(accepted as jboolean)
         })
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
@@ -241,6 +444,23 @@ mod tests {
             envelope
         );
         assert_eq!(MlsEnvelope::protocol_version(), ProtocolVersion::Mls10);
+    }
+
+    #[test]
+    fn encodes_commit_and_welcome_as_separate_envelopes() {
+        let encoded = encode_add_member_bundle(storage::AddMemberOutput {
+            commit: vec![10, 11],
+            welcome: vec![20, 21],
+        })
+        .unwrap();
+        assert_eq!(encoded[0], ENVELOPE_VERSION);
+        let commit_len = u32::from_be_bytes(encoded[1..5].try_into().unwrap()) as usize;
+        let commit = MlsEnvelope::decode(&encoded[5..5 + commit_len]).unwrap();
+        let welcome = MlsEnvelope::decode(&encoded[5 + commit_len..]).unwrap();
+        assert_eq!(commit.kind, MlsEnvelopeKind::Commit);
+        assert_eq!(commit.bytes, vec![10, 11]);
+        assert_eq!(welcome.kind, MlsEnvelopeKind::Welcome);
+        assert_eq!(welcome.bytes, vec![20, 21]);
     }
 
     #[test]
@@ -393,5 +613,45 @@ mod tests {
             }
             _ => panic!("expected MLS application message"),
         }
+    }
+
+    #[test]
+    fn persistent_signer_creates_welcome_after_group_reload() {
+        storage::tests::configure_test_storage_key();
+        let alice_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+        let bob_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+
+        let group_id = alice_provider.create_group(b"alice-device").unwrap();
+        let bob_key_package = bob_provider.create_key_package(b"bob-device").unwrap();
+        let output = alice_provider
+            .add_member(&group_id, &bob_key_package)
+            .unwrap();
+        assert!(!output.commit.is_empty());
+        assert!(!output.welcome.is_empty());
+        let joined_group_id = bob_provider.join_from_welcome(&output.welcome).unwrap();
+        assert_eq!(joined_group_id, group_id);
+        let encrypted = alice_provider
+            .create_application_message(&group_id, b"hello persistent MLS")
+            .unwrap();
+        assert_eq!(
+            bob_provider
+                .process_application_message(&group_id, &encrypted)
+                .unwrap(),
+            b"hello persistent MLS"
+        );
+        let reply = bob_provider
+            .create_application_message(&group_id, b"welcome to the group")
+            .unwrap();
+        assert_eq!(
+            alice_provider
+                .process_application_message(&group_id, &reply)
+                .unwrap(),
+            b"welcome to the group"
+        );
+        assert!(
+            MlsGroup::load(alice_provider.storage(), &GroupId::from_slice(&group_id))
+                .unwrap()
+                .is_some()
+        );
     }
 }

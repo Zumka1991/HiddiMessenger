@@ -107,3 +107,23 @@ Signal Protocol на клиенте.
 
 Ответ также содержит `registration_id` устройства — это значение используется
 Signal Protocol при построении сессии и не является секретом.
+
+## MLS group transport
+
+Сервер маршрутизирует только непрозрачные OpenMLS-конверты. Он видит случайный
+`group_id`, состав адресатов, вид события и время, но не получает название
+группы, текст или ключи.
+
+* `PUT /v1/groups/key-package` публикует одноразовый публичный MLS KeyPackage.
+* `GET /v1/users/{nickname}/mls-key-package` атомарно выдаёт и удаляет KeyPackage.
+* `POST /v1/groups` регистрирует routing-состав группы. Повтор с тем же
+  `group_id`, владельцем и составом идемпотентен.
+* `POST /v1/groups/{group_id}/events` принимает `client_event_id`, `kind`
+  (`1` Welcome, `2` Commit, `3` Application), адресатов и URL-safe Base64
+  `envelope`. Повтор с тем же ID не создаёт дубликат для адресата.
+* `GET /v1/groups/events` и `/v1/groups/events/wait` дают inbox и long-poll.
+* `POST /v1/groups/events/{event_id}` подтверждает событие только после
+  криптографической проверки и локального сохранения клиентом.
+
+Серверная роль ограничивает отправку Welcome/Commit, но не заменяет проверку
+OpenMLS. Application plaintext никогда не является полем этого API.

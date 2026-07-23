@@ -12,8 +12,10 @@ use aes_siv::{
     aead::{Aead, KeyInit, Payload},
 };
 use openmls::prelude::{
-    BasicCredential, Ciphersuite, CredentialWithKey, GroupId, KeyPackage, MlsGroup,
-    MlsGroupCreateConfig, tls_codec::Serialize as TlsSerialize,
+    BasicCredential, Ciphersuite, CredentialWithKey, GroupId, KeyPackage, KeyPackageIn, MlsGroup,
+    MlsGroupCreateConfig, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
+    ProcessedMessageContent, ProtocolVersion, StagedWelcome, tls_codec::Deserialize,
+    tls_codec::Serialize as TlsSerialize,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
@@ -53,6 +55,12 @@ pub enum StorageError {
     Migration(String),
     #[error("OpenMLS operation failed: {0}")]
     OpenMls(String),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AddMemberOutput {
+    pub commit: Vec<u8>,
+    pub welcome: Vec<u8>,
 }
 
 /// Installs the per-profile key unwrapped by Android Keystore (or desktop's
@@ -111,6 +119,59 @@ pub fn create_key_package(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.create_key_package(device_identity)
+}
+
+/// Validates a remote public KeyPackage, creates the membership Commit and
+/// Welcome, advances the local epoch, and returns only MLS wire bytes.
+pub fn add_member(group_id: &[u8], key_package: &[u8]) -> Result<AddMemberOutput, StorageError> {
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    provider.add_member(group_id, key_package)
+}
+
+/// Validates an MLS Welcome and persists the joined group state.
+pub fn join_from_welcome(welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    provider.join_from_welcome(welcome)
+}
+
+pub fn create_application_message(
+    group_id: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    with_persistent_provider(|provider| provider.create_application_message(group_id, plaintext))
+}
+
+pub fn process_application_message(
+    group_id: &[u8],
+    message: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    with_persistent_provider(|provider| provider.process_application_message(group_id, message))
+}
+
+pub fn process_commit(group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
+    with_persistent_provider(|provider| provider.process_commit(group_id, message))
+}
+
+fn with_persistent_provider<T>(
+    operation: impl FnOnce(&EncryptedSqliteMlsProvider) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    operation(&provider)
 }
 
 /// Permanently removes a locally stored MLS group. This is for an explicit
@@ -262,6 +323,169 @@ impl EncryptedSqliteMlsProvider {
             .key_package()
             .tls_serialize_detached()
             .map_err(|error| StorageError::OpenMls(error.to_string()))
+    }
+
+    pub fn add_member(
+        &self,
+        group_id: &[u8],
+        key_package: &[u8],
+    ) -> Result<AddMemberOutput, StorageError> {
+        if !(8..=64).contains(&group_id.len())
+            || key_package.is_empty()
+            || key_package.len() > 65_536
+        {
+            return Err(StorageError::OpenMls(
+                "invalid MLS group id or KeyPackage".to_owned(),
+            ));
+        }
+        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
+        let signature_key = group
+            .own_leaf_node()
+            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
+            .signature_key()
+            .as_slice()
+            .to_vec();
+        let signer = SignatureKeyPair::read(
+            self.storage(),
+            &signature_key,
+            group.ciphersuite().signature_algorithm(),
+        )
+        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        let key_package = KeyPackageIn::tls_deserialize_exact(key_package)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .validate(self.crypto(), ProtocolVersion::Mls10)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let (commit, welcome, _) = group
+            .add_members(self, &signer, &[key_package])
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let output = AddMemberOutput {
+            commit: commit
+                .to_bytes()
+                .map_err(|error| StorageError::OpenMls(error.to_string()))?,
+            welcome: welcome
+                .to_bytes()
+                .map_err(|error| StorageError::OpenMls(error.to_string()))?,
+        };
+        group
+            .merge_pending_commit(self)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        Ok(output)
+    }
+
+    pub fn join_from_welcome(&self, welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
+        if welcome.is_empty() || welcome.len() > 2_800_000 {
+            return Err(StorageError::OpenMls("invalid MLS Welcome".to_owned()));
+        }
+        let message = MlsMessageIn::tls_deserialize_exact(welcome)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let welcome = match message.extract() {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => return Err(StorageError::OpenMls("expected MLS Welcome".to_owned())),
+        };
+        let staged = StagedWelcome::new_from_welcome(
+            self,
+            &MlsGroupJoinConfig::builder()
+                .use_ratchet_tree_extension(true)
+                .build(),
+            welcome,
+            None,
+        )
+        .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let group = staged
+            .into_group(self)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        Ok(group.group_id().as_slice().to_vec())
+    }
+
+    pub fn create_application_message(
+        &self,
+        group_id: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        if !(8..=64).contains(&group_id.len())
+            || plaintext.is_empty()
+            || plaintext.len() > 1_048_576
+        {
+            return Err(StorageError::OpenMls(
+                "invalid MLS group id or application data".to_owned(),
+            ));
+        }
+        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
+        let signature_key = group
+            .own_leaf_node()
+            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
+            .signature_key()
+            .as_slice();
+        let signer = SignatureKeyPair::read(
+            self.storage(),
+            signature_key,
+            group.ciphersuite().signature_algorithm(),
+        )
+        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        group
+            .create_message(self, &signer, plaintext)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .to_bytes()
+            .map_err(|error| StorageError::OpenMls(error.to_string()))
+    }
+
+    pub fn process_application_message(
+        &self,
+        group_id: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        let mut group = self.load_group_for_message(group_id, message)?;
+        let message = MlsMessageIn::tls_deserialize_exact(message)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .try_into_protocol_message()
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let processed = group
+            .process_message(self, message)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(application) => {
+                Ok(application.into_bytes())
+            }
+            _ => Err(StorageError::OpenMls(
+                "expected MLS application message".to_owned(),
+            )),
+        }
+    }
+
+    pub fn process_commit(&self, group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
+        let mut group = self.load_group_for_message(group_id, message)?;
+        let message = MlsMessageIn::tls_deserialize_exact(message)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .try_into_protocol_message()
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let processed = group
+            .process_message(self, message)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(commit) => group
+                .merge_staged_commit(self, *commit)
+                .map_err(|error| StorageError::OpenMls(error.to_string())),
+            _ => Err(StorageError::OpenMls("expected MLS Commit".to_owned())),
+        }
+    }
+
+    fn load_group_for_message(
+        &self,
+        group_id: &[u8],
+        message: &[u8],
+    ) -> Result<MlsGroup, StorageError> {
+        if !(8..=64).contains(&group_id.len()) || message.is_empty() || message.len() > 2_800_000 {
+            return Err(StorageError::OpenMls(
+                "invalid MLS group id or message".to_owned(),
+            ));
+        }
+        MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))
     }
 
     #[cfg(test)]

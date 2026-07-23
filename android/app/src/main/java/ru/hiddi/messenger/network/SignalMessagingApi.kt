@@ -19,6 +19,7 @@ import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import ru.hiddi.messenger.security.AndroidSignalProtocolStore
+import ru.hiddi.messenger.security.NativeMlsBridge
 import ru.hiddi.messenger.security.SignalStateRepository
 import java.net.HttpURLConnection
 import java.net.URLEncoder
@@ -76,6 +77,88 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                 profile.accessToken,
             ),
         ).getString("group_id")
+    }
+
+    suspend fun sendGroupEvent(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        clientEventId: String,
+        kind: Int,
+        recipients: List<String>,
+        envelope: ByteArray,
+    ): List<String> = withContext(Dispatchers.IO) {
+        require(groupId.size in 8..64) { "Некорректный MLS group id" }
+        require(clientEventId.isNotBlank()) { "Некорректный client event id" }
+        require(kind in 1..3) { "Некорректный тип MLS event" }
+        require(recipients.isNotEmpty() && recipients.size <= 32) { "Некорректные адресаты MLS event" }
+        require(NativeMlsBridge.isValidEnvelope(envelope)) { "Некорректный MLS envelope" }
+        val recipientJson = JSONArray().also { output ->
+            recipients.forEach { output.put(it.trim().removePrefix("@").lowercase()) }
+        }
+        JSONObject(
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/groups/${groupId.b64()}/events",
+                JSONObject()
+                    .put("client_event_id", clientEventId)
+                    .put("kind", kind)
+                    .put("recipient_nicknames", recipientJson)
+                    .put("envelope", envelope.b64())
+                    .toString(),
+                profile.accessToken,
+            ),
+        ).getJSONArray("event_ids").let { ids ->
+            (0 until ids.length()).map(ids::getString)
+        }
+    }
+
+    suspend fun groupEventInbox(profile: AccountProfile): List<GroupEvent> = withContext(Dispatchers.IO) {
+        JSONArray(request("GET", "${profile.serverUrl}/v1/groups/events", null, profile.accessToken))
+            .let { events ->
+                (0 until events.length()).map { index ->
+                    events.getJSONObject(index).let { event ->
+                        GroupEvent(
+                            eventId = event.getString("event_id"),
+                            groupId = event.getString("group_id").decode(),
+                            senderNickname = event.getString("sender_nickname"),
+                            kind = event.getInt("kind"),
+                            envelope = event.getString("envelope").decode(),
+                            createdAt = event.getString("created_at"),
+                        )
+                    }
+                }
+            }
+    }
+
+    suspend fun acknowledgeGroupEvent(profile: AccountProfile, eventId: String) = withContext(Dispatchers.IO) {
+        request(
+            "POST",
+            "${profile.serverUrl}/v1/groups/events/$eventId",
+            null,
+            profile.accessToken,
+        )
+    }
+
+    suspend fun waitForGroupEvent(profile: AccountProfile): Boolean = withContext(Dispatchers.IO) {
+        JSONObject(
+            request(
+                "GET",
+                "${profile.serverUrl}/v1/groups/events/wait",
+                null,
+                profile.accessToken,
+            ),
+        ).getBoolean("available")
+    }
+
+    suspend fun currentDeviceId(profile: AccountProfile): String = withContext(Dispatchers.IO) {
+        JSONObject(
+            request(
+                "GET",
+                "${profile.serverUrl}/v1/devices/current",
+                null,
+                profile.accessToken,
+            ),
+        ).getString("device_id")
     }
 
     suspend fun findUsers(profile: AccountProfile, nickname: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
@@ -257,6 +340,14 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
 data class DecryptedMessage(val senderNickname: String, val text: String, val createdAt: String)
 data class UserSearchResult(val nickname: String)
 data class GroupMember(val nickname: String, val role: String = "member")
+data class GroupEvent(
+    val eventId: String,
+    val groupId: ByteArray,
+    val senderNickname: String,
+    val kind: Int,
+    val envelope: ByteArray,
+    val createdAt: String,
+)
 enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

@@ -48,6 +48,8 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -94,6 +96,7 @@ import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
+import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
@@ -112,10 +115,14 @@ fun ConversationsScreen(
     searchError: String?,
     searching: Boolean,
     connection: ServerConnection,
+    groups: List<LocalGroupChat>,
+    groupBusy: Boolean,
     onSearchChange: (String) -> Unit,
     onSearch: () -> Unit,
     onRefreshConnection: () -> Unit,
     onOpenConversation: (String) -> Unit,
+    onCreateGroup: (String) -> Unit,
+    onOpenGroup: (ByteArray) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
@@ -190,7 +197,21 @@ fun ConversationsScreen(
                             Text("@$user", fontWeight = FontWeight.SemiBold)
                             Text("Начать защищённый диалог", style = MaterialTheme.typography.bodySmall)
                         }
-                        Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        IconButton(
+                            onClick = { onCreateGroup(user) },
+                            enabled = !groupBusy,
+                        ) {
+                            Icon(
+                                Icons.Rounded.GroupAdd,
+                                contentDescription = "Создать MLS-группу",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        Icon(
+                            Icons.AutoMirrored.Rounded.ArrowForward,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
             }
@@ -199,7 +220,7 @@ fun ConversationsScreen(
                 modifier = Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Сообщения", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text("Диалоги", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 IconButton(onClick = onRefreshConnection) {
                     Icon(Icons.Rounded.Refresh, contentDescription = "Проверить связь", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -227,7 +248,7 @@ fun ConversationsScreen(
             }
         }
 
-        if (peers.isEmpty()) {
+        if (peers.isEmpty() && groups.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Surface(
@@ -240,7 +261,7 @@ fun ConversationsScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text("Здесь появятся ваши диалоги", fontWeight = FontWeight.Medium)
+                    Text("Здесь появятся ваши диалоги и группы", fontWeight = FontWeight.Medium)
                     Text("Найдите человека по никнейму", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -250,6 +271,13 @@ fun ConversationsScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
+                    GroupConversationRow(
+                        profileNickname = profile.nickname,
+                        group = group,
+                        onClick = { onOpenGroup(group.groupId) },
+                    )
+                }
                 items(peers, key = { "$it:$historyRevision" }) { peer ->
                     val lastMessage = historyStore.messagesWith(peer).lastOrNull()
                     ConversationRow(
@@ -260,6 +288,56 @@ fun ConversationsScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun GroupConversationRow(
+    profileNickname: String,
+    group: LocalGroupChat,
+    onClick: () -> Unit,
+) {
+    val others = group.members.filterNot { it == profileNickname }
+    val title = others.joinToString { "@$it" }.ifBlank { "Защищённая группа" }
+    val lastMessage = group.messages.lastOrNull()
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier.size(54.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Rounded.Group,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                    )
+                }
+            }
+            Spacer(Modifier.size(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    lastMessage?.let { (if (it.outgoing) "Вы: " else "@${it.sender}: ") + it.text }
+                        ?: "MLS · сквозное шифрование",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(Icons.Rounded.Lock, contentDescription = "MLS E2EE", tint = MaterialTheme.colorScheme.secondary)
         }
     }
 }

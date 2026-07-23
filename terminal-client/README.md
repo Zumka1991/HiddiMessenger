@@ -29,5 +29,24 @@ env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-t
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal inbox
 ```
 
-На этом этапе сервер поддерживает одно устройство на ник; поддержка нескольких
-устройств и encrypted groups будет следующим отдельным этапом.
+MLS-группы используют тот же Rust/OpenMLS core, что и Android. Сначала соберите
+нативную библиотеку и terminal distribution:
+
+```fish
+cargo build --manifest-path ../group-mls-core/Cargo.toml --release
+env JAVA_HOME=/opt/android-studio/jbr gradle installDist --no-daemon
+```
+
+Затем опубликуйте одноразовый KeyPackage и используйте групповые команды:
+
+```fish
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group publish
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group create --with nickname
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group list
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group send --message 'Привет группе'
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group inbox
+```
+
+64-байтный ключ шифрования OpenMLS SQLite хранится только внутри существующего
+Argon2id/AES-GCM vault. Сейчас сервер поддерживает одно устройство на ник;
+multi-device и изменение состава группы остаются следующим этапом.

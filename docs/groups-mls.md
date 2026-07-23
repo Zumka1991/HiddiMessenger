@@ -1,32 +1,33 @@
 # Группы: MLS-архитектура
 
-Этот документ описывает обязательный контракт до появления первого group endpoint.
+Этот документ описывает реализованный первый MLS-контур и обязательные условия
+перед расширением состава групп.
 Группа не будет реализована как общий статический AES-ключ или набор личных
 сообщений: оба варианта не дают корректной ротации ключей при исключении участника.
 
 ## Выбранный криптографический core
 
-Клиентский MLS-core будет построен на OpenMLS (Rust, RFC 9420) и подключён к
+Клиентский MLS-core построен на OpenMLS (Rust, RFC 9420) и подключён к
 Android/desktop через небольшой Rust bridge. Сервер Rust не расшифровывает MLS
 состояние, application messages, commits или welcomes.
 
-Первый crate `group-mls-core` уже закрепляет OpenMLS 0.8.1, MLS 1.0 и
-версионированный opaque envelope. Он ещё не создаёт группы: это намеренная
-граница, пока Android bridge и персистентное MLS state не пройдут тесты.
+Crate `group-mls-core` закрепляет OpenMLS 0.8.1, MLS 1.0 и версионированный
+opaque envelope. Он создаёт persistent группу, хранит signer, выпускает
+KeyPackage, Add Commit/Welcome, принимает Welcome/Commit и шифрует application
+messages. Тот же cdylib вызывают Android и terminal/будущий desktop.
 
 `group-mls-core` теперь также проверяет настоящий MLS round-trip: Alice создаёт
 группу, добавляет Bob через Welcome, Bob присоединяется и расшифровывает
 application message. Этот же тест уничтожает объект группы, восстанавливает его
 из `StorageProvider` и только затем расшифровывает сообщение: ratchet state не
-сериализуется Hiddi вручную. Пока тест использует OpenMLS memory storage;
-постоянный Android storage provider остаётся обязательной следующей задачей.
-Это тест криптографической библиотеки, а не ещё доступная пользователю группа.
+сериализуется Hiddi вручную. Дополнительные тесты используют два независимых
+зашифрованных SQLite-профиля, перезапускают их и проверяют сообщения в обе
+стороны.
 
-Android уже имеет `EncryptedGroupMlsState`: это Keystore-зашифрованная граница
-для непрозрачных байтов будущего MLS storage provider. Kotlin не интерпретирует
-эти байты; после bridge их создаёт и проверяет только Rust/OpenMLS. До
-подключения provider в настоящий lifecycle это не считается persistent MLS
-state и UI групп остаётся отключённым.
+Android хранит Rust/OpenMLS SQLite в `noBackupFilesDir`; каждая запись
+зашифрована AES-256-SIV ключом из Android Keystore. Отдельные Keystore-хранилища
+держат group directory, локальную историю и retry-outbox. Kotlin не
+интерпретирует приватное MLS state.
 
 В Rust уже добавлен постоянный `EncryptedSqliteMlsProvider`: это upstream
 OpenMLS SQLite `StorageProvider`, а не собственный формат состояния Hiddi.
@@ -36,19 +37,20 @@ OpenMLS SQLite `StorageProvider`, а не собственный формат с
 после получения из Android Keystore (на desktop — из OS keychain). JNI-вызов,
 который создаёт/извлекает этот ключ, уже добавлен и вызывается при старте
 Android-приложения. Вызов idempotent для того же ключа и fail-closed для другого.
-Открытие provider и работа с MLS group lifecycle будут добавлены следующим шагом;
-до него backend не используется для пользовательских групп.
+Provider подключён к lifecycle Android и terminal-клиента. Сетевой повтор
+защищён idempotency-ID и ACK после локального сохранения.
 
 Core уже умеет создать и сохранить локальную одноучастниковую MLS-группу с
 credential зарегистрированного `device_id`; этот идентификатор уже известен
 серверу как технический идентификатор устройства и не является никнеймом или
-названием группы. Операция намеренно не имеет Android UI и не отправляет данных:
-она станет пользовательской только вместе с server transport для Commit/Welcome.
+названием группы. Android имеет первый UI двухпользовательской MLS-группы:
+создание из поиска, список групп, текстовую переписку и фоновый приём.
 
 Отдельный тест проверяет полный криптографический путь на двух независимых
 зашифрованных SQLite-профилях: Alice создаёт Commit и Welcome для Bob, Bob
 присоединяется, перезапускает объект группы из storage и расшифровывает
-application message. Это ещё тест core, а не сетевой endpoint.
+application message. До семейного релиза ещё нужен crash-atomic journal для
+узкого окна между OpenMLS mutation и записью события в отдельный outbox.
 
 ## Нативная сборка Android
 
@@ -60,11 +62,9 @@ export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/29.0.14206865"
 bash scripts/build-android-mls.sh
 ```
 
-Она производит `libhiddi_group_mls_core.so` для `arm64-v8a`. Подключение JNI к
-Kotlin начинается с fail-closed `NativeMlsBridge.isValidEnvelope`: он принимает
+Она производит `libhiddi_group_mls_core.so` для `arm64-v8a`. JNI принимает
 только `ByteArray` и проверяет versioned opaque envelope в Rust. Библиотека
-упаковывается в APK, но группы по-прежнему не показываются в UI, пока не будут
-реализованы настоящий MLS state, Welcome и Commit round-trip.
+упаковывается в APK и используется первым двухпользовательским group UI.
 
 ## Что видит сервер
 
@@ -98,16 +98,15 @@ Kotlin начинается с fail-closed `NativeMlsBridge.isValidEnvelope`: о
 * Все изменения ролей и состава требуют MLS Commit; серверная роль — только
   авторизационный фильтр, не источник криптографической истины.
 
-## Transport, который будет реализован
+## Реализованный transport
 
 `POST /v1/groups` создаёт только routing metadata: случайный group id,
 участников и их роли. `POST /v1/groups/{group_id}/events` принимает только
 versioned opaque envelopes: `welcome`, `commit` или `application`, и адресатов
 из текущего server-side списка участников. Поля plaintext не появятся в API.
 Для Welcome/Commit сервер разрешает отправку только owner/admin, но не считает
-себя источником криптографической истины. До подключения OpenMLS Android-клиент
-не будет показывать создание групп, чтобы не выпускать небезопасную «заглушку
-группы».
+себя источником криптографической истины. Inbox использует long-poll, явный ACK
+после локального сохранения и client event ID для безопасного повтора.
 
 ## Проверка до релиза
 

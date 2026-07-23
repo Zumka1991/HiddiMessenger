@@ -20,7 +20,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
-use rusqlite::{Connection, ErrorCode, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
@@ -97,6 +97,7 @@ struct RegisterResponse {
 
 #[derive(Serialize)]
 struct CurrentDeviceResponse {
+    device_id: Uuid,
     registration_id: u32,
 }
 
@@ -143,6 +144,7 @@ struct CreateGroupResponse {
 
 #[derive(Deserialize)]
 struct SendGroupEventRequest {
+    client_event_id: String,
     kind: u8,
     recipient_nicknames: Vec<String>,
     envelope: String,
@@ -151,6 +153,16 @@ struct SendGroupEventRequest {
 #[derive(Serialize)]
 struct SendGroupEventResponse {
     event_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+struct GroupEventResponse {
+    event_id: Uuid,
+    group_id: String,
+    sender_nickname: String,
+    kind: u8,
+    envelope: String,
+    created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -319,6 +331,9 @@ fn build_app(state: AppState) -> Router {
             "/v1/users/{nickname}/mls-key-package",
             get(take_mls_key_package),
         )
+        .route("/v1/groups/events", get(group_event_inbox))
+        .route("/v1/groups/events/wait", get(wait_for_group_event))
+        .route("/v1/groups/events/{event_id}", post(ack_group_event))
         .route("/v1/groups/{group_id}/events", post(send_group_event))
         .route("/v1/messages", post(send_message).get(inbox))
         .route("/v1/messages/wait", get(wait_for_message))
@@ -450,7 +465,11 @@ async fn current_device(
             |row| row.get(0),
         )
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load device"))?;
-    Ok(Json(CurrentDeviceResponse { registration_id }))
+    Ok(Json(CurrentDeviceResponse {
+        device_id: Uuid::parse_str(&device.device_id)
+            .expect("authenticated device id is a valid UUID"),
+        registration_id,
+    }))
 }
 
 async fn take_prekey_bundle(
@@ -827,6 +846,106 @@ async fn create_group(
         .db
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut resolved_members = Vec::with_capacity(request.members.len());
+    for member in &request.members {
+        let nickname = normalize_nickname(&member.nickname).ok_or(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid group member nickname",
+        ))?;
+        let role = match member.role.as_str() {
+            "admin" | "member" => member.role.clone(),
+            _ => return Err(Error(StatusCode::BAD_REQUEST, "invalid group member role")),
+        };
+        let account_id: String = db
+            .query_row(
+                "SELECT id FROM accounts WHERE nickname = ?1",
+                params![nickname],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error(StatusCode::NOT_FOUND, "group member not found")
+                }
+                _ => Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not find group member",
+                ),
+            })?;
+        if account_id == creator.account_id {
+            return Err(Error(
+                StatusCode::BAD_REQUEST,
+                "creator role is always owner",
+            ));
+        }
+        if resolved_members
+            .iter()
+            .any(|(existing_id, _)| existing_id == &account_id)
+        {
+            return Err(Error(StatusCode::BAD_REQUEST, "duplicate group member"));
+        }
+        resolved_members.push((account_id, role));
+    }
+    let existing_owner: Option<String> = db
+        .query_row(
+            "SELECT owner_account_id FROM groups WHERE id = ?1",
+            params![request.group_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check existing group",
+            )
+        })?;
+    if let Some(existing_owner) = existing_owner {
+        if existing_owner != creator.account_id {
+            return Err(Error(StatusCode::CONFLICT, "group already exists"));
+        }
+        let mut statement = db
+            .prepare(
+                "SELECT account_id, role FROM group_members
+                 WHERE group_id = ?1 AND role != 'owner'
+                 ORDER BY account_id, role",
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check existing group",
+                )
+            })?;
+        let mut existing_members = statement
+            .query_map(params![request.group_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check existing group",
+                )
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check existing group",
+                )
+            })?;
+        existing_members.sort();
+        resolved_members.sort();
+        if existing_members != resolved_members {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                "group exists with different members",
+            ));
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(CreateGroupResponse {
+                group_id: request.group_id,
+            }),
+        ));
+    }
     let transaction = db
         .unchecked_transaction()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
@@ -854,36 +973,7 @@ async fn create_group(
                 "could not add group owner",
             )
         })?;
-    for member in request.members {
-        let nickname = normalize_nickname(&member.nickname).ok_or(Error(
-            StatusCode::BAD_REQUEST,
-            "invalid group member nickname",
-        ))?;
-        let role = match member.role.as_str() {
-            "admin" | "member" => member.role,
-            _ => return Err(Error(StatusCode::BAD_REQUEST, "invalid group member role")),
-        };
-        let account_id: String = transaction
-            .query_row(
-                "SELECT id FROM accounts WHERE nickname = ?1",
-                params![nickname],
-                |row| row.get(0),
-            )
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error(StatusCode::NOT_FOUND, "group member not found")
-                }
-                _ => Error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "could not find group member",
-                ),
-            })?;
-        if account_id == creator.account_id {
-            return Err(Error(
-                StatusCode::BAD_REQUEST,
-                "creator role is always owner",
-            ));
-        }
+    for (account_id, role) in resolved_members {
         transaction
             .execute(
                 "INSERT INTO group_members (group_id, account_id, role) VALUES (?1, ?2, ?3)",
@@ -990,6 +1080,15 @@ async fn send_group_event(
     )?;
     validate_group_id(&group_id)?;
     validate_group_envelope(request.kind, &request.envelope)?;
+    let decoded_client_event_id = URL_SAFE_NO_PAD
+        .decode(&request.client_event_id)
+        .map_err(|_| Error(StatusCode::BAD_REQUEST, "invalid group client event id"))?;
+    if !(16..=64).contains(&decoded_client_event_id.len()) {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid group client event id",
+        ));
+    }
     if request.recipient_nicknames.is_empty() || request.recipient_nicknames.len() > 32 {
         return Err(Error(
             StatusCode::BAD_REQUEST,
@@ -1034,10 +1133,43 @@ async fn send_group_event(
             rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::FORBIDDEN, "recipient is not a group member"),
             _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not authorize group recipient"),
         })?;
+        let existing_event_id: Option<String> = db
+            .query_row(
+                "SELECT id FROM group_events
+                 WHERE sender_account_id = ?1
+                   AND recipient_account_id = ?2
+                   AND client_event_id = ?3",
+                params![sender.account_id, recipient_id, request.client_event_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check group event idempotency",
+                )
+            })?;
+        if let Some(existing_event_id) = existing_event_id {
+            event_ids.push(
+                Uuid::parse_str(&existing_event_id)
+                    .expect("database contains valid group event UUIDs"),
+            );
+            continue;
+        }
         let event_id = Uuid::new_v4();
         db.execute(
-            "INSERT INTO group_events (id, group_id, sender_account_id, recipient_account_id, kind, envelope) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![event_id.to_string(), group_id, sender.account_id, recipient_id, request.kind, request.envelope],
+            "INSERT INTO group_events
+                (id, group_id, sender_account_id, recipient_account_id, client_event_id, kind, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event_id.to_string(),
+                group_id,
+                sender.account_id,
+                recipient_id,
+                request.client_event_id,
+                request.kind,
+                request.envelope
+            ],
         ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store group event"))?;
         event_ids.push(event_id);
     }
@@ -1047,6 +1179,124 @@ async fn send_group_event(
         StatusCode::CREATED,
         Json(SendGroupEventResponse { event_ids }),
     ))
+}
+
+async fn group_event_inbox(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<GroupEventResponse>>, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT group_events.id, group_events.group_id, accounts.nickname,
+                    group_events.kind, group_events.envelope, group_events.created_at
+             FROM group_events
+             JOIN accounts ON accounts.id = group_events.sender_account_id
+             WHERE group_events.recipient_account_id = ?1
+               AND group_events.delivered_at IS NULL
+             ORDER BY group_events.created_at ASC
+             LIMIT 100",
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load group events",
+            )
+        })?;
+    let events = statement
+        .query_map(params![recipient.account_id], |row| {
+            let event_id: String = row.get(0)?;
+            Ok(GroupEventResponse {
+                event_id: Uuid::parse_str(&event_id).expect("database contains valid UUIDs"),
+                group_id: row.get(1)?,
+                sender_nickname: row.get(2)?,
+                kind: row.get(3)?,
+                envelope: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load group events",
+            )
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load group events",
+            )
+        })?;
+    Ok(Json(events))
+}
+
+async fn wait_for_group_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    if has_pending_group_event(&state, &recipient.account_id)? {
+        return Ok(Json(serde_json::json!({"available": true})));
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(25), state.message_notify.notified()).await;
+    Ok(Json(serde_json::json!({
+        "available": has_pending_group_event(&state, &recipient.account_id)?
+    })))
+}
+
+fn has_pending_group_event(state: &AppState, account_id: &str) -> Result<bool, Error> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM group_events
+            WHERE recipient_account_id = ?1 AND delivered_at IS NULL
+         )",
+        params![account_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not check group events",
+        )
+    })
+}
+
+async fn ack_group_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(event_id): axum::extract::Path<Uuid>,
+) -> Result<StatusCode, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let updated = db
+        .execute(
+            "UPDATE group_events
+             SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![event_id.to_string(), recipient.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not acknowledge group event",
+            )
+        })?;
+    if updated == 0 {
+        return Err(Error(StatusCode::NOT_FOUND, "group event not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn validate_group_id(value: &str) -> Result<(), Error> {
@@ -1516,6 +1766,7 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
             sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            client_event_id TEXT,
             kind INTEGER NOT NULL CHECK(kind IN (1, 2, 3)),
             envelope TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1589,6 +1840,18 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
     if !has_read_at {
         db.execute("ALTER TABLE messages ADD COLUMN read_at TEXT", [])?;
     }
+    let has_group_client_event_id = db
+        .prepare("PRAGMA table_info(group_events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|column| column == "client_event_id");
+    if !has_group_client_event_id {
+        db.execute(
+            "ALTER TABLE group_events ADD COLUMN client_event_id TEXT",
+            [],
+        )?;
+    }
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_pending
          ON messages(recipient_account_id, delivered_at, created_at)",
@@ -1597,6 +1860,12 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_group_events_pending
          ON group_events(recipient_account_id, delivered_at, created_at)",
+        [],
+    )?;
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_group_events_idempotency
+         ON group_events(sender_account_id, recipient_account_id, client_event_id)
+         WHERE client_event_id IS NOT NULL",
         [],
     )?;
     db.execute(
@@ -1921,32 +2190,87 @@ mod tests {
         let alice = register_account(&app, "alice").await;
         let bob = register_account(&app, "bob").await;
         let group_id = URL_SAFE_NO_PAD.encode([9_u8; 16]);
-        let (status, _) = request(
+        let create_request =
+            serde_json::json!({"group_id": group_id, "members": [{"nickname":"bob", "role":"member"}]}).to_string();
+        let (status, first_group) = request(
             &app,
             "POST",
             "/v1/groups",
             Some(&alice),
-            serde_json::json!({"group_id": group_id, "members": [{"nickname":"bob", "role":"member"}]}).to_string(),
+            create_request.clone(),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        let (status, repeated_group) =
+            request(&app, "POST", "/v1/groups", Some(&alice), create_request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_group, repeated_group);
         let envelope = URL_SAFE_NO_PAD.encode([1_u8, 1, 42]);
-        let (status, _) = request(
+        let client_event_id = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let event_request = serde_json::json!({
+            "client_event_id": client_event_id,
+            "kind": 1,
+            "recipient_nicknames": ["bob"],
+            "envelope": envelope,
+        })
+        .to_string();
+        let (status, first_response) = request(
             &app,
             "POST",
             format!("/v1/groups/{group_id}/events").as_str(),
             Some(&alice),
-            serde_json::json!({"kind": 1, "recipient_nicknames": ["bob"], "envelope": envelope})
-                .to_string(),
+            event_request.clone(),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        let (status, repeated_response) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&alice),
+            event_request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(first_response, repeated_response);
+        let (status, inbox) =
+            request(&app, "GET", "/v1/groups/events", Some(&bob), String::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        let inbox = serde_json::from_str::<serde_json::Value>(&inbox).unwrap();
+        assert_eq!(inbox.as_array().unwrap().len(), 1);
+        assert_eq!(inbox[0]["group_id"], group_id);
+        assert_eq!(inbox[0]["kind"], 1);
+        let event_id = inbox[0]["event_id"].as_str().unwrap();
+        let (status, _) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/events/{event_id}").as_str(),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, inbox) = request(&app, "GET", "/v1/groups/events", Some(&bob), String::new()).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         let (status, _) = request(
             &app,
             "POST",
             format!("/v1/groups/{group_id}/events").as_str(),
             Some(&bob),
-            serde_json::json!({"kind": 2, "recipient_nicknames": ["alice"], "envelope": URL_SAFE_NO_PAD.encode([1_u8, 2, 42])}).to_string(),
+            serde_json::json!({
+                "client_event_id": URL_SAFE_NO_PAD.encode([8_u8; 32]),
+                "kind": 2,
+                "recipient_nicknames": ["alice"],
+                "envelope": URL_SAFE_NO_PAD.encode([1_u8, 2, 42]),
+            })
+            .to_string(),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);

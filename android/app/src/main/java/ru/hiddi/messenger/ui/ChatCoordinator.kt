@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -91,11 +92,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.hiddi.messenger.network.AccountProfile
+import ru.hiddi.messenger.network.GroupMlsCoordinator
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
+import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.TrustedSafetyNumberStore
 import ru.hiddi.messenger.security.readSafetyQr
@@ -121,6 +124,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var attachmentInProgress by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
     val api = remember { SignalMessagingApi(ru.hiddi.messenger.security.SignalStateRepository(context)) }
+    val groupCoordinator = remember { GroupMlsCoordinator(context, api) }
     val historyStore = remember { EncryptedChatHistory(context) }
     val attachmentStore = remember { EncryptedAttachmentStore(context) }
     val voiceRecorder = remember { InMemoryVoiceRecorder() }
@@ -135,6 +139,12 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
     var safetyNumberTrusted by rememberSaveable { mutableStateOf(false) }
     var identityChanged by rememberSaveable { mutableStateOf(false) }
+    var groups by remember { mutableStateOf(groupCoordinator.groups()) }
+    var groupRevision by remember { mutableIntStateOf(0) }
+    var selectedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
+    var groupDraft by rememberSaveable { mutableStateOf("") }
+    var groupStatus by rememberSaveable { mutableStateOf("OpenMLS · сквозное шифрование") }
+    var groupBusy by remember { mutableStateOf(false) }
     val safetyQrPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
@@ -187,6 +197,43 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     identityChanged = true
                     status = "⚠ Ключ @$peer изменился — проверьте его перед отправкой"
                 }
+            }
+        }
+    }
+
+    fun refreshGroups() {
+        groups = groupCoordinator.groups()
+        groupRevision++
+    }
+
+    fun openGroup(groupId: ByteArray) {
+        recipient = null
+        selectedGroupId = groupId.groupIdText()
+        groupDraft = ""
+        groupStatus = "OpenMLS · сквозное шифрование"
+        focusManager.clearFocus()
+    }
+
+    fun createGroup(nickname: String) {
+        if (groupBusy) return
+        groupBusy = true
+        status = "Создаём защищённую MLS-группу…"
+        scope.launch {
+            try {
+                val groupId = withContext(Dispatchers.IO) {
+                    groupCoordinator.createTwoPartyGroup(profile, nickname)
+                }
+                refreshGroups()
+                openGroup(groupId)
+                groupStatus = "Группа создана · приглашение отправлено"
+            } catch (error: Exception) {
+                status = when {
+                    error.message?.contains("key package", ignoreCase = true) == true ->
+                        "@$nickname ещё не подготовил устройство для групп"
+                    else -> error.message ?: "Не удалось создать MLS-группу"
+                }
+            } finally {
+                groupBusy = false
             }
         }
     }
@@ -452,6 +499,10 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         connection = if (api.serverReachable(profile)) ServerConnection.ONLINE else ServerConnection.OFFLINE
     }
 
+    LaunchedEffect(resumeRevision) {
+        refreshGroups()
+    }
+
     DisposableEffect(profile.nickname) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -473,6 +524,10 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                             intent.getStringExtra(MessagingService.EXTRA_CONNECTION_STATE),
                         )
                     }
+                    MessagingService.ACTION_GROUPS_UPDATED -> {
+                        refreshGroups()
+                        groupStatus = "Получено новое MLS-событие"
+                    }
                 }
             }
         }
@@ -482,6 +537,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             IntentFilter().apply {
                 addAction(MessagingService.ACTION_MESSAGES_UPDATED)
                 addAction(MessagingService.ACTION_CONNECTION_CHANGED)
+                addAction(MessagingService.ACTION_GROUPS_UPDATED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -507,18 +563,57 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         }
     }
 
+    val selectedGroup: LocalGroupChat? = selectedGroupId?.let { selected ->
+        groups.firstOrNull { it.groupId.groupIdText() == selected }
+    }
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-        if (recipient == null) {
+        if (selectedGroup != null) {
+            GroupConversationScreen(
+                profileNickname = profile.nickname,
+                group = selectedGroup,
+                draft = groupDraft,
+                status = groupStatus,
+                sending = groupBusy,
+                onDraftChange = { groupDraft = it },
+                onBack = {
+                    selectedGroupId = null
+                    groupDraft = ""
+                    focusManager.clearFocus()
+                },
+                onSend = {
+                    val text = groupDraft.trim()
+                    if (text.isEmpty() || groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = "Шифруем и отправляем…"
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.sendText(profile, selectedGroup.groupId, text)
+                            }
+                            groupDraft = ""
+                            refreshGroups()
+                            groupStatus = "Доставлено серверу в зашифрованном виде"
+                        } catch (error: Exception) {
+                            groupStatus = error.message ?: "Не удалось отправить сообщение"
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
+            )
+        } else if (recipient == null) {
             ConversationsScreen(
                 profile = profile,
                 peers = peers,
-                historyRevision = historyRevision,
+                historyRevision = historyRevision + groupRevision,
                 historyStore = historyStore,
                 search = search,
                 foundUsers = foundUsers,
                 searchError = searchError,
                 searching = searching,
                 connection = connection,
+                groups = groups,
+                groupBusy = groupBusy,
                 onSearchChange = {
                     search = it
                     foundUsers = emptyList()
@@ -527,6 +622,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onSearch = ::findUser,
                 onRefreshConnection = ::refreshConnection,
                 onOpenConversation = ::openConversation,
+                onCreateGroup = ::createGroup,
+                onOpenGroup = ::openGroup,
             )
         } else {
             ConversationScreen(
@@ -653,3 +750,6 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         )
     }
 }
+
+private fun ByteArray.groupIdText(): String =
+    Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

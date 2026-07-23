@@ -86,10 +86,22 @@
   зашифрованными SQLite MLS-профилями.
 * [x] Server transport: routing metadata, роли и адресная доставка только
   versioned opaque MLS envelopes без расшифровки на сервере.
-* [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
-* [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
+* [x] Rust bridge OpenMLS для Android и desktop: persistent signer, KeyPackage,
+  Add Commit, Welcome/join и двусторонние application messages.
+* [x] Надёжный server inbox/ACK и idempotency-ID для повторной отправки
+  непрозрачных MLS events без дубликатов.
+* [x] Android: Keystore-зашифрованные group directory/history/outbox,
+  двухпользовательская группа, экран переписки и фоновый live-приём.
+* [x] Terminal: общий Rust/OpenMLS core, зашифрованное состояние и команды
+  `group publish/create/list/send/inbox/watch/sync`.
+* [ ] Полные группы и роли администратора: добавление третьего участника,
+  удаление участника и гарантированная ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.
-* [ ] Зашифрованные сообщения, картинки, войсы и удаление в группах.
+* [x] Зашифрованные текстовые сообщения в первом двухпользовательском group UI.
+* [ ] Зашифрованные картинки, войсы и удаление в группах.
+* [ ] Сделать Add Commit/Welcome единым crash-atomic operation journal внутри
+  native provider; текущий прототип надёжно повторяет сеть, но падение процесса
+  ровно между OpenMLS mutation и записью outbox требует ручного восстановления.
 
 ## Этап 4 — десктоп и эксплуатация
 

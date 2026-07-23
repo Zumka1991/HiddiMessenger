@@ -10,6 +10,7 @@ fun main(args: Array<String>) {
         "shell" -> ChatCommand.shell(args.drop(1))
         "attachments" -> ChatCommand.attachments(args.drop(1))
         "export-attachment" -> ChatCommand.exportAttachment(args.drop(1))
+        "group" -> GroupCommand.run(args.drop(1))
         else -> error("Неизвестная команда: ${args.first()}. Используйте `hiddi-terminal help`.")
     }
 }
@@ -26,6 +27,7 @@ private fun printHelp() = println(
       shell     Интерактивный режим: выбор диалога и отправка
       attachments  Список локальных зашифрованных вложений
       export-attachment  Явный экспорт: --id UUID --output PATH
+      group     MLS-группы: publish, create, list, send, inbox, watch, sync
 
     Ключи и сессии будут храниться локально; сервер получает только публичные
     prekeys и шифротексты.

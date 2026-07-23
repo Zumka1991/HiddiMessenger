@@ -3,7 +3,11 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && printf 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 COPY src ./src
-RUN cargo build --release
+# COPY can preserve source mtimes older than the cached dependency-only binary.
+# Remove that temporary executable so Cargo must link the real server source.
+RUN touch src/main.rs src/attachment_storage.rs \
+    && rm -f target/release/hiddi-server \
+    && cargo build --release
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --create-home hiddi
