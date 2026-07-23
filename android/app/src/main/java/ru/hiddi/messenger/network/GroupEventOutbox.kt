@@ -22,6 +22,7 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
         envelope: ByteArray,
         clientEventId: String? = null,
         deleteClientEventId: String? = null,
+        removeMemberNickname: String? = null,
     ) =
         synchronized(lock) {
             val entry = PendingGroupEvent(
@@ -33,6 +34,7 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                 recipients = recipients.map { it.trim().removePrefix("@").lowercase() },
                 envelope = envelope.b64(),
                 deleteClientEventId = deleteClientEventId,
+                removeMemberNickname = removeMemberNickname,
             )
             val entries = read()
             if (entries.none { it.id == entry.id }) write(entries + entry)
@@ -47,6 +49,7 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                 entry.kind,
                 entry.recipients,
                 entry.envelope.decode(),
+                entry.removeMemberNickname,
             )
             entry.deleteClientEventId?.let {
                 api.deleteGroupMessage(profile, entry.groupId.decode(), it)
@@ -73,6 +76,8 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                     envelope = item.getString("envelope"),
                     deleteClientEventId = item.optString("delete_client_event_id")
                         .takeIf(String::isNotBlank),
+                    removeMemberNickname = item.optString("remove_member_nickname")
+                        .takeIf(String::isNotBlank),
                 )
             }
         }
@@ -88,7 +93,8 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                     .put("kind", entry.kind)
                     .put("recipients", JSONArray(entry.recipients))
                     .put("envelope", entry.envelope)
-                    .put("delete_client_event_id", entry.deleteClientEventId),
+                    .put("delete_client_event_id", entry.deleteClientEventId)
+                    .put("remove_member_nickname", entry.removeMemberNickname),
             )
         }
         store.write(items.toString().encodeToByteArray())
@@ -101,6 +107,7 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
         val recipients: List<String>,
         val envelope: String,
         val deleteClientEventId: String?,
+        val removeMemberNickname: String?,
     )
 
     private companion object {

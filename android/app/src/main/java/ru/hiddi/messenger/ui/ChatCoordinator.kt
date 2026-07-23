@@ -94,6 +94,7 @@ import kotlinx.coroutines.withContext
 import ru.hiddi.messenger.network.AccountProfile
 import ru.hiddi.messenger.network.GroupMlsCoordinator
 import ru.hiddi.messenger.network.SignalMessagingApi
+import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
@@ -116,7 +117,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     val focusManager = LocalFocusManager.current
     var recipient by rememberSaveable { mutableStateOf<String?>(null) }
     var search by rememberSaveable { mutableStateOf("") }
-    var foundUsers by remember { mutableStateOf(emptyList<String>()) }
+    var foundUsers by remember { mutableStateOf(emptyList<UserSearchResult>()) }
     var searchError by rememberSaveable { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
     var draft by rememberSaveable { mutableStateOf("") }
@@ -133,6 +134,12 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var peers by remember { mutableStateOf(historyStore.peers()) }
     var historyRevision by remember { mutableIntStateOf(0) }
     var connection by remember { mutableStateOf(ServerConnection.CHECKING) }
+    var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
+    var currentPublicProfile by remember { mutableStateOf<UserSearchResult?>(null) }
+    var currentAvatar by remember { mutableStateOf<ByteArray?>(null) }
+    var knownProfiles by remember { mutableStateOf(emptyMap<String, UserSearchResult>()) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var viewedProfileNickname by rememberSaveable { mutableStateOf<String?>(null) }
     var showClearHistoryDialog by rememberSaveable { mutableStateOf(false) }
     var clearForBothSides by rememberSaveable { mutableStateOf(false) }
     var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
@@ -180,6 +187,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
+        viewedProfileNickname = null
         identityChanged = false
         historyStore.markRead(peer)
         recipient = peer
@@ -208,6 +216,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     fun openGroup(groupId: ByteArray) {
         recipient = null
+        viewedProfileNickname = null
         selectedGroupId = groupId.groupIdText()
         groupDraft = ""
         groupStatus = "OpenMLS · сквозное шифрование"
@@ -251,9 +260,9 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         scope.launch {
             try {
                 val users = api.findUsers(profile, query)
-                    .map { it.nickname }
-                    .filterNot { it == profile.nickname }
+                    .filterNot { it.nickname == profile.nickname }
                 foundUsers = users
+                knownProfiles = knownProfiles + users.associateBy { it.nickname }
                 searchError = if (users.isEmpty()) "Пользователи не найдены" else null
                 status = if (users.isEmpty()) "Поиск завершён" else "Найдено: ${users.size}"
                 focusManager.clearFocus()
@@ -497,6 +506,22 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     LaunchedEffect(profile.serverUrl) {
         connection = if (api.serverReachable(profile)) ServerConnection.ONLINE else ServerConnection.OFFLINE
+        blockedUsers = runCatching { api.blockedUsers(profile) }.getOrDefault(emptySet())
+        runCatching { api.currentProfile(profile) }.getOrNull()?.let { loaded ->
+            currentPublicProfile = loaded
+            knownProfiles = knownProfiles + (loaded.nickname to loaded)
+            currentAvatar = loaded.avatarVersion?.let {
+                runCatching { api.avatar(profile, loaded.nickname) }.getOrNull()
+            }
+        }
+    }
+
+    LaunchedEffect(peers) {
+        peers.filterNot(knownProfiles::containsKey).forEach { peer ->
+            runCatching { api.userProfile(profile, peer) }.getOrNull()?.let { loaded ->
+                knownProfiles = knownProfiles + (peer to loaded)
+            }
+        }
     }
 
     LaunchedEffect(resumeRevision) {
@@ -567,7 +592,27 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         groups.firstOrNull { it.groupId.groupIdText() == selected }
     }
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-        if (selectedGroup != null) {
+        if (showSettings) {
+            SettingsScreen(
+                account = profile,
+                api = api,
+                onBack = { showSettings = false },
+                onProfileChanged = { updated, avatar ->
+                    currentPublicProfile = updated
+                    currentAvatar = avatar
+                    knownProfiles = knownProfiles + (updated.nickname to updated)
+                },
+            )
+        } else if (viewedProfileNickname != null) {
+            val nickname = requireNotNull(viewedProfileNickname)
+            UserProfileScreen(
+                account = profile,
+                nickname = nickname,
+                api = api,
+                onBack = { viewedProfileNickname = null },
+                onMessage = { openConversation(nickname) },
+            )
+        } else if (selectedGroup != null) {
             GroupConversationScreen(
                 profileNickname = profile.nickname,
                 group = selectedGroup,
@@ -601,6 +646,56 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                                     "@$nickname ещё не подготовил устройство для групп"
                                 else -> error.message ?: "Не удалось пригласить участника"
                             }
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
+                onChangeMemberRole = { nickname, role ->
+                    if (groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = "Обновляем роль @$nickname…"
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.updateMemberRole(
+                                    profile,
+                                    selectedGroup.groupId,
+                                    nickname,
+                                    role,
+                                )
+                            }
+                            refreshGroups()
+                            groupStatus = if (role == "admin") {
+                                "@$nickname теперь администратор"
+                            } else {
+                                "@$nickname теперь обычный участник"
+                            }
+                        } catch (error: Exception) {
+                            groupStatus = error.message ?: "Не удалось изменить роль"
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
+                onRemoveMember = { nickname ->
+                    if (groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = "Создаём OpenMLS Remove Commit для @$nickname…"
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.removeMember(
+                                    profile,
+                                    selectedGroup.groupId,
+                                    nickname,
+                                )
+                            }
+                            refreshGroups()
+                            groupStatus = "@$nickname удалён · MLS-эпоха обновлена"
+                        } catch (error: Exception) {
+                            refreshGroups()
+                            groupStatus = error.message ?: "Не удалось удалить участника"
                         } finally {
                             groupBusy = false
                         }
@@ -702,6 +797,9 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 connection = connection,
                 groups = groups,
                 groupBusy = groupBusy,
+                selfProfile = currentPublicProfile,
+                selfAvatar = currentAvatar,
+                knownProfiles = knownProfiles,
                 onSearchChange = {
                     search = it
                     foundUsers = emptyList()
@@ -712,10 +810,13 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onOpenConversation = ::openConversation,
                 onCreateGroup = ::createGroup,
                 onOpenGroup = ::openGroup,
+                onOpenSettings = { showSettings = true },
+                onOpenProfile = { viewedProfileNickname = it },
             )
         } else {
             ConversationScreen(
                 recipient = recipient!!,
+                displayName = knownProfiles[recipient!!]?.displayName,
                 history = history,
                 draft = draft,
                 status = status,
@@ -723,6 +824,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 attachmentInProgress = attachmentInProgress,
                 voiceRecording = voiceRecording,
                 identityChanged = identityChanged,
+                isBlocked = recipient in blockedUsers,
                 onDraftChange = { draft = it },
                 onBack = { recipient = null; draft = ""; focusManager.clearFocus() },
                 onImageSelected = ::sendImage,
@@ -730,6 +832,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onStopVoice = ::stopAndSendVoice,
                 onVoicePermissionDenied = { status = "Без доступа к микрофону нельзя записать войс" },
                 onClearHistory = { clearForBothSides = false; showClearHistoryDialog = true },
+                onOpenProfile = { viewedProfileNickname = recipient },
                 onVerifyKey = {
                     val target = recipient ?: return@ConversationScreen
                     safetyNumber = null
@@ -741,6 +844,31 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                             "Ошибка получения кода"
                         }
                         safetyNumberTrusted = safetyNumber?.let { trustedSafetyNumbers.isTrusted(target, it) } == true
+                    }
+                },
+                onBlockUser = {
+                    val target = recipient ?: return@ConversationScreen
+                    scope.launch {
+                        try {
+                            api.blockUser(profile, target)
+                            blockedUsers = blockedUsers + target
+                            draft = ""
+                            status = "@$target добавлен в игнор"
+                        } catch (error: Exception) {
+                            status = error.message ?: "Не удалось добавить пользователя в игнор"
+                        }
+                    }
+                },
+                onUnblockUser = {
+                    val target = recipient ?: return@ConversationScreen
+                    scope.launch {
+                        try {
+                            api.unblockUser(profile, target)
+                            blockedUsers = blockedUsers - target
+                            status = "@$target убран из игнора"
+                        } catch (error: Exception) {
+                            status = error.message ?: "Не удалось убрать пользователя из игнора"
+                        }
                     }
                 },
                 onDeleteMessage = { item, forEveryone ->

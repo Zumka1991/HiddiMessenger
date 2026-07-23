@@ -12,9 +12,11 @@ import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
 import java.nio.file.Path
 
 object ChatCommand {
@@ -83,6 +85,117 @@ object ChatCommand {
         val id = args.option("--id") ?: error("Укажите --id")
         val output = args.option("--output")?.let(Path::of) ?: error("Укажите --output")
         AttachmentSupport.export(state, dataDir, id, output)
+    }
+
+    fun ignore(args: List<String>) = withVault(args) { state, _, _, _, _ ->
+        val client = HttpClient.newHttpClient()
+        val server = state.getString("server")
+        val token = state.getString("access_token")
+        when (args.firstOrNull() ?: "list") {
+            "list" -> {
+                val users = request(client, "GET", "$server/v1/blocks", null, token) as org.json.JSONArray
+                if (users.length() == 0) {
+                    println("Игнор-лист пуст.")
+                } else {
+                    println("В игноре:")
+                    for (index in 0 until users.length()) {
+                        println("  @${users.getJSONObject(index).getString("nickname")}")
+                    }
+                }
+            }
+            "add", "remove" -> {
+                val nickname = args.option("--user")
+                    ?.trim()
+                    ?.removePrefix("@")
+                    ?.lowercase()
+                    ?: error("Укажите --user nickname")
+                val encoded = URLEncoder.encode(nickname, Charsets.UTF_8)
+                val adding = args.first() == "add"
+                request(
+                    client,
+                    if (adding) "PUT" else "DELETE",
+                    "$server/v1/blocks/$encoded",
+                    null,
+                    token,
+                )
+                println(if (adding) "@$nickname добавлен в игнор." else "@$nickname убран из игнора.")
+            }
+            else -> error("Использование: ignore [list|add --user nickname|remove --user nickname]")
+        }
+    }
+
+    fun profile(args: List<String>) = withVault(args) { state, _, _, _, _ ->
+        val client = HttpClient.newHttpClient()
+        val server = state.getString("server")
+        val token = state.getString("access_token")
+        when (args.firstOrNull() ?: "show") {
+            "show" -> {
+                val profile = request(client, "GET", "$server/v1/profile", null, token) as JSONObject
+                println(
+                    buildString {
+                        append(profile.optString("display_name").ifBlank { "@${profile.getString("nickname")}" })
+                        append("  @").append(profile.getString("nickname"))
+                        profile.optString("bio").takeIf(String::isNotBlank)?.let {
+                            appendLine()
+                            append(it)
+                        }
+                        appendLine()
+                        append(
+                            if (profile.optString("avatar_version").isBlank()) {
+                                "Аватар не установлен."
+                            } else {
+                                "Аватар установлен."
+                            },
+                        )
+                    },
+                )
+            }
+            "update" -> {
+                val name = args.option("--name") ?: error("Укажите --name")
+                val bio = args.option("--bio") ?: ""
+                require(name.length <= 64 && bio.length <= 250) {
+                    "Имя должно быть до 64, описание — до 250 символов"
+                }
+                request(
+                    client,
+                    "PUT",
+                    "$server/v1/profile",
+                    JSONObject().put("display_name", name).put("bio", bio),
+                    token,
+                )
+                println("Профиль обновлён.")
+            }
+            "avatar" -> {
+                val file = args.option("--file")?.let(Path::of) ?: error("Укажите --file JPEG")
+                val image = Files.readAllBytes(file)
+                try {
+                    require(
+                        image.size in 4..(512 * 1024) &&
+                            image[0] == 0xff.toByte() &&
+                            image[1] == 0xd8.toByte() &&
+                            image[2] == 0xff.toByte(),
+                    ) { "Аватар должен быть JPEG до 512 КиБ" }
+                    request(
+                        client,
+                        "PUT",
+                        "$server/v1/profile/avatar",
+                        JSONObject().put("image", image.base64Url()),
+                        token,
+                    )
+                    println("Аватар обновлён.")
+                } finally {
+                    image.fill(0)
+                }
+            }
+            "delete-avatar" -> {
+                request(client, "DELETE", "$server/v1/profile/avatar", null, token)
+                println("Аватар удалён.")
+            }
+            else -> error(
+                "Использование: profile show|update --name NAME --bio BIO|" +
+                    "avatar --file JPEG|delete-avatar",
+            )
+        }
     }
 
     private fun receive(state: JSONObject, store: TerminalSignalStore, vault: EncryptedVault, passphrase: CharArray, dataDir: Path, printEmpty: Boolean) {

@@ -16,7 +16,7 @@ class EncryptedGroupChatStore(context: Context) {
 
     fun upsertGroup(
         groupId: ByteArray,
-        members: List<String>,
+        members: List<GroupDirectoryMember>,
         ownerNickname: String,
     ) = synchronized(lock) {
         val root = read()
@@ -30,14 +30,20 @@ class EncryptedGroupChatStore(context: Context) {
                 JSONObject()
                     .put("group_id", id)
                     .put("owner_nickname", ownerNickname)
-                    .put("members", JSONArray(members.distinct()))
+                    .put("members", JSONArray(members.map(GroupDirectoryMember::nickname).distinct()))
+                    .put("member_details", members.memberJson())
                     .put("messages", JSONArray()),
             )
         } else {
             if (existing.optString("owner_nickname").isBlank()) {
                 existing.put("owner_nickname", ownerNickname)
             }
-            existing.put("members", JSONArray((existing.members() + members).distinct()))
+            val merged = (existing.memberDetails() + members)
+                .associateBy(GroupDirectoryMember::nickname)
+                .values
+                .toList()
+            existing.put("members", JSONArray(merged.map(GroupDirectoryMember::nickname)))
+            existing.put("member_details", merged.memberJson())
         }
         write(root)
     }
@@ -51,7 +57,7 @@ class EncryptedGroupChatStore(context: Context) {
                     ownerNickname = group.optString("owner_nickname")
                         .takeIf(String::isNotBlank)
                         ?: group.members().first(),
-                    members = group.members(),
+                    memberDetails = group.memberDetails(),
                     messages = group.getJSONArray("messages").messages(),
                 )
             }
@@ -138,13 +144,14 @@ class EncryptedGroupChatStore(context: Context) {
 
     fun replaceMembers(
         groupId: ByteArray,
-        members: List<String>,
+        members: List<GroupDirectoryMember>,
         ownerNickname: String,
     ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
         group.put("owner_nickname", ownerNickname)
-        group.put("members", JSONArray(members.distinct()))
+        group.put("members", JSONArray(members.map(GroupDirectoryMember::nickname).distinct()))
+        group.put("member_details", members.memberJson())
         write(root)
     }
 
@@ -177,6 +184,37 @@ class EncryptedGroupChatStore(context: Context) {
         (0 until members.length()).map(members::getString)
     }
 
+    private fun JSONObject.memberDetails(): List<GroupDirectoryMember> {
+        val owner = optString("owner_nickname")
+        val details = optJSONArray("member_details") ?: return members().map { nickname ->
+            GroupDirectoryMember(
+                nickname = nickname,
+                role = if (nickname == owner) "owner" else "member",
+                deviceId = "",
+            )
+        }
+        return (0 until details.length()).map { index ->
+            details.getJSONObject(index).let {
+                GroupDirectoryMember(
+                    nickname = it.getString("nickname"),
+                    role = it.getString("role"),
+                    deviceId = it.optString("device_id"),
+                )
+            }
+        }
+    }
+
+    private fun List<GroupDirectoryMember>.memberJson() = JSONArray().also { output ->
+        forEach {
+            output.put(
+                JSONObject()
+                    .put("nickname", it.nickname)
+                    .put("role", it.role)
+                    .put("device_id", it.deviceId),
+            )
+        }
+    }
+
     private fun JSONArray.messages(): List<GroupChatMessage> = (0 until length()).map { index ->
         getJSONObject(index).let { message ->
             GroupChatMessage(
@@ -202,8 +240,16 @@ class EncryptedGroupChatStore(context: Context) {
 data class LocalGroupChat(
     val groupId: ByteArray,
     val ownerNickname: String,
-    val members: List<String>,
+    val memberDetails: List<GroupDirectoryMember>,
     val messages: List<GroupChatMessage>,
+) {
+    val members: List<String> get() = memberDetails.map(GroupDirectoryMember::nickname)
+}
+
+data class GroupDirectoryMember(
+    val nickname: String,
+    val role: String,
+    val deviceId: String,
 )
 
 data class GroupChatMessage(

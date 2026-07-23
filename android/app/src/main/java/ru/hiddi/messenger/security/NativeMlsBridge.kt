@@ -50,6 +50,15 @@ object NativeMlsBridge {
             nativeAddMember(groupId, keyPackage)?.let(MlsAddMemberResult::decode)
         }
 
+    /** Advances the local epoch and returns an authenticated Remove Commit. */
+    fun removeMember(groupId: ByteArray, memberDeviceId: String): ByteArray? =
+        if (loaded && memberDeviceId.isNotBlank()) {
+            nativeRemoveMember(groupId, memberDeviceId.encodeToByteArray())
+                ?.takeIf(::isValidEnvelope)
+        } else {
+            null
+        }
+
     /** Applies a cryptographically valid Welcome and persists the joined MLS group. */
     fun processWelcome(welcomeEnvelope: ByteArray): ByteArray? =
         if (loaded && isValidEnvelope(welcomeEnvelope)) {
@@ -82,6 +91,7 @@ object NativeMlsBridge {
     private external fun nativeDeleteLocalGroup(groupId: ByteArray): Boolean
     private external fun nativeCreateKeyPackage(deviceIdentity: ByteArray): ByteArray?
     private external fun nativeAddMember(groupId: ByteArray, keyPackage: ByteArray): ByteArray?
+    private external fun nativeRemoveMember(groupId: ByteArray, memberIdentity: ByteArray): ByteArray?
     private external fun nativeProcessWelcome(welcomeEnvelope: ByteArray): ByteArray?
     private external fun nativeCreateApplicationMessage(groupId: ByteArray, plaintext: ByteArray): ByteArray?
     private external fun nativeProcessApplicationMessage(groupId: ByteArray, envelope: ByteArray): ByteArray?

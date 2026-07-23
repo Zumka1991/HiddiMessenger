@@ -2,6 +2,7 @@ package ru.hiddi.messenger.network
 
 import android.content.Context
 import ru.hiddi.messenger.security.EncryptedGroupChatStore
+import ru.hiddi.messenger.security.GroupDirectoryMember
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.NativeMlsBridge
 
@@ -60,7 +61,10 @@ class GroupMlsCoordinator(
             )
             groupStore.upsertGroup(
                 groupId,
-                listOf(current.nickname, invitedNickname),
+                listOf(
+                    GroupDirectoryMember(current.nickname, "owner", deviceId),
+                    GroupDirectoryMember(invitedNickname, "member", ""),
+                ),
                 ownerNickname = current.nickname,
             )
             registrationOutbox.register(
@@ -68,6 +72,13 @@ class GroupMlsCoordinator(
                 groupId,
                 listOf(GroupMember(invitedNickname)),
             )
+            api.groupDetails(current, groupId).also { details ->
+                groupStore.replaceMembers(
+                    groupId,
+                    details.members.map(GroupMember::directory),
+                    details.ownerNickname,
+                )
+            }
             eventOutbox.retry(current)
             return groupId
         } catch (error: Throwable) {
@@ -102,7 +113,7 @@ class GroupMlsCoordinator(
                     val details = api.groupDetails(profile, groupId)
                     groupStore.upsertGroup(
                         groupId,
-                        details.members.map(GroupMember::nickname),
+                        details.members.map(GroupMember::directory),
                         ownerNickname = details.ownerNickname,
                     )
                     changedGroups += groupId
@@ -111,12 +122,17 @@ class GroupMlsCoordinator(
                     require(NativeMlsBridge.processCommit(event.groupId, event.envelope)) {
                         "OpenMLS отклонил Commit"
                     }
-                    val details = api.groupDetails(profile, event.groupId)
-                    groupStore.replaceMembers(
-                        event.groupId,
-                        details.members.map(GroupMember::nickname),
-                        details.ownerNickname,
-                    )
+                    if (event.removesRecipient) {
+                        NativeMlsBridge.deleteLocalGroup(event.groupId)
+                        groupStore.removeGroup(event.groupId)
+                    } else {
+                        val details = api.groupDetails(profile, event.groupId)
+                        groupStore.replaceMembers(
+                            event.groupId,
+                            details.members.map(GroupMember::directory),
+                            details.ownerNickname,
+                        )
+                    }
                     changedGroups += event.groupId
                 }
                 KIND_APPLICATION -> {
@@ -224,8 +240,11 @@ class GroupMlsCoordinator(
         val normalized = nickname.trim().removePrefix("@").lowercase()
         val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
             ?: error("Неизвестная локальная MLS-группа")
-        require(group.ownerNickname == current.nickname) {
-            "Приглашать участников пока может только создатель"
+        val ownRole = group.memberDetails
+            .firstOrNull { it.nickname == current.nickname }
+            ?.role
+        require(ownRole == "owner" || ownRole == "admin") {
+            "Приглашать участников может только владелец или администратор"
         }
         require(normalized !in group.members) { "@$normalized уже состоит в группе" }
         val keyPackage = api.takeMlsKeyPackage(current, normalized)
@@ -249,7 +268,7 @@ class GroupMlsCoordinator(
         )
         groupStore.upsertGroup(
             groupId,
-            group.members + normalized,
+            group.memberDetails + GroupDirectoryMember(normalized, "member", ""),
             ownerNickname = group.ownerNickname,
         )
         memberOutbox.register(current, groupId, GroupMember(normalized))
@@ -257,8 +276,62 @@ class GroupMlsCoordinator(
         val details = api.groupDetails(current, groupId)
         groupStore.replaceMembers(
             groupId,
-            details.members.map(GroupMember::nickname),
+            details.members.map(GroupMember::directory),
             details.ownerNickname,
+        )
+    }
+
+    suspend fun removeMember(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        nickname: String,
+    ) {
+        val current = ensureDeviceId(profile)
+        val normalized = nickname.trim().removePrefix("@").lowercase()
+        require(normalized != current.nickname) { "Нельзя удалить самого себя этим действием" }
+        val details = api.groupDetails(current, groupId)
+        val ownRole = details.members.firstOrNull { it.nickname == current.nickname }?.role
+            ?: error("Текущий пользователь не состоит в группе")
+        val target = details.members.firstOrNull { it.nickname == normalized }
+            ?: error("@$normalized не состоит в группе")
+        val allowed = ownRole == "owner" && target.role != "owner" ||
+            ownRole == "admin" && target.role == "member"
+        require(allowed) { "Недостаточно прав для удаления @$normalized" }
+        require(target.deviceId.isNotBlank()) { "Не найден MLS device id участника" }
+        val commit = requireNotNull(
+            NativeMlsBridge.removeMember(groupId, target.deviceId),
+        ) { "OpenMLS не создал Remove Commit" }
+        val recipients = details.members.map(GroupMember::nickname)
+            .filterNot { it == current.nickname }
+        eventOutbox.enqueue(
+            groupId,
+            KIND_COMMIT,
+            recipients,
+            commit,
+            removeMemberNickname = normalized,
+        )
+        eventOutbox.retry(current)
+        val refreshed = api.groupDetails(current, groupId)
+        groupStore.replaceMembers(
+            groupId,
+            refreshed.members.map(GroupMember::directory),
+            refreshed.ownerNickname,
+        )
+    }
+
+    suspend fun updateMemberRole(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        nickname: String,
+        role: String,
+    ) {
+        require(role == "admin" || role == "member") { "Некорректная роль" }
+        api.updateGroupMemberRole(profile, groupId, nickname, role)
+        val refreshed = api.groupDetails(profile, groupId)
+        groupStore.replaceMembers(
+            groupId,
+            refreshed.members.map(GroupMember::directory),
+            refreshed.ownerNickname,
         )
     }
 
@@ -306,3 +379,6 @@ class GroupMlsCoordinator(
         const val KIND_APPLICATION = 3
     }
 }
+
+private fun GroupMember.directory() =
+    GroupDirectoryMember(nickname = nickname, role = role, deviceId = deviceId)

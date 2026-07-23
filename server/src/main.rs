@@ -105,6 +105,9 @@ struct CurrentDeviceResponse {
 struct UserResponse {
     account_id: Uuid,
     nickname: String,
+    display_name: String,
+    bio: String,
+    avatar_version: Option<String>,
     identity_public_key: String,
 }
 
@@ -115,6 +118,44 @@ struct UserSearchQuery {
 
 #[derive(Serialize)]
 struct UserSearchItem {
+    nickname: String,
+    display_name: String,
+    bio: String,
+    avatar_version: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UserProfileResponse {
+    nickname: String,
+    display_name: String,
+    bio: String,
+    avatar_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateProfileRequest {
+    display_name: String,
+    bio: String,
+}
+
+#[derive(Deserialize)]
+struct UploadAvatarRequest {
+    image: String,
+}
+
+#[derive(Serialize)]
+struct AvatarResponse {
+    image: String,
+    version: String,
+}
+
+#[derive(Serialize)]
+struct AvatarVersionResponse {
+    version: String,
+}
+
+#[derive(Serialize)]
+struct BlockedUserResponse {
     nickname: String,
 }
 
@@ -144,6 +185,11 @@ struct AddGroupMemberRequest {
     role: String,
 }
 
+#[derive(Deserialize)]
+struct UpdateGroupRoleRequest {
+    role: String,
+}
+
 fn default_group_member_role() -> String {
     "member".to_owned()
 }
@@ -164,6 +210,7 @@ struct GroupDetailsResponse {
 struct GroupMemberResponse {
     nickname: String,
     role: String,
+    device_id: String,
 }
 
 #[derive(Serialize)]
@@ -178,6 +225,8 @@ struct SendGroupEventRequest {
     kind: u8,
     recipient_nicknames: Vec<String>,
     envelope: String,
+    #[serde(default)]
+    remove_member_nickname: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -193,6 +242,7 @@ struct GroupEventResponse {
     kind: u8,
     envelope: String,
     created_at: String,
+    removes_recipient: bool,
 }
 
 #[derive(Deserialize)]
@@ -366,7 +416,18 @@ fn build_app(state: AppState) -> Router {
             get(take_prekey_bundle),
         )
         .route("/v1/users", get(search_users))
+        .route("/v1/users/{nickname}/avatar", get(user_avatar))
         .route("/v1/users/{nickname}", get(find_user))
+        .route("/v1/profile", get(current_profile).put(update_profile))
+        .route(
+            "/v1/profile/avatar",
+            put(upload_avatar).delete(delete_avatar),
+        )
+        .route("/v1/blocks", get(blocked_users))
+        .route(
+            "/v1/blocks/{nickname}",
+            put(block_user).delete(unblock_user),
+        )
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/key-package", put(upload_mls_key_package))
         .route("/v1/groups/deletions", get(pending_group_deletions))
@@ -379,6 +440,10 @@ fn build_app(state: AppState) -> Router {
             get(group_details).delete(delete_group),
         )
         .route("/v1/groups/{group_id}/members", post(add_group_member))
+        .route(
+            "/v1/groups/{group_id}/members/{nickname}/role",
+            put(update_group_member_role),
+        )
         .route(
             "/v1/users/{nickname}/mls-key-package",
             get(take_mls_key_package),
@@ -764,7 +829,8 @@ async fn find_user(
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let user = db.query_row(
-        "SELECT accounts.id, accounts.nickname, devices.identity_public_key
+        "SELECT accounts.id, accounts.nickname, accounts.display_name, accounts.bio,
+                accounts.avatar_version, devices.identity_public_key
          FROM accounts JOIN devices ON devices.account_id = accounts.id
          WHERE accounts.nickname = ?1 ORDER BY devices.created_at ASC LIMIT 1",
         params![nickname],
@@ -773,7 +839,10 @@ async fn find_user(
             Ok(UserResponse {
                 account_id: Uuid::parse_str(&account_id).expect("database contains valid UUIDs"),
                 nickname: row.get(1)?,
-                identity_public_key: row.get(2)?,
+                display_name: row.get(2)?,
+                bio: row.get(3)?,
+                avatar_version: row.get(4)?,
+                identity_public_key: row.get(5)?,
             })
         },
     );
@@ -805,7 +874,7 @@ async fn search_users(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let mut statement = db
         .prepare(
-            "SELECT nickname FROM accounts
+            "SELECT nickname, display_name, bio, avatar_version FROM accounts
              WHERE nickname LIKE ?1 ESCAPE '\\'
              ORDER BY nickname ASC LIMIT 20",
         )
@@ -814,12 +883,285 @@ async fn search_users(
         .query_map(params![pattern], |row| {
             Ok(UserSearchItem {
                 nickname: row.get(0)?,
+                display_name: row.get(1)?,
+                bio: row.get(2)?,
+                avatar_version: row.get(3)?,
             })
         })
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not search users"))?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not search users"))?;
     Ok(Json(users))
+}
+
+async fn current_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UserProfileResponse>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.query_row(
+        "SELECT nickname, display_name, bio, avatar_version
+         FROM accounts WHERE id = ?1",
+        params![account.account_id],
+        |row| {
+            Ok(UserProfileResponse {
+                nickname: row.get(0)?,
+                display_name: row.get(1)?,
+                bio: row.get(2)?,
+                avatar_version: row.get(3)?,
+            })
+        },
+    )
+    .map(Json)
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load profile"))
+}
+
+async fn update_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateProfileRequest>,
+) -> Result<Json<UserProfileResponse>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let display_name = validate_display_name(&request.display_name)?;
+    let bio = validate_bio(&request.bio)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute(
+        "UPDATE accounts SET display_name = ?1, bio = ?2 WHERE id = ?3",
+        params![display_name, bio, account.account_id],
+    )
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not update profile",
+        )
+    })?;
+    db.query_row(
+        "SELECT nickname, display_name, bio, avatar_version
+         FROM accounts WHERE id = ?1",
+        params![account.account_id],
+        |row| {
+            Ok(UserProfileResponse {
+                nickname: row.get(0)?,
+                display_name: row.get(1)?,
+                bio: row.get(2)?,
+                avatar_version: row.get(3)?,
+            })
+        },
+    )
+    .map(Json)
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load profile"))
+}
+
+async fn upload_avatar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UploadAvatarRequest>,
+) -> Result<(StatusCode, Json<AvatarVersionResponse>), Error> {
+    let account = authenticate(&state, &headers)?;
+    let image = decode_avatar(&request.image)?;
+    let version = Uuid::new_v4().to_string();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute(
+        "UPDATE accounts SET avatar = ?1, avatar_version = ?2 WHERE id = ?3",
+        params![image, version, account.account_id],
+    )
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not update avatar"))?;
+    Ok((StatusCode::CREATED, Json(AvatarVersionResponse { version })))
+}
+
+async fn delete_avatar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute(
+        "UPDATE accounts SET avatar = NULL, avatar_version = NULL WHERE id = ?1",
+        params![account.account_id],
+    )
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete avatar"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_avatar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<Json<AvatarResponse>, Error> {
+    authenticate(&state, &headers)?;
+    let nickname =
+        normalize_nickname(&nickname).ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.query_row(
+        "SELECT avatar, avatar_version FROM accounts
+         WHERE nickname = ?1 AND avatar IS NOT NULL AND avatar_version IS NOT NULL",
+        params![nickname],
+        |row| {
+            let image: Vec<u8> = row.get(0)?;
+            Ok(AvatarResponse {
+                image: URL_SAFE_NO_PAD.encode(image),
+                version: row.get(1)?,
+            })
+        },
+    )
+    .map(Json)
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "avatar not found"),
+        _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load avatar"),
+    })
+}
+
+async fn blocked_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BlockedUserResponse>>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT accounts.nickname
+             FROM blocks JOIN accounts ON accounts.id = blocks.blocked_account_id
+             WHERE blocks.blocker_account_id = ?1
+             ORDER BY accounts.nickname",
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load block list",
+            )
+        })?;
+    let users = statement
+        .query_map(params![account.account_id], |row| {
+            Ok(BlockedUserResponse {
+                nickname: row.get(0)?,
+            })
+        })
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load block list",
+            )
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load block list",
+            )
+        })?;
+    Ok(Json(users))
+}
+
+async fn block_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_nickname): axum::extract::Path<String>,
+) -> Result<StatusCode, Error> {
+    let blocker = authenticate(&state, &headers)?;
+    let nickname = normalize_nickname(&raw_nickname)
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid blocked nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let blocked_id: String = db
+        .query_row(
+            "SELECT id FROM accounts WHERE nickname = ?1",
+            params![nickname],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                Error(StatusCode::NOT_FOUND, "blocked user not found")
+            }
+            _ => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not find blocked user",
+            ),
+        })?;
+    if blocked_id == blocker.account_id {
+        return Err(Error(StatusCode::BAD_REQUEST, "cannot block yourself"));
+    }
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    transaction
+        .execute(
+            "INSERT INTO blocks (blocker_account_id, blocked_account_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(blocker_account_id, blocked_account_id) DO NOTHING",
+            params![blocker.account_id, blocked_id],
+        )
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not block user"))?;
+    transaction
+        .execute(
+            "DELETE FROM messages
+             WHERE sender_account_id = ?1 AND recipient_account_id = ?2",
+            params![blocked_id, blocker.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not clear blocked messages",
+            )
+        })?;
+    transaction
+        .execute(
+            "DELETE FROM attachments
+             WHERE sender_account_id = ?1 AND recipient_account_id = ?2",
+            params![blocked_id, blocker.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not clear blocked attachments",
+            )
+        })?;
+    transaction
+        .commit()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not block user"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unblock_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_nickname): axum::extract::Path<String>,
+) -> Result<StatusCode, Error> {
+    let blocker = authenticate(&state, &headers)?;
+    let nickname = normalize_nickname(&raw_nickname)
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid blocked nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute(
+        "DELETE FROM blocks
+         WHERE blocker_account_id = ?1
+           AND blocked_account_id = (SELECT id FROM accounts WHERE nickname = ?2)",
+        params![blocker.account_id, nickname],
+    )
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not unblock user"))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn send_message(
@@ -864,6 +1206,27 @@ async fn send_message(
                 "could not find recipient",
             ),
         })?;
+    let blocked: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM blocks
+                WHERE blocker_account_id = ?1 AND blocked_account_id = ?2
+             )",
+            params![recipient_id, sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check recipient block list",
+            )
+        })?;
+    if blocked {
+        return Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({"message_id": message_id})),
+        ));
+    }
     db.execute(
         "INSERT INTO messages (id, sender_account_id, recipient_account_id, ciphertext)
          VALUES (?1, ?2, ?3, ?4)",
@@ -1103,7 +1466,10 @@ async fn group_details(
         .map_err(|_| Error(StatusCode::NOT_FOUND, "group not found"))?;
     let mut statement = db
         .prepare(
-            "SELECT accounts.nickname, group_members.role
+            "SELECT accounts.nickname, group_members.role,
+                    (SELECT devices.id FROM devices
+                     WHERE devices.account_id = accounts.id
+                     ORDER BY devices.created_at ASC LIMIT 1)
              FROM group_members
              JOIN accounts ON accounts.id = group_members.account_id
              WHERE group_members.group_id = ?1
@@ -1121,6 +1487,7 @@ async fn group_details(
             Ok(GroupMemberResponse {
                 nickname: row.get(0)?,
                 role: row.get(1)?,
+                device_id: row.get(2)?,
             })
         })
         .map_err(|_| {
@@ -1233,6 +1600,87 @@ async fn add_group_member(
             "could not add group member",
         )
     })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_group_member_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((group_id, raw_nickname)): axum::extract::Path<(String, String)>,
+    Json(request): Json<UpdateGroupRoleRequest>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    validate_group_id(&group_id)?;
+    let nickname = normalize_nickname(&raw_nickname).ok_or(Error(
+        StatusCode::BAD_REQUEST,
+        "invalid group member nickname",
+    ))?;
+    if !matches!(request.role.as_str(), "admin" | "member") {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid group member role"));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let requester_role: String = db
+        .query_row(
+            "SELECT role FROM group_members WHERE group_id = ?1 AND account_id = ?2",
+            params![group_id, account.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::FORBIDDEN,
+                "only the group owner may change roles",
+            )
+        })?;
+    if requester_role != "owner" {
+        return Err(Error(
+            StatusCode::FORBIDDEN,
+            "only the group owner may change roles",
+        ));
+    }
+    let updated = db
+        .execute(
+            "UPDATE group_members
+             SET role = ?1
+             WHERE group_id = ?2
+               AND account_id = (SELECT id FROM accounts WHERE nickname = ?3)
+               AND role != 'owner'",
+            params![request.role, group_id, nickname],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not update group member role",
+            )
+        })?;
+    if updated == 0 {
+        let current_role: Option<String> = db
+            .query_row(
+                "SELECT group_members.role
+                 FROM group_members JOIN accounts ON accounts.id = group_members.account_id
+                 WHERE group_members.group_id = ?1 AND accounts.nickname = ?2",
+                params![group_id, nickname],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not inspect group member role",
+                )
+            })?;
+        return match current_role.as_deref() {
+            Some("owner") => Err(Error(
+                StatusCode::BAD_REQUEST,
+                "owner role cannot be changed",
+            )),
+            Some(role) if role == request.role => Ok(StatusCode::NO_CONTENT),
+            Some(_) => Err(Error(StatusCode::CONFLICT, "group role update conflicted")),
+            None => Err(Error(StatusCode::NOT_FOUND, "group member not found")),
+        };
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1538,6 +1986,26 @@ async fn send_group_event(
             "invalid group event recipients",
         ));
     }
+    let recipients = request
+        .recipient_nicknames
+        .iter()
+        .map(|nickname| {
+            normalize_nickname(nickname).ok_or(Error(
+                StatusCode::BAD_REQUEST,
+                "invalid group member nickname",
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipient_set = recipients
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if recipient_set.len() != recipients.len() {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "duplicate group event recipient",
+        ));
+    }
     let db = state
         .db
         .lock()
@@ -1563,59 +2031,214 @@ async fn send_group_event(
             "only an owner or admin may send this MLS event",
         ));
     }
-    let mut event_ids = Vec::with_capacity(request.recipient_nicknames.len());
-    for raw_nickname in request.recipient_nicknames {
-        let nickname = normalize_nickname(&raw_nickname).ok_or(Error(
-            StatusCode::BAD_REQUEST,
-            "invalid group member nickname",
-        ))?;
-        let recipient_id: String = db.query_row(
-            "SELECT accounts.id FROM accounts JOIN group_members ON group_members.account_id = accounts.id WHERE accounts.nickname = ?1 AND group_members.group_id = ?2",
-            params![nickname, group_id], |row| row.get(0),
-        ).map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::FORBIDDEN, "recipient is not a group member"),
-            _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not authorize group recipient"),
-        })?;
-        let existing_event_id: Option<String> = db
-            .query_row(
-                "SELECT id FROM group_events
-                 WHERE sender_account_id = ?1
-                   AND recipient_account_id = ?2
-                   AND client_event_id = ?3",
-                params![sender.account_id, recipient_id, request.client_event_id],
-                |row| row.get(0),
+    let existing_events = {
+        let mut statement = db
+            .prepare(
+                "SELECT group_events.id, accounts.nickname
+                 FROM group_events JOIN accounts
+                   ON accounts.id = group_events.recipient_account_id
+                 WHERE group_events.sender_account_id = ?1
+                   AND group_events.client_event_id = ?2",
             )
-            .optional()
             .map_err(|_| {
                 Error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "could not check group event idempotency",
                 )
             })?;
-        if let Some(existing_event_id) = existing_event_id {
-            event_ids.push(
-                Uuid::parse_str(&existing_event_id)
-                    .expect("database contains valid group event UUIDs"),
-            );
-            continue;
+        statement
+            .query_map(params![sender.account_id, request.client_event_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check group event idempotency",
+                )
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not check group event idempotency",
+                )
+            })?
+    };
+    if !existing_events.is_empty() {
+        let existing_recipients = existing_events
+            .iter()
+            .map(|(_, nickname)| nickname.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if existing_recipients != recipient_set {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                "group client event id was reused with other recipients",
+            ));
         }
+        return Ok((
+            StatusCode::CREATED,
+            Json(SendGroupEventResponse {
+                event_ids: recipients
+                    .iter()
+                    .map(|nickname| {
+                        let id = existing_events
+                            .iter()
+                            .find_map(|(id, existing_nickname)| {
+                                (existing_nickname == nickname).then_some(id)
+                            })
+                            .expect("recipient set was checked above");
+                        Uuid::parse_str(id).expect("database contains valid group event UUIDs")
+                    })
+                    .collect(),
+            }),
+        ));
+    }
+    let removal = if let Some(raw_target) = request.remove_member_nickname.as_deref() {
+        if request.kind != 2 {
+            return Err(Error(
+                StatusCode::BAD_REQUEST,
+                "member removal requires an MLS Commit event",
+            ));
+        }
+        let target_nickname = normalize_nickname(raw_target).ok_or(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid removed member nickname",
+        ))?;
+        let (target_id, target_role): (String, String) = db
+            .query_row(
+                "SELECT accounts.id, group_members.role
+                 FROM accounts JOIN group_members ON group_members.account_id = accounts.id
+                 WHERE group_members.group_id = ?1 AND accounts.nickname = ?2",
+                params![group_id, target_nickname],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error(StatusCode::NOT_FOUND, "removed group member not found")
+                }
+                _ => Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not inspect removed group member",
+                ),
+            })?;
+        let allowed = match sender_role.as_str() {
+            "owner" => target_role != "owner",
+            "admin" => target_role == "member",
+            _ => false,
+        };
+        if !allowed || target_id == sender.account_id {
+            return Err(Error(
+                StatusCode::FORBIDDEN,
+                "not allowed to remove this group member",
+            ));
+        }
+        let expected_recipients = {
+            let mut statement = db
+                .prepare(
+                    "SELECT accounts.nickname
+                     FROM group_members JOIN accounts ON accounts.id = group_members.account_id
+                     WHERE group_members.group_id = ?1 AND group_members.account_id != ?2",
+                )
+                .map_err(|_| {
+                    Error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not load group members",
+                    )
+                })?;
+            statement
+                .query_map(params![group_id, sender.account_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|_| {
+                    Error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not load group members",
+                    )
+                })?
+                .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()
+                .map_err(|_| {
+                    Error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not load group members",
+                    )
+                })?
+        };
+        if recipient_set != expected_recipients {
+            return Err(Error(
+                StatusCode::BAD_REQUEST,
+                "remove commit must be routed to every other current member",
+            ));
+        }
+        Some((target_id, target_nickname))
+    } else {
+        None
+    };
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut event_ids = Vec::with_capacity(recipients.len());
+    for nickname in recipients {
+        let recipient_id: String = transaction.query_row(
+            "SELECT accounts.id FROM accounts JOIN group_members ON group_members.account_id = accounts.id WHERE accounts.nickname = ?1 AND group_members.group_id = ?2",
+            params![nickname, group_id], |row| row.get(0),
+        ).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::FORBIDDEN, "recipient is not a group member"),
+            _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not authorize group recipient"),
+        })?;
         let event_id = Uuid::new_v4();
-        db.execute(
-            "INSERT INTO group_events
-                (id, group_id, sender_account_id, recipient_account_id, client_event_id, kind, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                event_id.to_string(),
-                group_id,
-                sender.account_id,
-                recipient_id,
-                request.client_event_id,
-                request.kind,
-                request.envelope
-            ],
-        ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store group event"))?;
+        let removes_recipient = removal
+            .as_ref()
+            .is_some_and(|(target_id, _)| target_id == &recipient_id);
+        transaction
+            .execute(
+                "INSERT INTO group_events
+                (id, group_id, sender_account_id, recipient_account_id, client_event_id,
+                 kind, envelope, removes_recipient)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    event_id.to_string(),
+                    group_id,
+                    sender.account_id,
+                    recipient_id,
+                    request.client_event_id,
+                    request.kind,
+                    request.envelope,
+                    removes_recipient,
+                ],
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not store group event",
+                )
+            })?;
         event_ids.push(event_id);
     }
+    if let Some((target_id, _)) = removal {
+        let removed = transaction
+            .execute(
+                "DELETE FROM group_members WHERE group_id = ?1 AND account_id = ?2",
+                params![group_id, target_id],
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not remove group member",
+                )
+            })?;
+        if removed != 1 {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                "group membership changed during removal",
+            ));
+        }
+    }
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store group event",
+        )
+    })?;
     drop(db);
     state.message_notify.notify_waiters();
     Ok((
@@ -1636,7 +2259,8 @@ async fn group_event_inbox(
     let mut statement = db
         .prepare(
             "SELECT group_events.id, group_events.group_id, accounts.nickname,
-                    group_events.kind, group_events.envelope, group_events.created_at
+                    group_events.kind, group_events.envelope, group_events.created_at,
+                    group_events.removes_recipient
              FROM group_events
              JOIN accounts ON accounts.id = group_events.sender_account_id
              WHERE group_events.recipient_account_id = ?1
@@ -1660,6 +2284,7 @@ async fn group_event_inbox(
                 kind: row.get(3)?,
                 envelope: row.get(4)?,
                 created_at: row.get(5)?,
+                removes_recipient: row.get(6)?,
             })
         })
         .map_err(|_| {
@@ -2183,6 +2808,27 @@ async fn upload_attachment(
                 "could not find recipient",
             ),
         })?;
+    let blocked: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM blocks
+                WHERE blocker_account_id = ?1 AND blocked_account_id = ?2
+             )",
+            params![recipient_id, sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check recipient block list",
+            )
+        })?;
+    if blocked {
+        return Ok((
+            StatusCode::CREATED,
+            Json(UploadAttachmentResponse { attachment_id }),
+        ));
+    }
     let used_bytes: i64 = db
         .query_row(
             "SELECT COALESCE(SUM(length(ciphertext)), 0) FROM attachments WHERE sender_account_id = ?1",
@@ -2309,6 +2955,10 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY NOT NULL,
             nickname TEXT UNIQUE NOT NULL COLLATE NOCASE,
+            display_name TEXT NOT NULL DEFAULT '',
+            bio TEXT NOT NULL DEFAULT '',
+            avatar BLOB,
+            avatar_version TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS devices (
@@ -2318,6 +2968,13 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             access_token_hash TEXT NOT NULL UNIQUE,
             registration_id INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS blocks (
+            blocker_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            blocked_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(blocker_account_id, blocked_account_id),
+            CHECK(blocker_account_id != blocked_account_id)
          );
          CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY NOT NULL,
@@ -2346,7 +3003,8 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             kind INTEGER NOT NULL CHECK(kind IN (1, 2, 3)),
             envelope TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            delivered_at TEXT
+            delivered_at TEXT,
+            removes_recipient INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS mls_key_packages (
             device_id TEXT PRIMARY KEY NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -2442,6 +3100,47 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    let has_group_removes_recipient = db
+        .prepare("PRAGMA table_info(group_events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|column| column == "removes_recipient");
+    if !has_group_removes_recipient {
+        db.execute(
+            "ALTER TABLE group_events
+             ADD COLUMN removes_recipient INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let account_columns = db
+        .prepare("PRAGMA table_info(accounts)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !account_columns
+        .iter()
+        .any(|column| column == "display_name")
+    {
+        db.execute(
+            "ALTER TABLE accounts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !account_columns.iter().any(|column| column == "bio") {
+        db.execute(
+            "ALTER TABLE accounts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !account_columns.iter().any(|column| column == "avatar") {
+        db.execute("ALTER TABLE accounts ADD COLUMN avatar BLOB", [])?;
+    }
+    if !account_columns
+        .iter()
+        .any(|column| column == "avatar_version")
+    {
+        db.execute("ALTER TABLE accounts ADD COLUMN avatar_version TEXT", [])?;
+    }
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_pending
          ON messages(recipient_account_id, delivered_at, created_at)",
@@ -2515,6 +3214,49 @@ fn normalize_nickname(value: &str) -> Option<String> {
     valid.then_some(nickname)
 }
 
+fn validate_display_name(value: &str) -> Result<String, Error> {
+    let normalized = value.trim();
+    if normalized.chars().count() > 64 || normalized.chars().any(char::is_control) {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid display name"));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn validate_bio(value: &str) -> Result<String, Error> {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim();
+    if normalized.chars().count() > 250
+        || normalized
+            .chars()
+            .any(|character| character.is_control() && character != '\n' && character != '\t')
+    {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid bio"));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn decode_avatar(value: &str) -> Result<Vec<u8>, Error> {
+    if value.is_empty() || value.len() > MAX_AVATAR_BASE64_BYTES {
+        return Err(Error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "avatar must be at most 512 KiB",
+        ));
+    }
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| Error(StatusCode::BAD_REQUEST, "avatar must be URL-safe base64"))?;
+    if decoded.len() > MAX_AVATAR_BYTES
+        || !decoded.starts_with(&[0xff, 0xd8, 0xff])
+        || !decoded.ends_with(&[0xff, 0xd9])
+    {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "avatar must be a JPEG image",
+        ));
+    }
+    Ok(decoded)
+}
+
 fn validate_signed_prekey(key: &PublicPreKey) -> Result<(), Error> {
     validate_key(&key.public_key)?;
     let signature = key.signature.as_deref().ok_or(Error(
@@ -2572,6 +3314,8 @@ fn hash(value: &str) -> String {
 
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+const MAX_AVATAR_BASE64_BYTES: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;
 const MAX_JSON_BODY_BYTES: usize = MAX_ATTACHMENT_BASE64_BYTES + 16 * 1024;
 const ATTACHMENT_QUOTA_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -2853,6 +3597,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocked_sender_is_silently_dropped_until_unblocked() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let (status, _) = request(&app, "PUT", "/v1/blocks/alice", Some(&bob), String::new()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, blocks) = request(&app, "GET", "/v1/blocks", Some(&bob), String::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&blocks).unwrap()[0]["nickname"],
+            "alice"
+        );
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/v1/messages",
+            Some(&alice),
+            serde_json::json!({
+                "recipient_nickname": "bob",
+                "ciphertext": "aGVsbG8",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, inbox) = request(&app, "GET", "/v1/messages", Some(&bob), String::new()).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let (status, _) = request(
+            &app,
+            "DELETE",
+            "/v1/blocks/alice",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/v1/messages",
+            Some(&alice),
+            serde_json::json!({
+                "recipient_nickname": "bob",
+                "ciphertext": "aGVsbG8",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, inbox) = request(&app, "GET", "/v1/messages", Some(&bob), String::new()).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_metadata_and_avatar_are_available_to_authenticated_users() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let (status, profile) = request(
+            &app,
+            "PUT",
+            "/v1/profile",
+            Some(&alice),
+            serde_json::json!({
+                "display_name": "Alice Example",
+                "bio": "Private messages, public profile."
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let profile: serde_json::Value = serde_json::from_str(&profile).unwrap();
+        assert_eq!(profile["nickname"], "alice");
+        assert_eq!(profile["display_name"], "Alice Example");
+
+        let avatar = URL_SAFE_NO_PAD.encode([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+        let (status, uploaded) = request(
+            &app,
+            "PUT",
+            "/v1/profile/avatar",
+            Some(&alice),
+            serde_json::json!({"image": avatar}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let version = serde_json::from_str::<serde_json::Value>(&uploaded).unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (status, search) = request(
+            &app,
+            "GET",
+            "/v1/users?query=ali",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let search: serde_json::Value = serde_json::from_str(&search).unwrap();
+        assert_eq!(search[0]["display_name"], "Alice Example");
+        assert_eq!(search[0]["avatar_version"], version);
+
+        let (status, downloaded) = request(
+            &app,
+            "GET",
+            "/v1/users/alice/avatar",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&downloaded).unwrap()["image"],
+            avatar
+        );
+    }
+
+    #[tokio::test]
     async fn group_transport_accepts_only_member_routed_opaque_mls_events() {
         let app = test_app();
         let alice = register_account(&app, "alice").await;
@@ -3028,6 +3905,77 @@ mod tests {
         );
         let (status, _) = request(
             &app,
+            "PUT",
+            format!("/v1/groups/{group_id}/members/charlie/role").as_str(),
+            Some(&bob),
+            serde_json::json!({"role":"admin"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = request(
+            &app,
+            "PUT",
+            format!("/v1/groups/{group_id}/members/charlie/role").as_str(),
+            Some(&alice),
+            serde_json::json!({"role":"admin"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let remove_bob_id = URL_SAFE_NO_PAD.encode([12_u8; 32]);
+        let remove_bob = serde_json::json!({
+            "client_event_id": remove_bob_id,
+            "kind": 2,
+            "recipient_nicknames": ["bob", "charlie"],
+            "envelope": URL_SAFE_NO_PAD.encode([1_u8, 2, 99]),
+            "remove_member_nickname": "bob",
+        })
+        .to_string();
+        let (status, first_removal) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&alice),
+            remove_bob.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, repeated_removal) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&alice),
+            remove_bob,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(first_removal, repeated_removal);
+        let (status, inbox) =
+            request(&app, "GET", "/v1/groups/events", Some(&bob), String::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        let inbox = serde_json::from_str::<serde_json::Value>(&inbox).unwrap();
+        assert_eq!(inbox.as_array().unwrap().len(), 1);
+        assert_eq!(inbox[0]["removes_recipient"], true);
+        let removal_event_id = inbox[0]["event_id"].as_str().unwrap();
+        let (status, _) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/events/{removal_event_id}").as_str(),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = request(
+            &app,
+            "GET",
+            format!("/v1/groups/{group_id}").as_str(),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = request(
+            &app,
             "DELETE",
             format!("/v1/groups/{group_id}").as_str(),
             Some(&bob),
@@ -3048,7 +3996,7 @@ mod tests {
             &app,
             "GET",
             "/v1/groups/deletions",
-            Some(&bob),
+            Some(&charlie),
             String::new(),
         )
         .await;
@@ -3059,7 +4007,7 @@ mod tests {
             &app,
             "POST",
             format!("/v1/groups/deletions/{deletion_id}").as_str(),
-            Some(&bob),
+            Some(&charlie),
             String::new(),
         )
         .await;

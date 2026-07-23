@@ -27,6 +27,16 @@ env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-t
   --to nickname --message 'Привет'
 
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal inbox
+
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal ignore list
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal ignore add --user nickname
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal ignore remove --user nickname
+
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal profile show
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal profile update \
+  --name 'Видимое имя' --bio 'Описание до 250 символов'
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal profile avatar \
+  --file /path/to/sanitized-avatar.jpg
 ```
 
 MLS-группы используют тот же Rust/OpenMLS core, что и Android. Сначала соберите
@@ -43,6 +53,8 @@ env JAVA_HOME=/opt/android-studio/jbr gradle installDist --no-daemon
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group publish
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group create --with nickname
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group invite --group GROUP_PREFIX --with another_nickname
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group role --group GROUP_PREFIX --with nickname --role admin
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group remove --group GROUP_PREFIX --with nickname
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group list
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group send --message 'Привет группе'
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group delete-message --group GROUP_PREFIX
@@ -52,6 +64,6 @@ env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-t
 
 64-байтный ключ шифрования OpenMLS SQLite хранится только внутри существующего
 Argon2id/AES-GCM vault. Владелец уже может приглашать третьего и последующих
-участников через OpenMLS Add Commit/Welcome и удалять группу. Удаление
-участников с обязательной ротацией epoch и multi-device остаются следующим
-этапом.
+участников через OpenMLS Add Commit/Welcome, назначать администраторов,
+исключать участника через Remove Commit с ротацией epoch и удалять группу.
+Multi-device остаётся следующим этапом.

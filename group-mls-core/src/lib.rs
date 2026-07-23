@@ -297,6 +297,36 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeAd
     target_os = "macos"
 ))]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeRemoveMember(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    group_id: JByteArray,
+    member_identity: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let group_id = env.convert_byte_array(&group_id)?;
+            let member_identity = env.convert_byte_array(&member_identity)?;
+            let commit = storage::remove_member(&group_id, &member_identity)
+                .map_err(|_| jni::errors::Error::NullPtr("could not remove MLS member"))?;
+            let envelope = MlsEnvelope {
+                kind: MlsEnvelopeKind::Commit,
+                bytes: commit,
+            }
+            .encode()
+            .map_err(|_| jni::errors::Error::NullPtr("could not encode MLS remove commit"))?;
+            Ok::<jbyteArray, jni::errors::Error>(env.byte_array_from_slice(&envelope)?.into_raw())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeProcessWelcome(
     mut unowned_env: EnvUnowned,
     _class: JClass,
@@ -678,6 +708,30 @@ mod tests {
                 .process_application_message(&group_id, &three_party_message)
                 .unwrap(),
             b"hello three-member MLS"
+        );
+        let remove_charlie = alice_provider
+            .remove_member(&group_id, b"charlie-device")
+            .unwrap();
+        bob_provider
+            .process_commit(&group_id, &remove_charlie)
+            .unwrap();
+        charlie_provider
+            .process_commit(&group_id, &remove_charlie)
+            .unwrap();
+        let post_removal_message = alice_provider
+            .create_application_message(&group_id, b"after Charlie removal")
+            .unwrap();
+        assert_eq!(
+            bob_provider
+                .process_application_message(&group_id, &post_removal_message)
+                .unwrap(),
+            b"after Charlie removal"
+        );
+        assert!(
+            charlie_provider
+                .process_application_message(&group_id, &post_removal_message)
+                .is_err(),
+            "removed member must not decrypt a message from the new epoch",
         );
         assert!(
             MlsGroup::load(alice_provider.storage(), &GroupId::from_slice(&group_id))

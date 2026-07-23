@@ -64,6 +64,8 @@ fun GroupConversationScreen(
     onDraftChange: (String) -> Unit,
     onBack: () -> Unit,
     onInviteMember: (String) -> Unit,
+    onChangeMemberRole: (String, String) -> Unit,
+    onRemoveMember: (String) -> Unit,
     onClearHistory: () -> Unit,
     onDeleteGroup: () -> Unit,
     onDeleteMessage: (GroupChatMessage, Boolean) -> Unit,
@@ -72,9 +74,13 @@ fun GroupConversationScreen(
     val listState = rememberLazyListState()
     val others = group.members.filterNot { it == profileNickname }
     val title = others.joinToString { "@$it" }.ifBlank { "Защищённая группа" }
-    val isOwner = group.ownerNickname == profileNickname
+    val ownRole = group.memberDetails.firstOrNull { it.nickname == profileNickname }?.role
+    val isOwner = ownRole == "owner"
+    val canManage = ownRole == "owner" || ownRole == "admin"
     var menuExpanded by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
+    var showMembersDialog by remember { mutableStateOf(false) }
+    var selectedMemberForRemoval by remember { mutableStateOf<String?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var selectedForActions by remember { mutableStateOf<GroupChatMessage?>(null) }
@@ -127,7 +133,7 @@ fun GroupConversationScreen(
                     )
                 }
             }
-            if (isOwner) {
+            if (canManage) {
                 Box {
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Rounded.MoreVert, contentDescription = "Управление группой")
@@ -145,21 +151,31 @@ fun GroupConversationScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("Очистить локальную историю") },
-                            leadingIcon = { Icon(Icons.Rounded.DeleteSweep, contentDescription = null) },
+                            text = { Text("Участники и роли") },
+                            leadingIcon = { Icon(Icons.Rounded.Group, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
-                                showClearDialog = true
+                                showMembersDialog = true
                             },
                         )
-                        DropdownMenuItem(
-                            text = { Text("Удалить группу") },
-                            leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                showDeleteDialog = true
-                            },
-                        )
+                        if (isOwner) {
+                            DropdownMenuItem(
+                                text = { Text("Очистить локальную историю") },
+                                leadingIcon = { Icon(Icons.Rounded.DeleteSweep, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    showClearDialog = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Удалить группу") },
+                                leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    showDeleteDialog = true
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -278,6 +294,94 @@ fun GroupConversationScreen(
                 androidx.compose.material3.TextButton(onClick = { showInviteDialog = false }) {
                     Text("Отмена")
                 }
+            },
+        )
+    }
+    if (showMembersDialog) {
+        AlertDialog(
+            onDismissRequest = { showMembersDialog = false },
+            title = { Text("Участники и роли") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    group.memberDetails.forEach { member ->
+                        val mayRemove = member.nickname != profileNickname &&
+                            (ownRole == "owner" && member.role != "owner" ||
+                                ownRole == "admin" && member.role == "member")
+                        Column {
+                            Text(
+                                "@${member.nickname} · ${
+                                    when (member.role) {
+                                        "owner" -> "владелец"
+                                        "admin" -> "администратор"
+                                        else -> "участник"
+                                    }
+                                }",
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Row {
+                                if (isOwner && member.nickname != profileNickname && member.role != "owner") {
+                                    androidx.compose.material3.TextButton(
+                                        onClick = {
+                                            showMembersDialog = false
+                                            onChangeMemberRole(
+                                                member.nickname,
+                                                if (member.role == "admin") "member" else "admin",
+                                            )
+                                        },
+                                    ) {
+                                        Text(
+                                            if (member.role == "admin") {
+                                                "Снять админа"
+                                            } else {
+                                                "Сделать админом"
+                                            },
+                                        )
+                                    }
+                                }
+                                if (mayRemove) {
+                                    androidx.compose.material3.TextButton(
+                                        onClick = {
+                                            showMembersDialog = false
+                                            selectedMemberForRemoval = member.nickname
+                                        },
+                                    ) {
+                                        Text("Удалить", color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { showMembersDialog = false }) {
+                    Text("Готово")
+                }
+            },
+        )
+    }
+    selectedMemberForRemoval?.let { nickname ->
+        AlertDialog(
+            onDismissRequest = { selectedMemberForRemoval = null },
+            title = { Text("Удалить @$nickname?") },
+            text = {
+                Text(
+                    "OpenMLS сменит эпоху. После применения Remove Commit участник " +
+                        "не сможет читать новые сообщения группы.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        selectedMemberForRemoval = null
+                        onRemoveMember(nickname)
+                    },
+                ) { Text("Удалить") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { selectedMemberForRemoval = null },
+                ) { Text("Отмена") }
             },
         )
     }

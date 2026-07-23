@@ -95,7 +95,11 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                 members = response.getJSONArray("members").let { members ->
                     (0 until members.length()).map { index ->
                         members.getJSONObject(index).let {
-                            GroupMember(it.getString("nickname"), it.getString("role"))
+                            GroupMember(
+                                nickname = it.getString("nickname"),
+                                role = it.getString("role"),
+                                deviceId = it.getString("device_id"),
+                            )
                         }
                     }
                 },
@@ -114,6 +118,21 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                 .put("nickname", member.nickname.trim().removePrefix("@").lowercase())
                 .put("role", member.role)
                 .toString(),
+            profile.accessToken,
+        )
+    }
+
+    suspend fun updateGroupMemberRole(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        nickname: String,
+        role: String,
+    ) = withContext(Dispatchers.IO) {
+        request(
+            "PUT",
+            "${profile.serverUrl}/v1/groups/${groupId.b64()}/members/" +
+                "${nickname.trim().removePrefix("@").lowercase()}/role",
+            JSONObject().put("role", role).toString(),
             profile.accessToken,
         )
     }
@@ -178,6 +197,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         kind: Int,
         recipients: List<String>,
         envelope: ByteArray,
+        removeMemberNickname: String? = null,
     ): List<String> = withContext(Dispatchers.IO) {
         require(groupId.size in 8..64) { "Некорректный MLS group id" }
         require(clientEventId.isNotBlank()) { "Некорректный client event id" }
@@ -196,6 +216,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                     .put("kind", kind)
                     .put("recipient_nicknames", recipientJson)
                     .put("envelope", envelope.b64())
+                    .put("remove_member_nickname", removeMemberNickname)
                     .toString(),
                 profile.accessToken,
             ),
@@ -216,6 +237,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                             kind = event.getInt("kind"),
                             envelope = event.getString("envelope").decode(),
                             createdAt = event.getString("created_at"),
+                            removesRecipient = event.optBoolean("removes_recipient"),
                         )
                     }
                 }
@@ -257,7 +279,98 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         val normalized = nickname.trim().removePrefix("@").lowercase()
         val encodedQuery = URLEncoder.encode(normalized, Charsets.UTF_8.name())
         JSONArray(request("GET", "${profile.serverUrl}/v1/users?query=$encodedQuery", null, profile.accessToken))
-            .let { items -> (0 until items.length()).map { UserSearchResult(items.getJSONObject(it).getString("nickname")) } }
+            .let { items ->
+                (0 until items.length()).map { index ->
+                    items.getJSONObject(index).userProfile()
+                }
+            }
+    }
+
+    suspend fun currentProfile(profile: AccountProfile): UserSearchResult = withContext(Dispatchers.IO) {
+        JSONObject(
+            request("GET", "${profile.serverUrl}/v1/profile", null, profile.accessToken),
+        ).userProfile()
+    }
+
+    suspend fun userProfile(profile: AccountProfile, nickname: String): UserSearchResult =
+        withContext(Dispatchers.IO) {
+            val normalized = nickname.trim().removePrefix("@").lowercase()
+            val encoded = URLEncoder.encode(normalized, Charsets.UTF_8.name())
+            JSONObject(
+                request("GET", "${profile.serverUrl}/v1/users/$encoded", null, profile.accessToken),
+            ).userProfile()
+        }
+
+    suspend fun updateProfile(
+        profile: AccountProfile,
+        displayName: String,
+        bio: String,
+    ): UserSearchResult = withContext(Dispatchers.IO) {
+        JSONObject(
+            request(
+                "PUT",
+                "${profile.serverUrl}/v1/profile",
+                JSONObject()
+                    .put("display_name", displayName)
+                    .put("bio", bio)
+                    .toString(),
+                profile.accessToken,
+            ),
+        ).userProfile()
+    }
+
+    suspend fun uploadAvatar(profile: AccountProfile, jpeg: ByteArray): String =
+        withContext(Dispatchers.IO) {
+            require(jpeg.isNotEmpty() && jpeg.size <= 512 * 1024) {
+                "Аватар должен быть не больше 512 КиБ"
+            }
+            JSONObject(
+                request(
+                    "PUT",
+                    "${profile.serverUrl}/v1/profile/avatar",
+                    JSONObject().put("image", jpeg.b64()).toString(),
+                    profile.accessToken,
+                ),
+            ).getString("version")
+        }
+
+    suspend fun deleteAvatar(profile: AccountProfile) = withContext(Dispatchers.IO) {
+        request("DELETE", "${profile.serverUrl}/v1/profile/avatar", null, profile.accessToken)
+    }
+
+    suspend fun avatar(profile: AccountProfile, nickname: String): ByteArray =
+        withContext(Dispatchers.IO) {
+            val normalized = nickname.trim().removePrefix("@").lowercase()
+            val encoded = URLEncoder.encode(normalized, Charsets.UTF_8.name())
+            JSONObject(
+                request(
+                    "GET",
+                    "${profile.serverUrl}/v1/users/$encoded/avatar",
+                    null,
+                    profile.accessToken,
+                ),
+            ).getString("image").decode()
+    }
+
+    suspend fun blockedUsers(profile: AccountProfile): Set<String> = withContext(Dispatchers.IO) {
+        JSONArray(request("GET", "${profile.serverUrl}/v1/blocks", null, profile.accessToken))
+            .let { items ->
+                (0 until items.length())
+                    .map { items.getJSONObject(it).getString("nickname") }
+                    .toSet()
+            }
+    }
+
+    suspend fun blockUser(profile: AccountProfile, nickname: String) = withContext(Dispatchers.IO) {
+        val normalized = nickname.trim().removePrefix("@").lowercase()
+        val encoded = URLEncoder.encode(normalized, Charsets.UTF_8.name())
+        request("PUT", "${profile.serverUrl}/v1/blocks/$encoded", null, profile.accessToken)
+    }
+
+    suspend fun unblockUser(profile: AccountProfile, nickname: String) = withContext(Dispatchers.IO) {
+        val normalized = nickname.trim().removePrefix("@").lowercase()
+        val encoded = URLEncoder.encode(normalized, Charsets.UTF_8.name())
+        request("DELETE", "${profile.serverUrl}/v1/blocks/$encoded", null, profile.accessToken)
     }
 
     suspend fun serverReachable(profile: AccountProfile): Boolean = withContext(Dispatchers.IO) {
@@ -482,8 +595,17 @@ data class DecryptedMessage(
     val createdAt: String,
 )
 data class MessageDeletion(val deletionId: String, val messageId: String)
-data class UserSearchResult(val nickname: String)
-data class GroupMember(val nickname: String, val role: String = "member")
+data class UserSearchResult(
+    val nickname: String,
+    val displayName: String,
+    val bio: String,
+    val avatarVersion: String?,
+)
+data class GroupMember(
+    val nickname: String,
+    val role: String = "member",
+    val deviceId: String = "",
+)
 data class GroupDetails(
     val groupId: ByteArray,
     val ownerNickname: String,
@@ -497,7 +619,14 @@ data class GroupEvent(
     val kind: Int,
     val envelope: ByteArray,
     val createdAt: String,
+    val removesRecipient: Boolean,
 )
 enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+private fun JSONObject.userProfile() = UserSearchResult(
+    nickname = getString("nickname"),
+    displayName = optString("display_name"),
+    bio = optString("bio"),
+    avatarVersion = optString("avatar_version").takeIf(String::isNotBlank),
+)

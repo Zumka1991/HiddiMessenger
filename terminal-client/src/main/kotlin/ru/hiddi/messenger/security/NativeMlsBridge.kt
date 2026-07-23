@@ -46,6 +46,14 @@ object NativeMlsBridge {
     fun addMember(groupId: ByteArray, keyPackage: ByteArray): MlsAddMemberResult? =
         if (loaded) nativeAddMember(groupId, keyPackage)?.let(MlsAddMemberResult::decode) else null
 
+    fun removeMember(groupId: ByteArray, memberDeviceId: String): ByteArray? =
+        if (loaded && memberDeviceId.isNotBlank()) {
+            nativeRemoveMember(groupId, memberDeviceId.encodeToByteArray())
+                ?.takeIf(::nativeIsValidEnvelope)
+        } else {
+            null
+        }
+
     fun processWelcome(envelope: ByteArray): ByteArray? =
         if (loaded && nativeIsValidEnvelope(envelope)) nativeProcessWelcome(envelope) else null
 
@@ -77,6 +85,7 @@ object NativeMlsBridge {
     private external fun nativeDeleteLocalGroup(groupId: ByteArray): Boolean
     private external fun nativeCreateKeyPackage(deviceIdentity: ByteArray): ByteArray?
     private external fun nativeAddMember(groupId: ByteArray, keyPackage: ByteArray): ByteArray?
+    private external fun nativeRemoveMember(groupId: ByteArray, memberIdentity: ByteArray): ByteArray?
     private external fun nativeProcessWelcome(welcomeEnvelope: ByteArray): ByteArray?
     private external fun nativeCreateApplicationMessage(groupId: ByteArray, plaintext: ByteArray): ByteArray?
     private external fun nativeProcessApplicationMessage(groupId: ByteArray, envelope: ByteArray): ByteArray?

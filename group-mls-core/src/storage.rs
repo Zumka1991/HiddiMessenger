@@ -133,6 +133,12 @@ pub fn add_member(group_id: &[u8], key_package: &[u8]) -> Result<AddMemberOutput
     provider.add_member(group_id, key_package)
 }
 
+/// Creates an authenticated Remove Commit for the leaf whose BasicCredential
+/// identity matches `member_identity`, then advances the local epoch.
+pub fn remove_member(group_id: &[u8], member_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+    with_persistent_provider(|provider| provider.remove_member(group_id, member_identity))
+}
+
 /// Validates an MLS Welcome and persists the joined group state.
 pub fn join_from_welcome(welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
     let provider = PERSISTENT_PROVIDER
@@ -372,6 +378,62 @@ impl EncryptedSqliteMlsProvider {
             .merge_pending_commit(self)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
         Ok(output)
+    }
+
+    pub fn remove_member(
+        &self,
+        group_id: &[u8],
+        member_identity: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        if !(8..=64).contains(&group_id.len())
+            || member_identity.is_empty()
+            || member_identity.len() > 256
+        {
+            return Err(StorageError::OpenMls(
+                "invalid MLS group id or member identity".to_owned(),
+            ));
+        }
+        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
+        let own_index = group.own_leaf_index();
+        let removed_index = group
+            .members()
+            .find(|member| member.credential.serialized_content() == member_identity)
+            .map(|member| member.index)
+            .ok_or_else(|| StorageError::OpenMls("MLS member does not exist".to_owned()))?;
+        if removed_index == own_index {
+            return Err(StorageError::OpenMls(
+                "cannot remove own MLS leaf through this operation".to_owned(),
+            ));
+        }
+        let signature_key = group
+            .own_leaf_node()
+            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
+            .signature_key()
+            .as_slice()
+            .to_vec();
+        let signer = SignatureKeyPair::read(
+            self.storage(),
+            &signature_key,
+            group.ciphersuite().signature_algorithm(),
+        )
+        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        let (commit, welcome, _) = group
+            .remove_members(self, &signer, &[removed_index])
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        if welcome.is_some() {
+            return Err(StorageError::OpenMls(
+                "remove commit unexpectedly produced Welcome".to_owned(),
+            ));
+        }
+        let commit = commit
+            .to_bytes()
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        group
+            .merge_pending_commit(self)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        Ok(commit)
     }
 
     pub fn join_from_welcome(&self, welcome: &[u8]) -> Result<Vec<u8>, StorageError> {

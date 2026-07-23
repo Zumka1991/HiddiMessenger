@@ -21,6 +21,8 @@ object GroupCommand {
             "publish" -> withMls(args.drop(1)) { session -> publishKeyPackage(session) }
             "create" -> withMls(args.drop(1)) { session -> create(session, args.drop(1)) }
             "invite" -> withMls(args.drop(1)) { session -> invite(session, args.drop(1)) }
+            "remove" -> withMls(args.drop(1)) { session -> removeMember(session, args.drop(1)) }
+            "role" -> withMls(args.drop(1)) { session -> updateRole(session, args.drop(1)) }
             "send" -> withMls(args.drop(1)) { session -> send(session, args.drop(1)) }
             "delete-message" -> withMls(args.drop(1)) { session -> deleteMessage(session, args.drop(1)) }
             "delete" -> withMls(args.drop(1)) { session -> delete(session, args.drop(1)) }
@@ -172,8 +174,15 @@ object GroupCommand {
 
     private fun invite(session: MlsSession, args: List<String>) {
         val group = resolveGroup(session, args.option("--group"))
-        require(group.optString("owner_nickname", session.nickname) == session.nickname) {
-            "Приглашать участников может только создатель группы"
+        val currentDetails = fetchGroupDetails(
+            session,
+            group.getString("group_id").base64UrlDecode(),
+        )
+        val ownRole = currentDetails.memberDetails
+            .firstOrNull { it.nickname == session.nickname }
+            ?.role
+        require(ownRole == "owner" || ownRole == "admin") {
+            "Приглашать участников может только владелец или администратор"
         }
         val nickname = args.option("--with")?.normalizeNickname()
             ?: error("Укажите участника: group invite --with nickname")
@@ -204,6 +213,56 @@ object GroupCommand {
         session.save()
         syncPending(session)
         println("@$nickname приглашён; Commit и Welcome отправлены.")
+    }
+
+    private fun removeMember(session: MlsSession, args: List<String>) {
+        val group = resolveGroup(session, args.option("--group"))
+        val nickname = args.option("--with")?.normalizeNickname()
+            ?: error("Укажите участника: group remove --with nickname")
+        require(nickname != session.nickname) { "Нельзя удалить себя этой командой" }
+        val groupId = group.getString("group_id").base64UrlDecode()
+        val details = fetchGroupDetails(session, groupId)
+        val ownRole = details.memberDetails.firstOrNull { it.nickname == session.nickname }?.role
+            ?: error("Текущий профиль не состоит в группе")
+        val target = details.memberDetails.firstOrNull { it.nickname == nickname }
+            ?: error("@$nickname не состоит в группе")
+        val allowed = ownRole == "owner" && target.role != "owner" ||
+            ownRole == "admin" && target.role == "member"
+        require(allowed) { "Недостаточно прав для удаления @$nickname" }
+        val commit = requireNotNull(NativeMlsBridge.removeMember(groupId, target.deviceId)) {
+            "OpenMLS не создал Remove Commit"
+        }
+        enqueueEvent(
+            session,
+            groupId,
+            KIND_COMMIT,
+            details.members.filterNot { it == session.nickname },
+            commit,
+            removeMemberNickname = nickname,
+        )
+        session.save()
+        syncPending(session)
+        val refreshed = fetchGroupDetails(session, groupId)
+        group.put("members", JSONArray(refreshed.members))
+        session.save()
+        println("@$nickname удалён; Remove Commit применён, MLS-эпоха обновлена.")
+    }
+
+    private fun updateRole(session: MlsSession, args: List<String>) {
+        val group = resolveGroup(session, args.option("--group"))
+        val nickname = args.option("--with")?.normalizeNickname()
+            ?: error("Укажите участника: group role --with nickname --role admin|member")
+        val role = args.option("--role")
+            ?: error("Укажите роль: --role admin|member")
+        require(role == "admin" || role == "member") { "Роль должна быть admin или member" }
+        request(
+            session.client,
+            "PUT",
+            "${session.server}/v1/groups/${group.getString("group_id")}/members/$nickname/role",
+            JSONObject().put("role", role),
+            session.token,
+        )
+        println("Роль @$nickname изменена на $role.")
     }
 
     private fun delete(session: MlsSession, args: List<String>) {
@@ -267,14 +326,26 @@ object GroupCommand {
                     require(NativeMlsBridge.processCommit(groupId, envelope)) {
                         "OpenMLS отклонил Commit от @$sender"
                     }
-                    val details = fetchGroupDetails(session, groupId)
-                    upsertGroup(
-                        session,
-                        groupId,
-                        details.members,
-                        details.ownerNickname,
-                    )
-                    println("Состав группы ${shortId(groupId)} обновлён")
+                    if (event.optBoolean("removes_recipient")) {
+                        NativeMlsBridge.deleteLocalGroup(groupId)
+                        for (groupIndex in session.groups.length() - 1 downTo 0) {
+                            if (session.groups.getJSONObject(groupIndex)
+                                    .getString("group_id") == event.getString("group_id")
+                            ) {
+                                session.groups.remove(groupIndex)
+                            }
+                        }
+                        println("Профиль исключён из группы ${shortId(groupId)}")
+                    } else {
+                        val details = fetchGroupDetails(session, groupId)
+                        upsertGroup(
+                            session,
+                            groupId,
+                            details.members,
+                            details.ownerNickname,
+                        )
+                        println("Состав группы ${shortId(groupId)} обновлён")
+                    }
                 }
                 KIND_APPLICATION -> {
                     val plaintext = requireNotNull(
@@ -418,7 +489,12 @@ object GroupCommand {
                     .put("client_event_id", event.getString("id"))
                     .put("kind", event.getInt("kind"))
                     .put("recipient_nicknames", event.getJSONArray("recipients"))
-                    .put("envelope", event.getString("envelope")),
+                    .put("envelope", event.getString("envelope"))
+                    .put(
+                        "remove_member_nickname",
+                        event.optString("remove_member_nickname")
+                            .takeIf(String::isNotBlank),
+                    ),
                 session.token,
             )
             event.optString("delete_client_event_id").takeIf(String::isNotBlank)?.let { target ->
@@ -443,6 +519,7 @@ object GroupCommand {
         envelope: ByteArray,
         clientEventId: String? = null,
         deleteClientEventId: String? = null,
+        removeMemberNickname: String? = null,
     ) {
         val id = clientEventId ?: MessageDigest.getInstance("SHA-256")
             .digest(groupId + byteArrayOf(kind.toByte()) + envelope)
@@ -458,7 +535,8 @@ object GroupCommand {
                     .put("kind", kind)
                     .put("recipients", JSONArray(recipients))
                     .put("envelope", envelope.base64Url())
-                    .put("delete_client_event_id", deleteClientEventId),
+                    .put("delete_client_event_id", deleteClientEventId)
+                    .put("remove_member_nickname", removeMemberNickname),
             )
         }
     }
@@ -513,8 +591,16 @@ object GroupCommand {
         ) as JSONObject
         return TerminalGroupDetails(
             ownerNickname = response.getString("owner_nickname"),
-            members = response.getJSONArray("members").let { members ->
-                (0 until members.length()).map { members.getJSONObject(it).getString("nickname") }
+            memberDetails = response.getJSONArray("members").let { members ->
+                (0 until members.length()).map {
+                    members.getJSONObject(it).let { member ->
+                        TerminalGroupMember(
+                            nickname = member.getString("nickname"),
+                            role = member.getString("role"),
+                            deviceId = member.getString("device_id"),
+                        )
+                    }
+                }
             },
         )
     }
@@ -651,12 +737,20 @@ object GroupCommand {
         indexOf(name).takeIf { it >= 0 }?.let { getOrNull(it + 1) }
 
     private fun usage(): Nothing = error(
-        "Использование: group publish|create --with NICK|invite --with NICK|list|send|delete-message|inbox|watch|sync|delete",
+        "Использование: group publish|create --with NICK|invite --with NICK|remove --with NICK|role --with NICK --role admin|member|list|send|delete-message|inbox|watch|sync|delete",
     )
 
     private data class TerminalGroupDetails(
         val ownerNickname: String,
-        val members: List<String>,
+        val memberDetails: List<TerminalGroupMember>,
+    ) {
+        val members: List<String> get() = memberDetails.map(TerminalGroupMember::nickname)
+    }
+
+    private data class TerminalGroupMember(
+        val nickname: String,
+        val role: String,
+        val deviceId: String,
     )
 
     private sealed interface TerminalGroupPayload {

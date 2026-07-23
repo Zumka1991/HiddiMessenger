@@ -106,6 +106,7 @@ import java.time.format.DateTimeFormatter
 @androidx.compose.runtime.Composable
 fun ConversationScreen(
     recipient: String,
+    displayName: String?,
     history: List<ChatHistoryItem>,
     draft: String,
     status: String,
@@ -113,6 +114,7 @@ fun ConversationScreen(
     attachmentInProgress: Boolean,
     voiceRecording: Boolean,
     identityChanged: Boolean,
+    isBlocked: Boolean,
     onDraftChange: (String) -> Unit,
     onBack: () -> Unit,
     onImageSelected: (Uri) -> Unit,
@@ -120,7 +122,10 @@ fun ConversationScreen(
     onStopVoice: () -> Unit,
     onVoicePermissionDenied: () -> Unit,
     onClearHistory: () -> Unit,
+    onOpenProfile: () -> Unit,
     onVerifyKey: () -> Unit,
+    onBlockUser: () -> Unit,
+    onUnblockUser: () -> Unit,
     onDeleteMessage: (ChatHistoryItem, Boolean) -> Unit,
     onSend: () -> Unit,
 ) {
@@ -129,6 +134,7 @@ fun ConversationScreen(
     var menuExpanded by remember { mutableStateOf(false) }
     var selectedForActions by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var selectedForDeletion by remember { mutableStateOf<ChatHistoryItem?>(null) }
+    var showBlockDialog by remember { mutableStateOf(false) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(onImageSelected)
     }
@@ -154,17 +160,30 @@ fun ConversationScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад")
             }
-            HiddiAvatar(recipient, 44)
+            Box(Modifier.clickable(onClick = onOpenProfile)) {
+                HiddiAvatar(recipient, 44)
+            }
             Spacer(Modifier.size(11.dp))
-            Column(Modifier.weight(1f)) {
-                Text("@$recipient", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.weight(1f).clickable(onClick = onOpenProfile)) {
+                Text(
+                    displayName?.ifBlank { "@$recipient" } ?: "@$recipient",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 18.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.size(4.dp))
                     Text(
-                        if (identityChanged) "ключ изменился — нужна проверка" else "сквозное шифрование",
+                        when {
+                            isBlocked -> "в игноре"
+                            identityChanged -> "ключ изменился — нужна проверка"
+                            displayName?.isNotBlank() == true -> "@$recipient · E2EE"
+                            else -> "сквозное шифрование"
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (identityChanged) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        color = if (identityChanged || isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                         maxLines = 1,
                     )
                 }
@@ -183,6 +202,14 @@ fun ConversationScreen(
                         text = { Text("Очистить историю") },
                         leadingIcon = { Icon(Icons.Rounded.Close, contentDescription = null) },
                         onClick = { menuExpanded = false; onClearHistory() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isBlocked) "Убрать из игнора" else "Добавить в игнор") },
+                        leadingIcon = { Icon(Icons.Rounded.Close, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            showBlockDialog = true
+                        },
                     )
                 }
             }
@@ -256,7 +283,7 @@ fun ConversationScreen(
             Row(Modifier.padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
                     onClick = { imagePicker.launch("image/*") },
-                    enabled = !attachmentInProgress && !voiceRecording,
+                    enabled = !isBlocked && !attachmentInProgress && !voiceRecording,
                 ) {
                     if (attachmentInProgress) {
                         Text("…", fontSize = 24.sp, color = MaterialTheme.colorScheme.primary)
@@ -267,8 +294,8 @@ fun ConversationScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
-                    enabled = !voiceRecording,
-                    placeholder = { Text("Сообщение") },
+                    enabled = !isBlocked && !voiceRecording,
+                    placeholder = { Text(if (isBlocked) "Пользователь в игноре" else "Сообщение") },
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = Color.Transparent,
@@ -291,7 +318,7 @@ fun ConversationScreen(
                                 else -> MaterialTheme.colorScheme.surfaceVariant
                             },
                         )
-                        .clickable(enabled = !attachmentInProgress) {
+                        .clickable(enabled = !isBlocked && !attachmentInProgress) {
                             when {
                                 draft.isNotBlank() -> onSend()
                                 voiceRecording -> onStopVoice()
@@ -320,6 +347,38 @@ fun ConversationScreen(
                 }
             }
         }
+    }
+
+    if (showBlockDialog) {
+        AlertDialog(
+            onDismissRequest = { showBlockDialog = false },
+            title = {
+                Text(if (isBlocked) "Убрать @$recipient из игнора?" else "Добавить @$recipient в игнор?")
+            },
+            text = {
+                Text(
+                    if (isBlocked) {
+                        "Новые личные сообщения и вложения от этого пользователя снова будут доставляться."
+                    } else {
+                        "Новые личные сообщения и вложения от этого пользователя не будут доходить. " +
+                            "Отправитель не увидит, что вы его игнорируете. Текущая история останется на устройстве."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBlockDialog = false
+                        if (isBlocked) onUnblockUser() else onBlockUser()
+                    },
+                ) {
+                    Text(if (isBlocked) "Убрать" else "Игнорировать")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBlockDialog = false }) { Text("Отмена") }
+            },
+        )
     }
 
     selectedForActions?.let { item ->

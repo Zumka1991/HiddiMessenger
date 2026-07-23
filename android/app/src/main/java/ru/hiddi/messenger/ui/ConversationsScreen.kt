@@ -92,6 +92,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.hiddi.messenger.network.AccountProfile
 import ru.hiddi.messenger.network.SignalMessagingApi
+import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
@@ -111,18 +112,23 @@ fun ConversationsScreen(
     historyRevision: Int,
     historyStore: EncryptedChatHistory,
     search: String,
-    foundUsers: List<String>,
+    foundUsers: List<UserSearchResult>,
     searchError: String?,
     searching: Boolean,
     connection: ServerConnection,
     groups: List<LocalGroupChat>,
     groupBusy: Boolean,
+    selfProfile: UserSearchResult?,
+    selfAvatar: ByteArray?,
+    knownProfiles: Map<String, UserSearchResult>,
     onSearchChange: (String) -> Unit,
     onSearch: () -> Unit,
     onRefreshConnection: () -> Unit,
     onOpenConversation: (String) -> Unit,
     onCreateGroup: (String) -> Unit,
     onOpenGroup: (ByteArray) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenProfile: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
@@ -131,15 +137,33 @@ fun ConversationsScreen(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HiddiAvatar("H", 48)
+            val avatarBitmap = remember(selfAvatar?.contentHashCode()) {
+                selfAvatar?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+            }
+            if (avatarBitmap != null) {
+                Image(
+                    bitmap = avatarBitmap.asImageBitmap(),
+                    contentDescription = "Мой аватар",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(48.dp).clip(CircleShape),
+                )
+            } else {
+                HiddiAvatar(selfProfile?.displayName?.ifBlank { "H" } ?: "H", 48)
+            }
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Hiddi", fontSize = 25.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    selfProfile?.displayName?.ifBlank { "Hiddi" } ?: "Hiddi",
+                    fontSize = 25.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text("@${profile.nickname}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface) {
-                IconButton(onClick = { }) {
-                    Icon(Icons.Rounded.MoreVert, contentDescription = "Меню", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "Настройки", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -185,20 +209,28 @@ fun ConversationsScreen(
             foundUsers.forEach { user ->
                 Spacer(Modifier.height(10.dp))
                 Surface(
-                    onClick = { onOpenConversation(user) },
+                    onClick = { onOpenProfile(user.nickname) },
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        HiddiAvatar(user, 44)
+                        HiddiAvatar(user.displayName.ifBlank { user.nickname }, 44)
                         Spacer(Modifier.size(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("@$user", fontWeight = FontWeight.SemiBold)
-                            Text("Начать защищённый диалог", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                user.displayName.ifBlank { "@${user.nickname}" },
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                user.bio.ifBlank { "@${user.nickname} · начать защищённый диалог" },
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                         IconButton(
-                            onClick = { onCreateGroup(user) },
+                            onClick = { onCreateGroup(user.nickname) },
                             enabled = !groupBusy,
                         ) {
                             Icon(
@@ -209,7 +241,7 @@ fun ConversationsScreen(
                         }
                         Icon(
                             Icons.AutoMirrored.Rounded.ArrowForward,
-                            contentDescription = null,
+                            contentDescription = "Открыть профиль",
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
@@ -282,9 +314,11 @@ fun ConversationsScreen(
                     val lastMessage = historyStore.messagesWith(peer).lastOrNull()
                     ConversationRow(
                         peer = peer,
+                        profile = knownProfiles[peer],
                         lastMessage = lastMessage,
                         unreadCount = historyStore.unreadCount(peer),
                         onClick = { onOpenConversation(peer) },
+                        onOpenProfile = { onOpenProfile(peer) },
                     )
                 }
             }
@@ -343,7 +377,14 @@ private fun GroupConversationRow(
 }
 
 @androidx.compose.runtime.Composable
-private fun ConversationRow(peer: String, lastMessage: ChatHistoryItem?, unreadCount: Int, onClick: () -> Unit) {
+private fun ConversationRow(
+    peer: String,
+    profile: UserSearchResult?,
+    lastMessage: ChatHistoryItem?,
+    unreadCount: Int,
+    onClick: () -> Unit,
+    onOpenProfile: () -> Unit,
+) {
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(22.dp),
@@ -351,11 +392,20 @@ private fun ConversationRow(peer: String, lastMessage: ChatHistoryItem?, unreadC
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            HiddiAvatar(peer, 54)
+            Box(Modifier.clickable(onClick = onOpenProfile)) {
+                HiddiAvatar(profile?.displayName?.ifBlank { peer } ?: peer, 54)
+            }
             Spacer(Modifier.size(14.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("@$peer", fontWeight = FontWeight.SemiBold, fontSize = 17.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        profile?.displayName?.ifBlank { "@$peer" } ?: "@$peer",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     lastMessage?.let {
                         Text(
                             messageTime(it.time),
