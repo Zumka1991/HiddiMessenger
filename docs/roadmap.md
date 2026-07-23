@@ -72,7 +72,8 @@
   envelopes с unit-тестами.
 * [x] Android Keystore storage boundary для непрозрачного MLS group state.
 * [x] Воспроизводимая Android arm64 native-сборка OpenMLS core через NDK.
-* [ ] Rust bridge OpenMLS для Android и локальное зашифрованное group state.
+* [x] Минимальный JNI bridge Android → Rust для fail-closed проверки MLS envelope.
+* [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.
 * [ ] Зашифрованные сообщения, картинки, войсы и удаление в группах.

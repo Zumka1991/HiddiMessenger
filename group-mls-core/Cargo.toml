@@ -9,3 +9,4 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 openmls = { version = "0.8.1", features = ["openmls_rust_crypto"] }
+jni = "0.22.4"

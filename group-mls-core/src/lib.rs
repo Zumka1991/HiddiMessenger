@@ -5,6 +5,13 @@
 
 use openmls::versions::ProtocolVersion;
 
+#[cfg(target_os = "android")]
+use jni::{
+    EnvUnowned,
+    objects::{JByteArray, JClass},
+    sys::jboolean,
+};
+
 pub const ENVELOPE_VERSION: u8 = 1;
 pub const MAX_MLS_ENVELOPE_BYTES: usize = 2_800_000;
 
@@ -70,14 +77,41 @@ fn validate_payload(bytes: &[u8]) -> Result<(), EnvelopeError> {
     Ok(())
 }
 
+/// Minimal JNI boundary smoke-tested before any group key material crosses it.
+/// It handles opaque bytes only and fails closed on malformed JVM input.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIsValidEnvelope(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    encoded: JByteArray,
+) -> jboolean {
+    unowned_env
+        .with_env(|env| {
+            Ok::<jboolean, jni::errors::Error>(
+                env.convert_byte_array(&encoded)
+                    .ok()
+                    .and_then(|bytes| MlsEnvelope::decode(&bytes).ok())
+                    .is_some() as jboolean,
+            )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn round_trips_an_opaque_application_envelope() {
-        let envelope = MlsEnvelope { kind: MlsEnvelopeKind::Application, bytes: vec![7, 8, 9] };
-        assert_eq!(MlsEnvelope::decode(&envelope.encode().unwrap()).unwrap(), envelope);
+        let envelope = MlsEnvelope {
+            kind: MlsEnvelopeKind::Application,
+            bytes: vec![7, 8, 9],
+        };
+        assert_eq!(
+            MlsEnvelope::decode(&envelope.encode().unwrap()).unwrap(),
+            envelope
+        );
         assert_eq!(MlsEnvelope::protocol_version(), ProtocolVersion::Mls10);
     }
 

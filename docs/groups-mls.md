@@ -18,6 +18,22 @@ Android уже имеет `EncryptedGroupMlsState`: это Keystore-зашифр
 непрозрачных байтов MLS state. Kotlin не интерпретирует эти байты; после bridge
 их создаёт и проверяет только Rust/OpenMLS.
 
+## Нативная сборка Android
+
+Для разработки bridge нужен Android NDK и Rust target `aarch64-linux-android`.
+Сборка воспроизводится так:
+
+```bash
+export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/29.0.14206865"
+bash scripts/build-android-mls.sh
+```
+
+Она производит `libhiddi_group_mls_core.so` для `arm64-v8a`. Подключение JNI к
+Kotlin начинается с fail-closed `NativeMlsBridge.isValidEnvelope`: он принимает
+только `ByteArray` и проверяет versioned opaque envelope в Rust. Библиотека
+упаковывается в APK, но группы по-прежнему не показываются в UI, пока не будут
+реализованы настоящий MLS state, Welcome и Commit round-trip.
+
 ## Что видит сервер
 
 * Случайный `group_id`, аккаунты текущих участников и их роли.
