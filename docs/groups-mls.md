@@ -28,6 +28,15 @@ Android уже имеет `EncryptedGroupMlsState`: это Keystore-зашифр
 подключения provider в настоящий lifecycle это не считается persistent MLS
 state и UI групп остаётся отключённым.
 
+В Rust уже добавлен постоянный `EncryptedSqliteMlsProvider`: это upstream
+OpenMLS SQLite `StorageProvider`, а не собственный формат состояния Hiddi.
+Каждая сериализованная OpenMLS запись шифруется AES-256-SIV до записи в SQLite;
+это необходимо, потому что часть ключей участвует в SQLite lookup и должна быть
+детерминированной. Ключ длиной 64 байта передаётся только в память процесса
+после получения из Android Keystore (на desktop — из OS keychain). JNI-вызов,
+который создаёт/извлекает этот ключ и открывает provider для Android profile,
+ещё будет добавлен; до него backend не используется приложением.
+
 ## Нативная сборка Android
 
 Для разработки bridge нужен Android NDK и Rust target `aarch64-linux-android`.

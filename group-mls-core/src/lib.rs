@@ -5,6 +5,8 @@
 
 use openmls::versions::ProtocolVersion;
 
+pub mod storage;
+
 #[cfg(target_os = "android")]
 use jni::{
     EnvUnowned,
@@ -110,9 +112,9 @@ mod tests {
     use openmls_rust_crypto::OpenMlsRustCrypto;
     use openmls_traits::OpenMlsProvider;
 
-    fn credential(
+    fn credential<Provider: OpenMlsProvider>(
         identity: &[u8],
-        provider: &OpenMlsRustCrypto,
+        provider: &Provider,
     ) -> (CredentialWithKey, SignatureKeyPair) {
         let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
         let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm()).unwrap();
@@ -213,5 +215,25 @@ mod tests {
             }
             _ => panic!("expected MLS application message"),
         }
+    }
+
+    #[test]
+    fn encrypted_sqlite_provider_restores_a_group() {
+        storage::tests::configure_test_storage_key();
+        let provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+        let (credential, signer) = credential(b"family", &provider);
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group = MlsGroup::new(&provider, &signer, &config, credential).unwrap();
+        let group_id = group.group_id().clone();
+        drop(group);
+
+        assert!(
+            MlsGroup::load(provider.storage(), &group_id)
+                .unwrap()
+                .is_some()
+        );
     }
 }

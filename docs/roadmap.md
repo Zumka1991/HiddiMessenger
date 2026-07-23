@@ -76,6 +76,8 @@
 * [x] MLS round-trip test: создание, Welcome, join и application message между
   двумя независимыми client state, включая восстановление группы из OpenMLS
   `StorageProvider`.
+* [x] Core-провайдер persistent MLS storage: OpenMLS SQLite provider с
+  AES-256-SIV шифрованием каждой записи и тестом восстановления группы.
 * [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.
