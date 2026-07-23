@@ -21,7 +21,8 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
 use openmls_sqlite_storage::{Codec, Connection, SqliteStorageProvider};
 use openmls_traits::OpenMlsProvider;
-use serde::{Serialize, de::DeserializeOwned};
+use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize as SerdeDeserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 const STORAGE_RECORD_VERSION: u8 = 1;
@@ -63,6 +64,23 @@ pub struct AddMemberOutput {
     pub welcome: Vec<u8>,
 }
 
+#[derive(Clone, Debug, SerdeDeserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingOperationKind {
+    AddMember,
+    RemoveMember,
+}
+
+#[derive(Clone, Debug, SerdeDeserialize, Eq, PartialEq, Serialize)]
+pub struct PendingMembershipOperation {
+    pub operation_id: String,
+    pub kind: PendingOperationKind,
+    pub group_id: Vec<u8>,
+    pub context: Vec<u8>,
+    pub commit: Vec<u8>,
+    pub welcome: Option<Vec<u8>>,
+}
+
 /// Installs the per-profile key unwrapped by Android Keystore (or desktop's
 /// OS keychain). The key is never persisted by this crate.
 pub fn configure_storage_key(key: &[u8]) -> Result<(), StorageError> {
@@ -98,7 +116,7 @@ pub fn create_local_group(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.create_group(device_identity)
@@ -115,7 +133,7 @@ pub fn create_key_package(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.create_key_package(device_identity)
@@ -123,20 +141,40 @@ pub fn create_key_package(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
 
 /// Validates a remote public KeyPackage, creates the membership Commit and
 /// Welcome, advances the local epoch, and returns only MLS wire bytes.
-pub fn add_member(group_id: &[u8], key_package: &[u8]) -> Result<AddMemberOutput, StorageError> {
+pub fn add_member(
+    group_id: &[u8],
+    key_package: &[u8],
+    operation_id: &str,
+    context: &[u8],
+) -> Result<AddMemberOutput, StorageError> {
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
-    provider.add_member(group_id, key_package)
+    provider.add_member(group_id, key_package, operation_id, context)
 }
 
 /// Creates an authenticated Remove Commit for the leaf whose BasicCredential
 /// identity matches `member_identity`, then advances the local epoch.
-pub fn remove_member(group_id: &[u8], member_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
-    with_persistent_provider(|provider| provider.remove_member(group_id, member_identity))
+pub fn remove_member(
+    group_id: &[u8],
+    member_identity: &[u8],
+    operation_id: &str,
+    context: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    with_persistent_provider(|provider| {
+        provider.remove_member(group_id, member_identity, operation_id, context)
+    })
+}
+
+pub fn pending_membership_operations() -> Result<Vec<PendingMembershipOperation>, StorageError> {
+    with_persistent_provider(|provider| provider.pending_membership_operations())
+}
+
+pub fn ack_membership_operation(operation_id: &str) -> Result<(), StorageError> {
+    with_persistent_provider(|provider| provider.ack_membership_operation(operation_id))
 }
 
 /// Validates an MLS Welcome and persists the joined group state.
@@ -144,7 +182,7 @@ pub fn join_from_welcome(welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.join_from_welcome(welcome)
@@ -169,15 +207,15 @@ pub fn process_commit(group_id: &[u8], message: &[u8]) -> Result<(), StorageErro
 }
 
 fn with_persistent_provider<T>(
-    operation: impl FnOnce(&EncryptedSqliteMlsProvider) -> Result<T, StorageError>,
+    operation: impl FnOnce(&mut EncryptedSqliteMlsProvider) -> Result<T, StorageError>,
 ) -> Result<T, StorageError> {
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
-    operation(&provider)
+    operation(&mut provider)
 }
 
 /// Permanently removes a locally stored MLS group. This is for an explicit
@@ -190,15 +228,10 @@ pub fn delete_local_group(group_id: &[u8]) -> Result<(), StorageError> {
     let provider = PERSISTENT_PROVIDER
         .get()
         .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
-    let provider = provider
+    let mut provider = provider
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
-    let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
-        .map_err(|error| StorageError::OpenMls(error.to_string()))?
-        .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
-    group
-        .delete(provider.storage())
-        .map_err(|error| StorageError::OpenMls(error.to_string()))
+    provider.delete_group(group_id)
 }
 
 /// Codec used by OpenMLS' upstream SQLite provider. Query keys must remain
@@ -263,31 +296,160 @@ fn fixed_nonce() -> Nonce {
 
 pub struct EncryptedSqliteMlsProvider {
     crypto: RustCrypto,
-    storage: SqliteStorageProvider<EncryptedJsonCodec, Connection>,
+    connection: Connection,
 }
 
 impl EncryptedSqliteMlsProvider {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let connection =
+        let mut connection =
             Connection::open(path).map_err(|error| StorageError::Sqlite(error.to_string()))?;
-        let mut storage = SqliteStorageProvider::new(connection);
-        storage
-            .run_migrations()
-            .map_err(|error| StorageError::Migration(error.to_string()))?;
+        initialize_connection(&mut connection)?;
         Ok(Self {
             crypto: RustCrypto::default(),
-            storage,
+            connection,
         })
     }
 
-    /// Creates a locally persisted one-member MLS group for the registered
-    /// device. This method does not send members or messages to the server.
-    pub fn create_group(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
-        if device_identity.is_empty() || device_identity.len() > 256 {
-            return Err(StorageError::OpenMls(
-                "invalid MLS device identity".to_owned(),
-            ));
-        }
+    pub fn create_group(&mut self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| provider.create_group(device_identity))
+    }
+
+    pub fn create_key_package(&mut self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| provider.create_key_package(device_identity))
+    }
+
+    pub fn add_member(
+        &mut self,
+        group_id: &[u8],
+        key_package: &[u8],
+        operation_id: &str,
+        context: &[u8],
+    ) -> Result<AddMemberOutput, StorageError> {
+        self.transaction(|provider| {
+            provider.add_member(group_id, key_package, operation_id, context)
+        })
+    }
+
+    pub fn remove_member(
+        &mut self,
+        group_id: &[u8],
+        member_identity: &[u8],
+        operation_id: &str,
+        context: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| {
+            provider.remove_member(group_id, member_identity, operation_id, context)
+        })
+    }
+
+    pub fn join_from_welcome(&mut self, welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| provider.join_from_welcome(welcome))
+    }
+
+    pub fn create_application_message(
+        &mut self,
+        group_id: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| provider.create_application_message(group_id, plaintext))
+    }
+
+    pub fn process_application_message(
+        &mut self,
+        group_id: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        self.transaction(|provider| provider.process_application_message(group_id, message))
+    }
+
+    pub fn process_commit(&mut self, group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
+        self.transaction(|provider| provider.process_commit(group_id, message))
+    }
+
+    pub fn delete_group(&mut self, group_id: &[u8]) -> Result<(), StorageError> {
+        self.transaction(|provider| provider.delete_group(group_id))
+    }
+
+    pub fn pending_membership_operations(
+        &mut self,
+    ) -> Result<Vec<PendingMembershipOperation>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT record FROM hiddi_mls_operation_journal ORDER BY rowid")
+            .map_err(sqlite_error)?;
+        statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(sqlite_error)?
+            .map(|record| {
+                let record = record.map_err(sqlite_error)?;
+                EncryptedJsonCodec::from_slice(&record)
+            })
+            .collect()
+    }
+
+    pub fn ack_membership_operation(&mut self, operation_id: &str) -> Result<(), StorageError> {
+        validate_operation_id(operation_id)?;
+        self.connection
+            .execute(
+                "DELETE FROM hiddi_mls_operation_journal WHERE operation_id = ?1",
+                params![operation_id],
+            )
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn transaction<T>(
+        &mut self,
+        operation: impl FnOnce(&TransactionalMlsProvider<'_>) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let transaction = self.connection.transaction().map_err(sqlite_error)?;
+        let output = {
+            let provider = TransactionalMlsProvider {
+                crypto: &self.crypto,
+                storage: SqliteStorageProvider::new(&*transaction),
+                connection: &transaction,
+            };
+            operation(&provider)?
+        };
+        transaction.commit().map_err(sqlite_error)?;
+        Ok(output)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self, StorageError> {
+        let mut connection = Connection::open_in_memory()
+            .map_err(|error| StorageError::Sqlite(error.to_string()))?;
+        initialize_connection(&mut connection)?;
+        Ok(Self {
+            crypto: RustCrypto::default(),
+            connection,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_exists(&self, group_id: &[u8]) -> Result<bool, StorageError> {
+        let provider = TransactionalMlsProvider {
+            crypto: &self.crypto,
+            storage: SqliteStorageProvider::new(&self.connection),
+            connection: &self.connection,
+        };
+        Ok(
+            MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+                .map_err(|error| StorageError::OpenMls(error.to_string()))?
+                .is_some(),
+        )
+    }
+}
+
+struct TransactionalMlsProvider<'a> {
+    crypto: &'a RustCrypto,
+    storage: SqliteStorageProvider<EncryptedJsonCodec, &'a Connection>,
+    connection: &'a Connection,
+}
+
+impl TransactionalMlsProvider<'_> {
+    fn create_group(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        validate_device_identity(device_identity)?;
         let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
         let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
@@ -307,12 +469,8 @@ impl EncryptedSqliteMlsProvider {
         Ok(group.group_id().as_slice().to_vec())
     }
 
-    pub fn create_key_package(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
-        if device_identity.is_empty() || device_identity.len() > 256 {
-            return Err(StorageError::OpenMls(
-                "invalid MLS device identity".to_owned(),
-            ));
-        }
+    fn create_key_package(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        validate_device_identity(device_identity)?;
         let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
         let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
@@ -331,34 +489,33 @@ impl EncryptedSqliteMlsProvider {
             .map_err(|error| StorageError::OpenMls(error.to_string()))
     }
 
-    pub fn add_member(
+    fn add_member(
         &self,
         group_id: &[u8],
         key_package: &[u8],
+        operation_id: &str,
+        context: &[u8],
     ) -> Result<AddMemberOutput, StorageError> {
-        if !(8..=64).contains(&group_id.len())
-            || key_package.is_empty()
-            || key_package.len() > 65_536
-        {
-            return Err(StorageError::OpenMls(
-                "invalid MLS group id or KeyPackage".to_owned(),
-            ));
+        validate_membership_operation(group_id, operation_id, context)?;
+        if key_package.is_empty() || key_package.len() > 65_536 {
+            return Err(StorageError::OpenMls("invalid MLS KeyPackage".to_owned()));
         }
-        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
-            .map_err(|error| StorageError::OpenMls(error.to_string()))?
-            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
-        let signature_key = group
-            .own_leaf_node()
-            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
-            .signature_key()
-            .as_slice()
-            .to_vec();
-        let signer = SignatureKeyPair::read(
-            self.storage(),
-            &signature_key,
-            group.ciphersuite().signature_algorithm(),
-        )
-        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        if let Some(existing) = self.load_journal(operation_id)? {
+            validate_existing_operation(
+                &existing,
+                PendingOperationKind::AddMember,
+                group_id,
+                context,
+            )?;
+            return Ok(AddMemberOutput {
+                commit: existing.commit,
+                welcome: existing.welcome.ok_or_else(|| {
+                    StorageError::OpenMls("add-member journal has no Welcome".to_owned())
+                })?,
+            });
+        }
+        let mut group = self.load_group(group_id)?;
+        let signer = self.signer(&group)?;
         let key_package = KeyPackageIn::tls_deserialize_exact(key_package)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?
             .validate(self.crypto(), ProtocolVersion::Mls10)
@@ -377,25 +534,36 @@ impl EncryptedSqliteMlsProvider {
         group
             .merge_pending_commit(self)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        self.store_journal(&PendingMembershipOperation {
+            operation_id: operation_id.to_owned(),
+            kind: PendingOperationKind::AddMember,
+            group_id: group_id.to_vec(),
+            context: context.to_vec(),
+            commit: output.commit.clone(),
+            welcome: Some(output.welcome.clone()),
+        })?;
         Ok(output)
     }
 
-    pub fn remove_member(
+    fn remove_member(
         &self,
         group_id: &[u8],
         member_identity: &[u8],
+        operation_id: &str,
+        context: &[u8],
     ) -> Result<Vec<u8>, StorageError> {
-        if !(8..=64).contains(&group_id.len())
-            || member_identity.is_empty()
-            || member_identity.len() > 256
-        {
-            return Err(StorageError::OpenMls(
-                "invalid MLS group id or member identity".to_owned(),
-            ));
+        validate_membership_operation(group_id, operation_id, context)?;
+        validate_device_identity(member_identity)?;
+        if let Some(existing) = self.load_journal(operation_id)? {
+            validate_existing_operation(
+                &existing,
+                PendingOperationKind::RemoveMember,
+                group_id,
+                context,
+            )?;
+            return Ok(existing.commit);
         }
-        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
-            .map_err(|error| StorageError::OpenMls(error.to_string()))?
-            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
+        let mut group = self.load_group(group_id)?;
         let own_index = group.own_leaf_index();
         let removed_index = group
             .members()
@@ -407,18 +575,7 @@ impl EncryptedSqliteMlsProvider {
                 "cannot remove own MLS leaf through this operation".to_owned(),
             ));
         }
-        let signature_key = group
-            .own_leaf_node()
-            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
-            .signature_key()
-            .as_slice()
-            .to_vec();
-        let signer = SignatureKeyPair::read(
-            self.storage(),
-            &signature_key,
-            group.ciphersuite().signature_algorithm(),
-        )
-        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        let signer = self.signer(&group)?;
         let (commit, welcome, _) = group
             .remove_members(self, &signer, &[removed_index])
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
@@ -433,10 +590,18 @@ impl EncryptedSqliteMlsProvider {
         group
             .merge_pending_commit(self)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        self.store_journal(&PendingMembershipOperation {
+            operation_id: operation_id.to_owned(),
+            kind: PendingOperationKind::RemoveMember,
+            group_id: group_id.to_vec(),
+            context: context.to_vec(),
+            commit: commit.clone(),
+            welcome: None,
+        })?;
         Ok(commit)
     }
 
-    pub fn join_from_welcome(&self, welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
+    fn join_from_welcome(&self, welcome: &[u8]) -> Result<Vec<u8>, StorageError> {
         if welcome.is_empty() || welcome.len() > 2_800_000 {
             return Err(StorageError::OpenMls("invalid MLS Welcome".to_owned()));
         }
@@ -461,33 +626,18 @@ impl EncryptedSqliteMlsProvider {
         Ok(group.group_id().as_slice().to_vec())
     }
 
-    pub fn create_application_message(
+    fn create_application_message(
         &self,
         group_id: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, StorageError> {
-        if !(8..=64).contains(&group_id.len())
-            || plaintext.is_empty()
-            || plaintext.len() > 1_048_576
-        {
+        if plaintext.is_empty() || plaintext.len() > 1_048_576 {
             return Err(StorageError::OpenMls(
-                "invalid MLS group id or application data".to_owned(),
+                "invalid MLS application data".to_owned(),
             ));
         }
-        let mut group = MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
-            .map_err(|error| StorageError::OpenMls(error.to_string()))?
-            .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))?;
-        let signature_key = group
-            .own_leaf_node()
-            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
-            .signature_key()
-            .as_slice();
-        let signer = SignatureKeyPair::read(
-            self.storage(),
-            signature_key,
-            group.ciphersuite().signature_algorithm(),
-        )
-        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))?;
+        let mut group = self.load_group(group_id)?;
+        let signer = self.signer(&group)?;
         group
             .create_message(self, &signer, plaintext)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?
@@ -495,12 +645,13 @@ impl EncryptedSqliteMlsProvider {
             .map_err(|error| StorageError::OpenMls(error.to_string()))
     }
 
-    pub fn process_application_message(
+    fn process_application_message(
         &self,
         group_id: &[u8],
         message: &[u8],
     ) -> Result<Vec<u8>, StorageError> {
-        let mut group = self.load_group_for_message(group_id, message)?;
+        validate_message(group_id, message)?;
+        let mut group = self.load_group(group_id)?;
         let message = MlsMessageIn::tls_deserialize_exact(message)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?
             .try_into_protocol_message()
@@ -518,8 +669,9 @@ impl EncryptedSqliteMlsProvider {
         }
     }
 
-    pub fn process_commit(&self, group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
-        let mut group = self.load_group_for_message(group_id, message)?;
+    fn process_commit(&self, group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
+        validate_message(group_id, message)?;
+        let mut group = self.load_group(group_id)?;
         let message = MlsMessageIn::tls_deserialize_exact(message)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?
             .try_into_protocol_message()
@@ -535,52 +687,161 @@ impl EncryptedSqliteMlsProvider {
         }
     }
 
-    fn load_group_for_message(
-        &self,
-        group_id: &[u8],
-        message: &[u8],
-    ) -> Result<MlsGroup, StorageError> {
-        if !(8..=64).contains(&group_id.len()) || message.is_empty() || message.len() > 2_800_000 {
-            return Err(StorageError::OpenMls(
-                "invalid MLS group id or message".to_owned(),
-            ));
+    fn delete_group(&self, group_id: &[u8]) -> Result<(), StorageError> {
+        let mut group = self.load_group(group_id)?;
+        group
+            .delete(self.storage())
+            .map_err(|error| StorageError::OpenMls(error.to_string()))
+    }
+
+    fn load_group(&self, group_id: &[u8]) -> Result<MlsGroup, StorageError> {
+        if !(8..=64).contains(&group_id.len()) {
+            return Err(StorageError::OpenMls("invalid MLS group id".to_owned()));
         }
         MlsGroup::load(self.storage(), &GroupId::from_slice(group_id))
             .map_err(|error| StorageError::OpenMls(error.to_string()))?
             .ok_or_else(|| StorageError::OpenMls("MLS group does not exist".to_owned()))
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_in_memory() -> Result<Self, StorageError> {
-        let connection = Connection::open_in_memory()
-            .map_err(|error| StorageError::Sqlite(error.to_string()))?;
-        let mut storage = SqliteStorageProvider::new(connection);
-        storage
-            .run_migrations()
-            .map_err(|error| StorageError::Migration(error.to_string()))?;
-        Ok(Self {
-            crypto: RustCrypto::default(),
-            storage,
-        })
+    fn signer(&self, group: &MlsGroup) -> Result<SignatureKeyPair, StorageError> {
+        let signature_key = group
+            .own_leaf_node()
+            .ok_or_else(|| StorageError::OpenMls("own MLS leaf is missing".to_owned()))?
+            .signature_key()
+            .as_slice();
+        SignatureKeyPair::read(
+            self.storage(),
+            signature_key,
+            group.ciphersuite().signature_algorithm(),
+        )
+        .ok_or_else(|| StorageError::OpenMls("MLS signer is missing".to_owned()))
+    }
+
+    fn load_journal(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<PendingMembershipOperation>, StorageError> {
+        let record = self
+            .connection
+            .query_row(
+                "SELECT record FROM hiddi_mls_operation_journal WHERE operation_id = ?1",
+                params![operation_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        record
+            .map(|value| EncryptedJsonCodec::from_slice(&value))
+            .transpose()
+    }
+
+    fn store_journal(&self, operation: &PendingMembershipOperation) -> Result<(), StorageError> {
+        let record = EncryptedJsonCodec::to_vec(operation)?;
+        self.connection
+            .execute(
+                "INSERT INTO hiddi_mls_operation_journal (operation_id, record)
+                 VALUES (?1, ?2)",
+                params![operation.operation_id, record],
+            )
+            .map_err(sqlite_error)?;
+        Ok(())
     }
 }
 
-impl OpenMlsProvider for EncryptedSqliteMlsProvider {
+impl<'a> OpenMlsProvider for TransactionalMlsProvider<'a> {
     type CryptoProvider = RustCrypto;
     type RandProvider = RustCrypto;
-    type StorageProvider = SqliteStorageProvider<EncryptedJsonCodec, Connection>;
+    type StorageProvider = SqliteStorageProvider<EncryptedJsonCodec, &'a Connection>;
 
     fn storage(&self) -> &Self::StorageProvider {
         &self.storage
     }
 
     fn crypto(&self) -> &Self::CryptoProvider {
-        &self.crypto
+        self.crypto
     }
 
     fn rand(&self) -> &Self::RandProvider {
-        &self.crypto
+        self.crypto
     }
+}
+
+fn initialize_connection(connection: &mut Connection) -> Result<(), StorageError> {
+    {
+        let mut storage = SqliteStorageProvider::<EncryptedJsonCodec, _>::new(&mut *connection);
+        storage
+            .run_migrations()
+            .map_err(|error| StorageError::Migration(error.to_string()))?;
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS hiddi_mls_operation_journal (
+                operation_id TEXT PRIMARY KEY NOT NULL,
+                record BLOB NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+             );",
+        )
+        .map_err(sqlite_error)
+}
+
+fn validate_device_identity(identity: &[u8]) -> Result<(), StorageError> {
+    if identity.is_empty() || identity.len() > 256 {
+        return Err(StorageError::OpenMls(
+            "invalid MLS device identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_membership_operation(
+    group_id: &[u8],
+    operation_id: &str,
+    context: &[u8],
+) -> Result<(), StorageError> {
+    if !(8..=64).contains(&group_id.len()) || context.is_empty() || context.len() > 65_536 {
+        return Err(StorageError::OpenMls(
+            "invalid MLS membership operation".to_owned(),
+        ));
+    }
+    validate_operation_id(operation_id)
+}
+
+fn validate_operation_id(operation_id: &str) -> Result<(), StorageError> {
+    if !(16..=128).contains(&operation_id.len())
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(StorageError::OpenMls("invalid MLS operation id".to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_message(group_id: &[u8], message: &[u8]) -> Result<(), StorageError> {
+    if !(8..=64).contains(&group_id.len()) || message.is_empty() || message.len() > 2_800_000 {
+        return Err(StorageError::OpenMls(
+            "invalid MLS group id or message".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_existing_operation(
+    existing: &PendingMembershipOperation,
+    kind: PendingOperationKind,
+    group_id: &[u8],
+    context: &[u8],
+) -> Result<(), StorageError> {
+    if existing.kind != kind || existing.group_id != group_id || existing.context != context {
+        return Err(StorageError::OpenMls(
+            "MLS operation id was reused with different data".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_error(error: rusqlite::Error) -> StorageError {
+    StorageError::Sqlite(error.to_string())
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ class GroupRegistrationOutbox(context: Context, private val api: SignalMessaging
         }
     }
 
-    private fun enqueue(groupId: ByteArray, members: List<GroupMember>) = synchronized(lock) {
+    fun enqueue(groupId: ByteArray, members: List<GroupMember>) = synchronized(lock) {
         val id = groupId.b64()
         val entries = read()
         val existing = entries.firstOrNull { it.groupId == id }

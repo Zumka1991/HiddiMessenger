@@ -3,11 +3,13 @@ package ru.hiddi.terminal
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.hiddi.messenger.security.NativeMlsBridge
+import ru.hiddi.messenger.security.PendingMlsMembershipKind
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.UUID
 
 /**
  * Interactive desktop test peer for the same OpenMLS groups as Android.
@@ -68,22 +70,24 @@ object GroupCommand {
         ) { "OpenMLS не создал группу" }
         var memberAdded = false
         try {
-            val added = requireNotNull(
+            val operationId = UUID.randomUUID().toString()
+            val context = membershipContext(
+                CONTEXT_CREATE_GROUP,
+                session.nickname,
+                peer,
+                emptyList(),
+                listOf(session.nickname, peer),
+            )
+            requireNotNull(
                 NativeMlsBridge.addMember(
                     groupId,
                     packageResponse.getString("key_package").base64UrlDecode(),
+                    operationId,
+                    context,
                 ),
             ) { "OpenMLS отклонил KeyPackage @$peer" }
             memberAdded = true
-            val group = JSONObject()
-                .put("group_id", groupId.base64Url())
-                .put("owner_nickname", session.nickname)
-                .put("members", JSONArray(listOf(session.nickname, peer)))
-                .put("messages", JSONArray())
-                .put("registered", false)
-            session.groups.put(group)
-            enqueueEvent(session, groupId, KIND_WELCOME, listOf(peer), added.welcomeEnvelope)
-            session.save()
+            handoffNativeJournal(session)
             syncPending(session)
             println("Защищённая группа создана: ${groupId.base64Url()}")
             println("Участники: @${session.nickname}, @$peer")
@@ -197,20 +201,24 @@ object GroupCommand {
             session.token,
         ) as JSONObject
         val groupId = group.getString("group_id").base64UrlDecode()
-        val output = requireNotNull(
+        val existingRecipients = currentMembers.filterNot { it == session.nickname }
+        val operationId = UUID.randomUUID().toString()
+        val context = membershipContext(
+            CONTEXT_INVITE_MEMBER,
+            currentDetails.ownerNickname,
+            nickname,
+            existingRecipients,
+            currentMembers + nickname,
+        )
+        requireNotNull(
             NativeMlsBridge.addMember(
                 groupId,
                 packageResponse.getString("key_package").base64UrlDecode(),
+                operationId,
+                context,
             ),
         ) { "OpenMLS отклонил KeyPackage @$nickname" }
-        val existingRecipients = currentMembers.filterNot { it == session.nickname }
-        if (existingRecipients.isNotEmpty()) {
-            enqueueEvent(session, groupId, KIND_COMMIT, existingRecipients, output.commitEnvelope)
-        }
-        enqueueEvent(session, groupId, KIND_WELCOME, listOf(nickname), output.welcomeEnvelope)
-        enqueueMember(session, groupId, nickname)
-        group.put("members", JSONArray(currentMembers + nickname))
-        session.save()
+        handoffNativeJournal(session)
         syncPending(session)
         println("@$nickname приглашён; Commit и Welcome отправлены.")
     }
@@ -229,18 +237,26 @@ object GroupCommand {
         val allowed = ownRole == "owner" && target.role != "owner" ||
             ownRole == "admin" && target.role == "member"
         require(allowed) { "Недостаточно прав для удаления @$nickname" }
-        val commit = requireNotNull(NativeMlsBridge.removeMember(groupId, target.deviceId)) {
+        val recipients = details.members.filterNot { it == session.nickname }
+        val operationId = UUID.randomUUID().toString()
+        val context = membershipContext(
+            CONTEXT_REMOVE_MEMBER,
+            details.ownerNickname,
+            nickname,
+            recipients,
+            details.members,
+        )
+        requireNotNull(
+            NativeMlsBridge.removeMember(
+                groupId,
+                target.deviceId,
+                operationId,
+                context,
+            ),
+        ) {
             "OpenMLS не создал Remove Commit"
         }
-        enqueueEvent(
-            session,
-            groupId,
-            KIND_COMMIT,
-            details.members.filterNot { it == session.nickname },
-            commit,
-            removeMemberNickname = nickname,
-        )
-        session.save()
+        handoffNativeJournal(session)
         syncPending(session)
         val refreshed = fetchGroupDetails(session, groupId)
         group.put("members", JSONArray(refreshed.members))
@@ -442,6 +458,7 @@ object GroupCommand {
     }
 
     private fun syncPending(session: MlsSession) {
+        handoffNativeJournal(session)
         for (index in 0 until session.groups.length()) {
             val group = session.groups.getJSONObject(index)
             if (!group.optBoolean("registered")) {
@@ -510,6 +527,87 @@ object GroupCommand {
             session.save()
         }
     }
+
+    private fun handoffNativeJournal(session: MlsSession) {
+        NativeMlsBridge.pendingMembershipOperations().forEach { operation ->
+            val context = JSONObject(operation.context.decodeToString())
+            require(context.getInt("version") == 1)
+            val type = context.getString("type")
+            val owner = context.getString("owner_nickname")
+            val target = context.getString("target_nickname")
+            val recipients = context.getJSONArray("recipients").strings()
+            val members = context.getJSONArray("members").strings()
+            when (type) {
+                CONTEXT_CREATE_GROUP -> {
+                    if (findGroup(session, operation.groupId) == null) {
+                        session.groups.put(
+                            JSONObject()
+                                .put("group_id", operation.groupId.base64Url())
+                                .put("owner_nickname", owner)
+                                .put("members", JSONArray(members))
+                                .put("messages", JSONArray())
+                                .put("registered", false),
+                        )
+                    }
+                }
+                CONTEXT_INVITE_MEMBER -> {
+                    val group = findGroup(session, operation.groupId)
+                        ?: error("Локальная группа для MLS-приглашения не найдена")
+                    group.put("members", JSONArray(members))
+                    enqueueMember(session, operation.groupId, target)
+                }
+                CONTEXT_REMOVE_MEMBER -> Unit
+                else -> error("Неизвестный контекст MLS")
+            }
+            if (operation.kind == PendingMlsMembershipKind.ADD_MEMBER) {
+                if (recipients.isNotEmpty()) {
+                    enqueueEvent(
+                        session,
+                        operation.groupId,
+                        KIND_COMMIT,
+                        recipients,
+                        operation.commitEnvelope,
+                    )
+                }
+                enqueueEvent(
+                    session,
+                    operation.groupId,
+                    KIND_WELCOME,
+                    listOf(target),
+                    requireNotNull(operation.welcomeEnvelope),
+                )
+            } else {
+                enqueueEvent(
+                    session,
+                    operation.groupId,
+                    KIND_COMMIT,
+                    recipients,
+                    operation.commitEnvelope,
+                    removeMemberNickname = target,
+                )
+            }
+            session.save()
+            require(NativeMlsBridge.acknowledgeMembershipOperation(operation.operationId)) {
+                "Не удалось подтвердить перенос операции MLS"
+            }
+        }
+    }
+
+    private fun membershipContext(
+        type: String,
+        ownerNickname: String,
+        targetNickname: String,
+        recipients: List<String>,
+        members: List<String>,
+    ): ByteArray = JSONObject()
+        .put("version", 1)
+        .put("type", type)
+        .put("owner_nickname", ownerNickname)
+        .put("target_nickname", targetNickname)
+        .put("recipients", JSONArray(recipients))
+        .put("members", JSONArray(members))
+        .toString()
+        .encodeToByteArray()
 
     private fun enqueueEvent(
         session: MlsSession,
@@ -761,5 +859,8 @@ object GroupCommand {
     private const val KIND_WELCOME = 1
     private const val KIND_COMMIT = 2
     private const val KIND_APPLICATION = 3
+    private const val CONTEXT_CREATE_GROUP = "create_group"
+    private const val CONTEXT_INVITE_MEMBER = "invite_member"
+    private const val CONTEXT_REMOVE_MEMBER = "remove_member"
     private const val GROUP_PAYLOAD_PREFIX = "HIDDI_GROUP_V1:"
 }

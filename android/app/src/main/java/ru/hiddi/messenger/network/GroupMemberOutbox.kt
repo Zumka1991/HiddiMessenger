@@ -30,7 +30,7 @@ class GroupMemberOutbox(context: Context, private val api: SignalMessagingApi) {
         }
     }
 
-    private fun enqueue(groupId: ByteArray, member: GroupMember) = synchronized(lock) {
+    fun enqueue(groupId: ByteArray, member: GroupMember) = synchronized(lock) {
         val entry = PendingGroupMember(
             id = "${groupId.b64()}:${member.nickname}:${member.role}",
             groupId = groupId.b64(),

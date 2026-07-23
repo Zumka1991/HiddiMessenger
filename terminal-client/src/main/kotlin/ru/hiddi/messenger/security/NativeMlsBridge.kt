@@ -43,16 +43,47 @@ object NativeMlsBridge {
     fun createKeyPackage(deviceId: String): ByteArray? =
         if (loaded) nativeCreateKeyPackage(deviceId.encodeToByteArray()) else null
 
-    fun addMember(groupId: ByteArray, keyPackage: ByteArray): MlsAddMemberResult? =
-        if (loaded) nativeAddMember(groupId, keyPackage)?.let(MlsAddMemberResult::decode) else null
+    fun addMember(
+        groupId: ByteArray,
+        keyPackage: ByteArray,
+        operationId: String,
+        context: ByteArray,
+    ): MlsAddMemberResult? =
+        if (loaded) {
+            nativeAddMember(groupId, keyPackage, operationId, context)
+                ?.let(MlsAddMemberResult::decode)
+        } else {
+            null
+        }
 
-    fun removeMember(groupId: ByteArray, memberDeviceId: String): ByteArray? =
+    fun removeMember(
+        groupId: ByteArray,
+        memberDeviceId: String,
+        operationId: String,
+        context: ByteArray,
+    ): ByteArray? =
         if (loaded && memberDeviceId.isNotBlank()) {
-            nativeRemoveMember(groupId, memberDeviceId.encodeToByteArray())
+            nativeRemoveMember(
+                groupId,
+                memberDeviceId.encodeToByteArray(),
+                operationId,
+                context,
+            )
                 ?.takeIf(::nativeIsValidEnvelope)
         } else {
             null
         }
+
+    fun pendingMembershipOperations(): List<PendingMlsMembershipOperation> =
+        if (loaded) {
+            nativePendingMembershipOperations()?.let(PendingMlsMembershipOperation::decodeAll)
+                ?: error("Не удалось прочитать журнал MLS")
+        } else {
+            emptyList()
+        }
+
+    fun acknowledgeMembershipOperation(operationId: String): Boolean =
+        loaded && nativeAckMembershipOperation(operationId)
 
     fun processWelcome(envelope: ByteArray): ByteArray? =
         if (loaded && nativeIsValidEnvelope(envelope)) nativeProcessWelcome(envelope) else null
@@ -84,12 +115,77 @@ object NativeMlsBridge {
     private external fun nativeCreateLocalGroup(deviceIdentity: ByteArray): ByteArray?
     private external fun nativeDeleteLocalGroup(groupId: ByteArray): Boolean
     private external fun nativeCreateKeyPackage(deviceIdentity: ByteArray): ByteArray?
-    private external fun nativeAddMember(groupId: ByteArray, keyPackage: ByteArray): ByteArray?
-    private external fun nativeRemoveMember(groupId: ByteArray, memberIdentity: ByteArray): ByteArray?
+    private external fun nativeAddMember(
+        groupId: ByteArray,
+        keyPackage: ByteArray,
+        operationId: String,
+        context: ByteArray,
+    ): ByteArray?
+    private external fun nativeRemoveMember(
+        groupId: ByteArray,
+        memberIdentity: ByteArray,
+        operationId: String,
+        context: ByteArray,
+    ): ByteArray?
+    private external fun nativePendingMembershipOperations(): ByteArray?
+    private external fun nativeAckMembershipOperation(operationId: String): Boolean
     private external fun nativeProcessWelcome(welcomeEnvelope: ByteArray): ByteArray?
     private external fun nativeCreateApplicationMessage(groupId: ByteArray, plaintext: ByteArray): ByteArray?
     private external fun nativeProcessApplicationMessage(groupId: ByteArray, envelope: ByteArray): ByteArray?
     private external fun nativeProcessCommit(groupId: ByteArray, envelope: ByteArray): Boolean
+}
+
+enum class PendingMlsMembershipKind { ADD_MEMBER, REMOVE_MEMBER }
+
+data class PendingMlsMembershipOperation(
+    val operationId: String,
+    val kind: PendingMlsMembershipKind,
+    val groupId: ByteArray,
+    val context: ByteArray,
+    val commitEnvelope: ByteArray,
+    val welcomeEnvelope: ByteArray?,
+) {
+    companion object {
+        fun decodeAll(encoded: ByteArray): List<PendingMlsMembershipOperation> {
+            val input = ByteBuffer.wrap(encoded)
+            require(input.remaining() >= 5 && input.get() == 1.toByte()) { "Повреждён журнал MLS" }
+            val count = input.int
+            require(count in 0..10_000)
+            val result = buildList(count) {
+                repeat(count) {
+                    val id = input.bytes(input.unsignedShort()).decodeToString()
+                    val kind = when (input.get().toInt()) {
+                        1 -> PendingMlsMembershipKind.ADD_MEMBER
+                        2 -> PendingMlsMembershipKind.REMOVE_MEMBER
+                        else -> error("Некорректный тип операции MLS")
+                    }
+                    val groupId = input.bytes(input.unsignedShort())
+                    val context = input.bytes(input.positiveInt())
+                    val commit = input.bytes(input.positiveInt())
+                    val welcomeSize = input.positiveInt()
+                    val welcome = if (welcomeSize == 0) null else input.bytes(welcomeSize)
+                    add(PendingMlsMembershipOperation(id, kind, groupId, context, commit, welcome))
+                }
+            }
+            require(!input.hasRemaining())
+            return result
+        }
+
+        private fun ByteBuffer.unsignedShort(): Int {
+            require(remaining() >= 2)
+            return short.toInt() and 0xffff
+        }
+
+        private fun ByteBuffer.positiveInt(): Int {
+            require(remaining() >= 4)
+            return int.also { require(it >= 0) }
+        }
+
+        private fun ByteBuffer.bytes(size: Int): ByteArray {
+            require(size <= remaining())
+            return ByteArray(size).also(::get)
+        }
+    }
 }
 
 data class MlsAddMemberResult(

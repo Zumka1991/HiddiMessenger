@@ -14,22 +14,30 @@ class EncryptedChatHistory(context: Context) {
 
     fun messagesWith(nickname: String): List<ChatHistoryItem> {
         return synchronized(historyLock) {
-            val entries = read()
-            (0 until entries.length()).map { entries.getJSONObject(it) }
-                .filter { it.getString("peer") == nickname }
-                .map {
-                    ChatHistoryItem(
-                        it.getString("peer"),
-                        it.getString("text"),
-                        it.getBoolean("outgoing"),
-                        it.getString("time"),
-                        it.optBoolean("unread", false),
-                        it.optJSONObject("attachment")?.toAttachmentDescriptor(),
-                        it.optString("message_id").takeIf(String::isNotBlank),
-                        it.optString("delivery_status", "sent"),
-                    )
-                }
+            read().messagesFor(nickname)
         }
+    }
+
+    /** Returns only the newest visible window; older pages are prepended on demand. */
+    fun latestPage(nickname: String, limit: Int): ChatHistoryPage =
+        synchronized(historyLock) {
+            require(limit in 1..10_000)
+            val messages = read().messagesFor(nickname)
+            val start = (messages.size - limit).coerceAtLeast(0)
+            ChatHistoryPage(messages.subList(start, messages.size), start > 0)
+        }
+
+    /** `loadedNewestCount` is the number of newest messages already shown by the UI. */
+    fun olderPage(
+        nickname: String,
+        loadedNewestCount: Int,
+        limit: Int,
+    ): ChatHistoryPage = synchronized(historyLock) {
+        require(loadedNewestCount >= 0 && limit in 1..500)
+        val messages = read().messagesFor(nickname)
+        val end = (messages.size - loadedNewestCount).coerceIn(0, messages.size)
+        val start = (end - limit).coerceAtLeast(0)
+        ChatHistoryPage(messages.subList(start, end), start > 0)
     }
 
     fun append(item: ChatHistoryItem) = synchronized(historyLock) {
@@ -140,10 +148,31 @@ class EncryptedChatHistory(context: Context) {
 
     private fun read(): JSONArray = store.read()?.decodeToString()?.let(::JSONArray) ?: JSONArray()
 
+    private fun JSONArray.messagesFor(nickname: String): List<ChatHistoryItem> =
+        (0 until length()).map(::getJSONObject)
+            .filter { it.getString("peer") == nickname }
+            .map {
+                ChatHistoryItem(
+                    it.getString("peer"),
+                    it.getString("text"),
+                    it.getBoolean("outgoing"),
+                    it.getString("time"),
+                    it.optBoolean("unread", false),
+                    it.optJSONObject("attachment")?.toAttachmentDescriptor(),
+                    it.optString("message_id").takeIf(String::isNotBlank),
+                    it.optString("delivery_status", "sent"),
+                )
+            }
+
     private companion object {
         val historyLock = Any()
     }
 }
+
+data class ChatHistoryPage(
+    val messages: List<ChatHistoryItem>,
+    val hasOlder: Boolean,
+)
 
 data class ChatHistoryItem(
     val peer: String,

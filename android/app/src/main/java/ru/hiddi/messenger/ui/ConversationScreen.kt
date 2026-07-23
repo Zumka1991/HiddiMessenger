@@ -70,6 +70,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -109,6 +110,8 @@ fun ConversationScreen(
     displayName: String?,
     avatar: ByteArray?,
     history: List<ChatHistoryItem>,
+    hasOlderHistory: Boolean,
+    loadingOlderHistory: Boolean,
     draft: String,
     status: String,
     attachmentStore: EncryptedAttachmentStore,
@@ -117,6 +120,7 @@ fun ConversationScreen(
     identityChanged: Boolean,
     isBlocked: Boolean,
     onDraftChange: (String) -> Unit,
+    onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onImageSelected: (Uri) -> Unit,
     onStartVoice: () -> Unit,
@@ -136,6 +140,10 @@ fun ConversationScreen(
     var selectedForActions by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var selectedForDeletion by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var showBlockDialog by remember { mutableStateOf(false) }
+    var pendingPrependSize by remember(recipient) { mutableIntStateOf(-1) }
+    var pendingAnchorIndex by remember(recipient) { mutableIntStateOf(0) }
+    var pendingAnchorOffset by remember(recipient) { mutableIntStateOf(0) }
+    var followNewest by remember(recipient) { mutableStateOf(true) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(onImageSelected)
     }
@@ -149,8 +157,45 @@ fun ConversationScreen(
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
-    LaunchedEffect(recipient, history.size) {
-        if (history.isNotEmpty()) listState.animateScrollToItem(history.lastIndex)
+    LaunchedEffect(recipient) {
+        if (history.isNotEmpty()) listState.scrollToItem(history.lastIndex)
+    }
+    LaunchedEffect(history.size) {
+        if (pendingPrependSize >= 0) {
+            val added = history.size - pendingPrependSize
+            if (added > 0) {
+                listState.scrollToItem(pendingAnchorIndex + added, pendingAnchorOffset)
+            }
+            pendingPrependSize = -1
+        } else if (history.isNotEmpty() && followNewest) {
+            listState.animateScrollToItem(history.lastIndex)
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            Pair(layout.visibleItemsInfo.lastOrNull()?.index ?: 0, layout.totalItemsCount)
+        }.collect { (lastVisible, total) ->
+            if (total > 0) followNewest = lastVisible >= total - 2
+        }
+    }
+    LaunchedEffect(listState, hasOlderHistory, loadingOlderHistory) {
+        snapshotFlow {
+            Pair(listState.firstVisibleItemIndex, listState.isScrollInProgress)
+        }.collect { (index, scrolling) ->
+                if (
+                    index == 0 &&
+                    scrolling &&
+                    hasOlderHistory &&
+                    !loadingOlderHistory &&
+                    pendingPrependSize < 0
+                ) {
+                    pendingPrependSize = history.size
+                    pendingAnchorIndex = listState.firstVisibleItemIndex
+                    pendingAnchorOffset = listState.firstVisibleItemScrollOffset
+                    onLoadOlder()
+                }
+            }
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
@@ -257,6 +302,17 @@ fun ConversationScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
+                    if (hasOlderHistory || loadingOlderHistory) {
+                        item {
+                            Text(
+                                if (loadingOlderHistory) "Загружаем старые сообщения…" else "Потяните вверх, чтобы загрузить старые",
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     items(history) { item ->
                         MessageBubble(
                             item = item,

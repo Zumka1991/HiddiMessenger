@@ -98,6 +98,7 @@ import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
+import ru.hiddi.messenger.security.EncryptedContactsStore
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.SignalStateRepository
@@ -127,11 +128,15 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     val api = remember { SignalMessagingApi(ru.hiddi.messenger.security.SignalStateRepository(context)) }
     val groupCoordinator = remember { GroupMlsCoordinator(context, api) }
     val historyStore = remember { EncryptedChatHistory(context) }
+    val contactsStore = remember { EncryptedContactsStore(context) }
     val attachmentStore = remember { EncryptedAttachmentStore(context) }
     val voiceRecorder = remember { InMemoryVoiceRecorder() }
     val trustedSafetyNumbers = remember { TrustedSafetyNumberStore(context) }
     var history by remember { mutableStateOf(emptyList<ChatHistoryItem>()) }
+    var hasOlderHistory by remember { mutableStateOf(false) }
+    var loadingOlderHistory by remember { mutableStateOf(false) }
     var peers by remember { mutableStateOf(historyStore.peers()) }
+    var contacts by remember { mutableStateOf(contactsStore.contacts()) }
     var historyRevision by remember { mutableIntStateOf(0) }
     var connection by remember { mutableStateOf(ServerConnection.CHECKING) }
     var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
@@ -187,14 +192,37 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         }
     }
 
+    fun reloadVisibleHistory(peer: String, reset: Boolean = false) {
+        val page = historyStore.latestPage(
+            peer,
+            if (reset) HISTORY_PAGE_SIZE else maxOf(HISTORY_PAGE_SIZE, history.size),
+        )
+        history = page.messages
+        hasOlderHistory = page.hasOlder
+        historyRevision++
+    }
+
+    fun loadOlderHistory() {
+        val peer = recipient ?: return
+        if (!hasOlderHistory || loadingOlderHistory) return
+        loadingOlderHistory = true
+        try {
+            val page = historyStore.olderPage(peer, history.size, HISTORY_PAGE_SIZE)
+            history = page.messages + history
+            hasOlderHistory = page.hasOlder
+            historyRevision++
+        } finally {
+            loadingOlderHistory = false
+        }
+    }
+
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
         viewedProfileNickname = null
         identityChanged = false
         historyStore.markRead(peer)
         recipient = peer
-        history = historyStore.messagesWith(peer)
-        historyRevision++
+        reloadVisibleHistory(peer, reset = true)
         draft = ""
         foundUsers = emptyList()
         searchError = null
@@ -490,8 +518,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         recipient?.let {
             historyStore.markRead(it)
             scope.launch { runCatching { api.markPeerMessagesRead(profile, it) } }
-            history = historyStore.messagesWith(it)
-            historyRevision++
+            reloadVisibleHistory(it)
         }
     }
 
@@ -500,8 +527,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             recipient?.let {
                 historyStore.markRead(it)
                 scope.launch { runCatching { api.markPeerMessagesRead(profile, it) } }
-                history = historyStore.messagesWith(it)
-                historyRevision++
+                reloadVisibleHistory(it)
             }
         }
     }
@@ -518,8 +544,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         }
     }
 
-    LaunchedEffect(peers) {
-        peers.filterNot(knownProfiles::containsKey).forEach { peer ->
+    LaunchedEffect(peers, contacts) {
+        (peers + contacts).distinct().filterNot(knownProfiles::containsKey).forEach { peer ->
             runCatching { api.userProfile(profile, peer) }.getOrNull()?.let { loaded ->
                 knownProfiles = knownProfiles + (peer to loaded)
             }
@@ -553,9 +579,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                                 historyStore.markRead(it)
                                 scope.launch { runCatching { api.markPeerMessagesRead(profile, it) } }
                             }
-                            history = historyStore.messagesWith(it)
+                            reloadVisibleHistory(it)
                         }
-                        historyRevision++
                         status = "Новое зашифрованное сообщение"
                     }
                     MessagingService.ACTION_CONNECTION_CHANGED -> {
@@ -597,8 +622,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     if (item.deliveryStatus != wire) historyStore.updateDeliveryStatus(messageId, wire)
                 }
             }
-            history = historyStore.messagesWith(peer)
-            historyRevision++
+            reloadVisibleHistory(peer)
         }
     }
 
@@ -623,8 +647,17 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 account = profile,
                 nickname = nickname,
                 api = api,
+                isContact = contactsStore.contains(nickname),
                 onBack = { viewedProfileNickname = null },
                 onMessage = { openConversation(nickname) },
+                onToggleContact = {
+                    if (contactsStore.contains(nickname)) {
+                        contactsStore.remove(nickname)
+                    } else {
+                        contactsStore.add(nickname)
+                    }
+                    contacts = contactsStore.contacts()
+                },
                 onProfileLoaded = { loaded, avatar ->
                     knownProfiles = knownProfiles + (loaded.nickname to loaded)
                     if (avatar != null && loaded.avatarVersion != null) {
@@ -810,6 +843,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             ConversationsScreen(
                 profile = profile,
                 peers = peers,
+                contacts = contacts,
                 historyRevision = historyRevision + groupRevision,
                 historyStore = historyStore,
                 search = search,
@@ -842,6 +876,8 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 displayName = knownProfiles[recipient!!]?.displayName,
                 avatar = knownAvatars[recipient!!],
                 history = history,
+                hasOlderHistory = hasOlderHistory,
+                loadingOlderHistory = loadingOlderHistory,
                 draft = draft,
                 status = status,
                 attachmentStore = attachmentStore,
@@ -850,6 +886,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 identityChanged = identityChanged,
                 isBlocked = recipient in blockedUsers,
                 onDraftChange = { draft = it },
+                onLoadOlder = ::loadOlderHistory,
                 onBack = { recipient = null; draft = ""; focusManager.clearFocus() },
                 onImageSelected = ::sendImage,
                 onStartVoice = ::startVoiceRecording,
@@ -916,7 +953,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                             historyStore.deleteMessage(messageId).forEach { descriptor ->
                                 runCatching { attachmentStore.delete(descriptor.attachmentId) }
                             }
-                            recipient?.let { history = historyStore.messagesWith(it) }
+                            recipient?.let { reloadVisibleHistory(it) }
                             peers = historyStore.peers()
                             historyRevision++
                             status = if (forEveryone) {
@@ -1027,3 +1064,5 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
 private fun ByteArray.groupIdText(): String =
     Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+
+private const val HISTORY_PAGE_SIZE = 50

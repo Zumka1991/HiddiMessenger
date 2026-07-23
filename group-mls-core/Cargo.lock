@@ -648,6 +648,7 @@ dependencies = [
  "openmls_rust_crypto",
  "openmls_sqlite_storage",
  "openmls_traits",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

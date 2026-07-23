@@ -1,10 +1,14 @@
 package ru.hiddi.messenger.network
 
 import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
 import ru.hiddi.messenger.security.EncryptedGroupChatStore
 import ru.hiddi.messenger.security.GroupDirectoryMember
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.NativeMlsBridge
+import ru.hiddi.messenger.security.PendingMlsMembershipKind
+import java.util.UUID
 
 /**
  * Coordinates local OpenMLS state with the opaque server transport.
@@ -33,6 +37,7 @@ class GroupMlsCoordinator(
     suspend fun synchronize(profile: AccountProfile): List<ByteArray> {
         val current = ensureDeviceId(profile)
         val deletedGroups = processGroupDeletions(current)
+        handoffNativeJournal()
         registrationOutbox.retry(current)
         memberOutbox.retry(current)
         eventOutbox.retry(current)
@@ -49,29 +54,25 @@ class GroupMlsCoordinator(
         var memberAdded = false
         try {
             val keyPackage = api.takeMlsKeyPackage(current, invitedNickname)
-            val output = requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage)) {
-                "OpenMLS отклонил KeyPackage приглашённого"
-            }
-            memberAdded = true
-            eventOutbox.enqueue(
-                groupId,
-                KIND_WELCOME,
-                listOf(invitedNickname),
-                output.welcomeEnvelope,
-            )
-            groupStore.upsertGroup(
-                groupId,
-                listOf(
+            val operationId = UUID.randomUUID().toString()
+            val context = membershipContext(
+                type = CONTEXT_CREATE_GROUP,
+                ownerNickname = current.nickname,
+                ownerDeviceId = deviceId,
+                targetNickname = invitedNickname,
+                recipients = emptyList(),
+                members = listOf(
                     GroupDirectoryMember(current.nickname, "owner", deviceId),
                     GroupDirectoryMember(invitedNickname, "member", ""),
                 ),
-                ownerNickname = current.nickname,
             )
-            registrationOutbox.register(
-                current,
-                groupId,
-                listOf(GroupMember(invitedNickname)),
-            )
+            requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage, operationId, context)) {
+                "OpenMLS отклонил KeyPackage приглашённого"
+            }
+            memberAdded = true
+            handoffNativeJournal()
+            registrationOutbox.retry(current)
+            eventOutbox.retry(current)
             api.groupDetails(current, groupId).also { details ->
                 groupStore.replaceMembers(
                     groupId,
@@ -248,30 +249,21 @@ class GroupMlsCoordinator(
         }
         require(normalized !in group.members) { "@$normalized уже состоит в группе" }
         val keyPackage = api.takeMlsKeyPackage(current, normalized)
-        val output = requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage)) {
+        val existingRecipients = group.members.filterNot { it == current.nickname }
+        val operationId = UUID.randomUUID().toString()
+        val context = membershipContext(
+            type = CONTEXT_INVITE_MEMBER,
+            ownerNickname = group.ownerNickname,
+            ownerDeviceId = requireNotNull(current.deviceId),
+            targetNickname = normalized,
+            recipients = existingRecipients,
+            members = group.memberDetails + GroupDirectoryMember(normalized, "member", ""),
+        )
+        requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage, operationId, context)) {
             "OpenMLS отклонил KeyPackage приглашённого"
         }
-        val existingRecipients = group.members.filterNot { it == current.nickname }
-        if (existingRecipients.isNotEmpty()) {
-            eventOutbox.enqueue(
-                groupId,
-                KIND_COMMIT,
-                existingRecipients,
-                output.commitEnvelope,
-            )
-        }
-        eventOutbox.enqueue(
-            groupId,
-            KIND_WELCOME,
-            listOf(normalized),
-            output.welcomeEnvelope,
-        )
-        groupStore.upsertGroup(
-            groupId,
-            group.memberDetails + GroupDirectoryMember(normalized, "member", ""),
-            ownerNickname = group.ownerNickname,
-        )
-        memberOutbox.register(current, groupId, GroupMember(normalized))
+        handoffNativeJournal()
+        memberOutbox.retry(current)
         eventOutbox.retry(current)
         val details = api.groupDetails(current, groupId)
         groupStore.replaceMembers(
@@ -298,18 +290,26 @@ class GroupMlsCoordinator(
             ownRole == "admin" && target.role == "member"
         require(allowed) { "Недостаточно прав для удаления @$normalized" }
         require(target.deviceId.isNotBlank()) { "Не найден MLS device id участника" }
-        val commit = requireNotNull(
-            NativeMlsBridge.removeMember(groupId, target.deviceId),
-        ) { "OpenMLS не создал Remove Commit" }
         val recipients = details.members.map(GroupMember::nickname)
             .filterNot { it == current.nickname }
-        eventOutbox.enqueue(
-            groupId,
-            KIND_COMMIT,
-            recipients,
-            commit,
-            removeMemberNickname = normalized,
+        val operationId = UUID.randomUUID().toString()
+        val context = membershipContext(
+            type = CONTEXT_REMOVE_MEMBER,
+            ownerNickname = details.ownerNickname,
+            ownerDeviceId = requireNotNull(current.deviceId),
+            targetNickname = normalized,
+            recipients = recipients,
+            members = details.members.map(GroupMember::directory),
         )
+        requireNotNull(
+            NativeMlsBridge.removeMember(
+                groupId,
+                target.deviceId,
+                operationId,
+                context,
+            ),
+        ) { "OpenMLS не создал Remove Commit" }
+        handoffNativeJournal()
         eventOutbox.retry(current)
         val refreshed = api.groupDetails(current, groupId)
         groupStore.replaceMembers(
@@ -373,10 +373,108 @@ class GroupMlsCoordinator(
         return migrated
     }
 
+    private fun handoffNativeJournal() {
+        NativeMlsBridge.pendingMembershipOperations().forEach { operation ->
+            val context = JSONObject(operation.context.decodeToString())
+            require(context.getInt("version") == 1) { "Неподдерживаемый контекст MLS" }
+            val type = context.getString("type")
+            val target = context.getString("target_nickname")
+            val recipients = context.getJSONArray("recipients").strings()
+            val members = context.getJSONArray("members").directoryMembers()
+            val owner = context.getString("owner_nickname")
+
+            groupStore.upsertGroup(operation.groupId, members, owner)
+            when (type) {
+                CONTEXT_CREATE_GROUP -> registrationOutbox.enqueue(
+                    operation.groupId,
+                    listOf(GroupMember(target)),
+                )
+                CONTEXT_INVITE_MEMBER ->
+                    memberOutbox.enqueue(operation.groupId, GroupMember(target))
+                CONTEXT_REMOVE_MEMBER -> Unit
+                else -> error("Неизвестный контекст MLS")
+            }
+            if (operation.kind == PendingMlsMembershipKind.ADD_MEMBER) {
+                if (recipients.isNotEmpty()) {
+                    eventOutbox.enqueue(
+                        operation.groupId,
+                        KIND_COMMIT,
+                        recipients,
+                        operation.commitEnvelope,
+                    )
+                }
+                eventOutbox.enqueue(
+                    operation.groupId,
+                    KIND_WELCOME,
+                    listOf(target),
+                    requireNotNull(operation.welcomeEnvelope),
+                )
+            } else {
+                eventOutbox.enqueue(
+                    operation.groupId,
+                    KIND_COMMIT,
+                    recipients,
+                    operation.commitEnvelope,
+                    removeMemberNickname = target,
+                )
+            }
+            require(NativeMlsBridge.acknowledgeMembershipOperation(operation.operationId)) {
+                "Не удалось подтвердить перенос операции MLS"
+            }
+        }
+    }
+
+    private fun membershipContext(
+        type: String,
+        ownerNickname: String,
+        ownerDeviceId: String,
+        targetNickname: String,
+        recipients: List<String>,
+        members: List<GroupDirectoryMember>,
+    ): ByteArray = JSONObject()
+        .put("version", 1)
+        .put("type", type)
+        .put("owner_nickname", ownerNickname)
+        .put("owner_device_id", ownerDeviceId)
+        .put("target_nickname", targetNickname)
+        .put("recipients", JSONArray(recipients))
+        .put(
+            "members",
+            JSONArray().also { output ->
+                members.forEach {
+                    output.put(
+                        JSONObject()
+                            .put("nickname", it.nickname)
+                            .put("role", it.role)
+                            .put("device_id", it.deviceId),
+                    )
+                }
+            },
+        )
+        .toString()
+        .encodeToByteArray()
+
+    private fun JSONArray.strings(): List<String> =
+        (0 until length()).map(::getString)
+
+    private fun JSONArray.directoryMembers(): List<GroupDirectoryMember> =
+        (0 until length()).map { index ->
+            getJSONObject(index).let {
+                GroupDirectoryMember(
+                    nickname = it.getString("nickname"),
+                    role = it.getString("role"),
+                    deviceId = it.optString("device_id"),
+                )
+            }
+        }
+
     private companion object {
         const val KIND_WELCOME = 1
         const val KIND_COMMIT = 2
         const val KIND_APPLICATION = 3
+        const val CONTEXT_CREATE_GROUP = "create_group"
+        const val CONTEXT_INVITE_MEMBER = "invite_member"
+        const val CONTEXT_REMOVE_MEMBER = "remove_member"
     }
 }
 

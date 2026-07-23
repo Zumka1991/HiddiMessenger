@@ -24,6 +24,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,8 +50,10 @@ fun UserProfileScreen(
     account: AccountProfile,
     nickname: String,
     api: SignalMessagingApi,
+    isContact: Boolean,
     onBack: () -> Unit,
     onMessage: () -> Unit,
+    onToggleContact: () -> Unit,
     onProfileLoaded: (UserSearchResult, ByteArray?) -> Unit,
 ) {
     var profile by remember(nickname) { mutableStateOf<UserSearchResult?>(null) }
@@ -179,6 +182,13 @@ fun UserProfileScreen(
                         )
                     }
                     Spacer(Modifier.weight(1f))
+                    OutlinedButton(
+                        onClick = onToggleContact,
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
+                    ) {
+                        Text(if (isContact) "Удалить из контактов" else "Добавить в контакты")
+                    }
+                    Spacer(Modifier.height(10.dp))
                     Button(
                         onClick = onMessage,
                         modifier = Modifier.fillMaxWidth().height(54.dp),

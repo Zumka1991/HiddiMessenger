@@ -109,6 +109,7 @@ import java.time.format.DateTimeFormatter
 fun ConversationsScreen(
     profile: AccountProfile,
     peers: List<String>,
+    contacts: List<String>,
     historyRevision: Int,
     historyStore: EncryptedChatHistory,
     search: String,
@@ -131,6 +132,7 @@ fun ConversationsScreen(
     onOpenSettings: () -> Unit,
     onOpenProfile: (String) -> Unit,
 ) {
+    var showContacts by rememberSaveable { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
     ) {
@@ -257,7 +259,15 @@ fun ConversationsScreen(
                 modifier = Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Диалоги", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(
+                    if (showContacts) "Контакты" else "Диалоги",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { showContacts = !showContacts }) {
+                    Text(if (showContacts) "К диалогам" else "Контакты")
+                }
                 IconButton(onClick = onRefreshConnection) {
                     Icon(Icons.Rounded.Refresh, contentDescription = "Проверить связь", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -285,7 +295,19 @@ fun ConversationsScreen(
             }
         }
 
-        if (peers.isEmpty() && groups.isEmpty()) {
+        if (showContacts && contacts.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Контактов пока нет", fontWeight = FontWeight.Medium)
+                    Text(
+                        "Найдите человека по никнейму и добавьте его из профиля",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                }
+            }
+        } else if (!showContacts && peers.isEmpty() && groups.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Surface(
@@ -308,24 +330,38 @@ fun ConversationsScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
-                    GroupConversationRow(
-                        profileNickname = profile.nickname,
-                        group = group,
-                        onClick = { onOpenGroup(group.groupId) },
-                    )
-                }
-                items(peers, key = { "$it:$historyRevision" }) { peer ->
-                    val lastMessage = historyStore.messagesWith(peer).lastOrNull()
-                    ConversationRow(
-                        peer = peer,
-                        profile = knownProfiles[peer],
-                        avatar = knownAvatars[peer],
-                        lastMessage = lastMessage,
-                        unreadCount = historyStore.unreadCount(peer),
-                        onClick = { onOpenConversation(peer) },
-                        onOpenProfile = { onOpenProfile(peer) },
-                    )
+                if (showContacts) {
+                    items(contacts, key = { "contact:$it:$historyRevision" }) { contact ->
+                        ConversationRow(
+                            peer = contact,
+                            profile = knownProfiles[contact],
+                            avatar = knownAvatars[contact],
+                            lastMessage = historyStore.messagesWith(contact).lastOrNull(),
+                            unreadCount = historyStore.unreadCount(contact),
+                            onClick = { onOpenConversation(contact) },
+                            onOpenProfile = { onOpenProfile(contact) },
+                        )
+                    }
+                } else {
+                    items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
+                        GroupConversationRow(
+                            profileNickname = profile.nickname,
+                            group = group,
+                            onClick = { onOpenGroup(group.groupId) },
+                        )
+                    }
+                    items(peers, key = { "$it:$historyRevision" }) { peer ->
+                        val lastMessage = historyStore.messagesWith(peer).lastOrNull()
+                        ConversationRow(
+                            peer = peer,
+                            profile = knownProfiles[peer],
+                            avatar = knownAvatars[peer],
+                            lastMessage = lastMessage,
+                            unreadCount = historyStore.unreadCount(peer),
+                            onClick = { onOpenConversation(peer) },
+                            onOpenProfile = { onOpenProfile(peer) },
+                        )
+                    }
                 }
             }
         }
