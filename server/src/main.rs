@@ -387,6 +387,10 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/groups/events/wait", get(wait_for_group_event))
         .route("/v1/groups/events/{event_id}", post(ack_group_event))
         .route("/v1/groups/{group_id}/events", post(send_group_event))
+        .route(
+            "/v1/groups/{group_id}/messages/{client_event_id}",
+            axum::routing::delete(delete_group_message),
+        )
         .route("/v1/messages", post(send_message).get(inbox))
         .route("/v1/messages/wait", get(wait_for_message))
         .route("/v1/messages/deletions", get(pending_message_deletions))
@@ -1312,6 +1316,58 @@ async fn delete_group(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete group"))?;
     drop(db);
     state.message_notify.notify_waiters();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_group_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((group_id, client_event_id)): axum::extract::Path<(String, String)>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    validate_group_id(&group_id)?;
+    let decoded_id = URL_SAFE_NO_PAD
+        .decode(&client_event_id)
+        .map_err(|_| Error(StatusCode::BAD_REQUEST, "invalid group message id"))?;
+    if !(16..=64).contains(&decoded_id.len()) {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid group message id"));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let is_member: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM group_members
+                WHERE group_id = ?1 AND account_id = ?2
+             )",
+            params![group_id, account.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not authorize group message deletion",
+            )
+        })?;
+    if !is_member {
+        return Err(Error(StatusCode::NOT_FOUND, "group not found"));
+    }
+    db.execute(
+        "DELETE FROM group_events
+         WHERE group_id = ?1
+           AND sender_account_id = ?2
+           AND client_event_id = ?3
+           AND kind = 3",
+        params![group_id, account.account_id, client_event_id],
+    )
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not delete group message ciphertext",
+        )
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2918,6 +2974,58 @@ mod tests {
         let details = serde_json::from_str::<serde_json::Value>(&details).unwrap();
         assert_eq!(details["owner_nickname"], "alice");
         assert_eq!(details["members"].as_array().unwrap().len(), 3);
+        let group_message_id = URL_SAFE_NO_PAD.encode([11_u8; 16]);
+        let (status, _) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&alice),
+            serde_json::json!({
+                "client_event_id": group_message_id,
+                "kind": 3,
+                "recipient_nicknames": ["bob", "charlie"],
+                "envelope": URL_SAFE_NO_PAD.encode([1_u8, 3, 42]),
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = request(
+            &app,
+            "DELETE",
+            format!("/v1/groups/{group_id}/messages/{group_message_id}").as_str(),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, inbox) = request(&app, "GET", "/v1/groups/events", Some(&bob), String::new()).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let (status, _) = request(
+            &app,
+            "DELETE",
+            format!("/v1/groups/{group_id}/messages/{group_message_id}").as_str(),
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, inbox) = request(&app, "GET", "/v1/groups/events", Some(&bob), String::new()).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         let (status, _) = request(
             &app,
             "DELETE",

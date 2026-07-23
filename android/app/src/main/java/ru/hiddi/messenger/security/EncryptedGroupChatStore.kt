@@ -61,6 +61,7 @@ class EncryptedGroupChatStore(context: Context) {
     fun appendIncoming(
         groupId: ByteArray,
         eventId: String,
+        messageId: String?,
         sender: String,
         plaintext: String,
         createdAt: String,
@@ -72,6 +73,7 @@ class EncryptedGroupChatStore(context: Context) {
             messages.put(
                 JSONObject()
                     .put("event_id", eventId)
+                    .put("message_id", messageId)
                     .put("sender", sender)
                     .put("text", plaintext)
                     .put("outgoing", false)
@@ -81,17 +83,50 @@ class EncryptedGroupChatStore(context: Context) {
         }
     }
 
-    fun appendOutgoing(groupId: ByteArray, sender: String, plaintext: String) = synchronized(lock) {
+    fun appendOutgoing(
+        groupId: ByteArray,
+        messageId: String,
+        sender: String,
+        plaintext: String,
+    ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
         group.getJSONArray("messages").put(
             JSONObject()
+                .put("message_id", messageId)
                 .put("sender", sender)
                 .put("text", plaintext)
                 .put("outgoing", true)
                 .put("time", Instant.now().toString()),
         )
         write(root)
+    }
+
+    fun deleteMessage(
+        groupId: ByteArray,
+        messageId: String,
+        expectedSender: String? = null,
+    ): Boolean = synchronized(lock) {
+        val root = read()
+        val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
+        val messages = group.getJSONArray("messages")
+        val retained = JSONArray()
+        var deleted = false
+        for (index in 0 until messages.length()) {
+            val message = messages.getJSONObject(index)
+            val matches = message.optString("message_id") == messageId &&
+                (expectedSender == null || message.getString("sender") == expectedSender)
+            if (matches) {
+                deleted = true
+            } else {
+                retained.put(message)
+            }
+        }
+        if (deleted) {
+            group.put("messages", retained)
+            write(root)
+        }
+        deleted
     }
 
     fun clearHistory(groupId: ByteArray) = synchronized(lock) {
@@ -145,6 +180,7 @@ class EncryptedGroupChatStore(context: Context) {
     private fun JSONArray.messages(): List<GroupChatMessage> = (0 until length()).map { index ->
         getJSONObject(index).let { message ->
             GroupChatMessage(
+                messageId = message.optString("message_id").takeIf(String::isNotBlank),
                 sender = message.getString("sender"),
                 text = message.getString("text"),
                 outgoing = message.getBoolean("outgoing"),
@@ -171,6 +207,7 @@ data class LocalGroupChat(
 )
 
 data class GroupChatMessage(
+    val messageId: String?,
     val sender: String,
     val text: String,
     val outgoing: Boolean,

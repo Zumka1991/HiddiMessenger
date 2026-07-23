@@ -45,6 +45,7 @@ env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-t
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group invite --group GROUP_PREFIX --with another_nickname
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group list
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group send --message 'Привет группе'
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group delete-message --group GROUP_PREFIX
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group inbox
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group delete --group GROUP_PREFIX
 ```

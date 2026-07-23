@@ -123,13 +123,26 @@ class GroupMlsCoordinator(
                     val plaintext = requireNotNull(
                         NativeMlsBridge.processApplicationMessage(event.groupId, event.envelope),
                     ) { "OpenMLS отклонил group message" }
-                    groupStore.appendIncoming(
-                        event.groupId,
-                        event.eventId,
-                        event.senderNickname,
-                        plaintext.decodeToString(),
-                        event.createdAt,
-                    )
+                    val payload = try {
+                        GroupApplicationPayloadCodec.decode(plaintext.decodeToString())
+                    } finally {
+                        plaintext.fill(0)
+                    }
+                    when (payload) {
+                        is GroupApplicationPayload.Text -> groupStore.appendIncoming(
+                            event.groupId,
+                            event.eventId,
+                            payload.messageId,
+                            event.senderNickname,
+                            payload.text,
+                            event.createdAt,
+                        )
+                        is GroupApplicationPayload.Delete -> groupStore.deleteMessage(
+                            event.groupId,
+                            payload.messageId,
+                            expectedSender = event.senderNickname,
+                        )
+                    }
                     changedGroups += event.groupId
                 }
                 else -> error("Неизвестный MLS event kind")
@@ -145,12 +158,59 @@ class GroupMlsCoordinator(
         val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
             ?: error("Неизвестная локальная MLS-группа")
         val recipients = group.members.filterNot { it == profile.nickname }
-        val envelope = requireNotNull(
-            NativeMlsBridge.createApplicationMessage(groupId, trimmed.encodeToByteArray()),
-        ) { "Не удалось зашифровать group message" }
-        eventOutbox.enqueue(groupId, KIND_APPLICATION, recipients, envelope)
-        groupStore.appendOutgoing(groupId, profile.nickname, trimmed)
+        val messageId = GroupApplicationPayloadCodec.newMessageId()
+        val payload = GroupApplicationPayloadCodec.encodeText(messageId, trimmed)
+        val envelope = try {
+            requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                "Не удалось зашифровать group message"
+            }
+        } finally {
+            payload.fill(0)
+        }
+        eventOutbox.enqueue(
+            groupId,
+            KIND_APPLICATION,
+            recipients,
+            envelope,
+            clientEventId = messageId,
+        )
+        groupStore.appendOutgoing(groupId, messageId, profile.nickname, trimmed)
         eventOutbox.retry(profile)
+    }
+
+    suspend fun deleteMessage(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        messageId: String,
+        forEveryone: Boolean,
+    ) {
+        val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
+            ?: error("Неизвестная локальная MLS-группа")
+        val message = group.messages.firstOrNull { it.messageId == messageId }
+            ?: return
+        require(message.outgoing && message.sender == profile.nickname) {
+            "Удалять у всех можно только свои сообщения"
+        }
+        if (forEveryone) {
+            val recipients = group.members.filterNot { it == profile.nickname }
+            val payload = GroupApplicationPayloadCodec.encodeDelete(messageId)
+            val envelope = try {
+                requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                    "Не удалось зашифровать удаление group message"
+                }
+            } finally {
+                payload.fill(0)
+            }
+            eventOutbox.enqueue(
+                groupId,
+                KIND_APPLICATION,
+                recipients,
+                envelope,
+                deleteClientEventId = messageId,
+            )
+        }
+        groupStore.deleteMessage(groupId, messageId)
+        if (forEveryone) eventOutbox.retry(profile)
     }
 
     fun groups(): List<LocalGroupChat> = groupStore.groups()

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -45,10 +46,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import ru.hiddi.messenger.security.GroupChatMessage
 import ru.hiddi.messenger.security.LocalGroupChat
 
 @Composable
@@ -63,6 +66,7 @@ fun GroupConversationScreen(
     onInviteMember: (String) -> Unit,
     onClearHistory: () -> Unit,
     onDeleteGroup: () -> Unit,
+    onDeleteMessage: (GroupChatMessage, Boolean) -> Unit,
     onSend: () -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -73,6 +77,8 @@ fun GroupConversationScreen(
     var showInviteDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var selectedForActions by remember { mutableStateOf<GroupChatMessage?>(null) }
+    var selectedForDeletion by remember { mutableStateOf<GroupChatMessage?>(null) }
     var inviteNickname by remember { mutableStateOf("") }
     LaunchedEffect(group.messages.size) {
         if (group.messages.isNotEmpty()) {
@@ -166,11 +172,19 @@ fun GroupConversationScreen(
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             items(group.messages) { message ->
+                val longPressModifier = if (message.outgoing && message.messageId != null) {
+                    Modifier.pointerInput(message.messageId) {
+                        detectTapGestures(onLongPress = { selectedForActions = message })
+                    }
+                } else {
+                    Modifier
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
                 ) {
                     Surface(
+                        modifier = longPressModifier,
                         shape = RoundedCornerShape(
                             topStart = 18.dp,
                             topEnd = 18.dp,
@@ -302,6 +316,69 @@ fun GroupConversationScreen(
                 androidx.compose.material3.TextButton(onClick = { showDeleteDialog = false }) {
                     Text("Отмена")
                 }
+            },
+        )
+    }
+    selectedForActions?.let { message ->
+        AlertDialog(
+            onDismissRequest = { selectedForActions = null },
+            title = { Text("Действия с сообщением") },
+            text = {
+                Column {
+                    androidx.compose.material3.TextButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Редактировать — скоро", modifier = Modifier.fillMaxWidth())
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            selectedForActions = null
+                            selectedForDeletion = message
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "Удалить…",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { selectedForActions = null }) {
+                    Text("Отмена")
+                }
+            },
+        )
+    }
+    selectedForDeletion?.let { message ->
+        AlertDialog(
+            onDismissRequest = { selectedForDeletion = null },
+            title = { Text("Удалить сообщение?") },
+            text = {
+                Text(
+                    "Удаление у всех будет отправлено участникам внутри OpenMLS. " +
+                        "Уже сохранённые копии и скриншоты стереть невозможно.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        selectedForDeletion = null
+                        onDeleteMessage(message, true)
+                    },
+                ) { Text("У всех") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        selectedForDeletion = null
+                        onDeleteMessage(message, false)
+                    },
+                ) { Text("Только у меня") }
             },
         )
     }

@@ -22,6 +22,7 @@ object GroupCommand {
             "create" -> withMls(args.drop(1)) { session -> create(session, args.drop(1)) }
             "invite" -> withMls(args.drop(1)) { session -> invite(session, args.drop(1)) }
             "send" -> withMls(args.drop(1)) { session -> send(session, args.drop(1)) }
+            "delete-message" -> withMls(args.drop(1)) { session -> deleteMessage(session, args.drop(1)) }
             "delete" -> withMls(args.drop(1)) { session -> delete(session, args.drop(1)) }
             "inbox" -> withMls(args.drop(1)) { session -> receive(session, printEmpty = true) }
             "watch" -> withMls(args.drop(1)) { session -> watch(session) }
@@ -95,14 +96,28 @@ object GroupCommand {
         val text = args.option("--message")?.trim().orEmpty()
         require(text.isNotEmpty()) { "Укажите текст: --message 'Привет'" }
         val groupId = group.getString("group_id").base64UrlDecode()
-        val envelope = requireNotNull(
-            NativeMlsBridge.createApplicationMessage(groupId, text.encodeToByteArray()),
-        ) { "OpenMLS не зашифровал сообщение" }
+        val messageId = ByteArray(16).also(SecureRandom()::nextBytes).base64Url()
+        val payload = encodeGroupText(messageId, text)
+        val envelope = try {
+            requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                "OpenMLS не зашифровал сообщение"
+            }
+        } finally {
+            payload.fill(0)
+        }
         val recipients = group.getJSONArray("members").strings()
             .filterNot { it == session.nickname }
-        enqueueEvent(session, groupId, KIND_APPLICATION, recipients, envelope)
+        enqueueEvent(
+            session,
+            groupId,
+            KIND_APPLICATION,
+            recipients,
+            envelope,
+            clientEventId = messageId,
+        )
         group.getJSONArray("messages").put(
             JSONObject()
+                .put("message_id", messageId)
                 .put("sender", session.nickname)
                 .put("text", text)
                 .put("outgoing", true),
@@ -110,6 +125,49 @@ object GroupCommand {
         session.save()
         syncPending(session)
         println("Групповое сообщение зашифровано и отправлено.")
+    }
+
+    private fun deleteMessage(session: MlsSession, args: List<String>) {
+        val group = resolveGroup(session, args.option("--group"))
+        val messages = group.getJSONArray("messages")
+        val requested = args.option("--message")
+        val message = (messages.length() - 1 downTo 0)
+            .map(messages::getJSONObject)
+            .firstOrNull {
+                it.optBoolean("outgoing") &&
+                    it.optString("message_id").isNotBlank() &&
+                    (requested == null || it.getString("message_id").startsWith(requested))
+            }
+            ?: error("Своё удаляемое сообщение не найдено")
+        val messageId = message.getString("message_id")
+        val groupId = group.getString("group_id").base64UrlDecode()
+        val forEveryone = "--local" !in args
+        if (forEveryone) {
+            val payload = encodeGroupDelete(messageId)
+            val envelope = try {
+                requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                    "OpenMLS не зашифровал удаление"
+                }
+            } finally {
+                payload.fill(0)
+            }
+            enqueueEvent(
+                session,
+                groupId,
+                KIND_APPLICATION,
+                group.getJSONArray("members").strings().filterNot { it == session.nickname },
+                envelope,
+                deleteClientEventId = messageId,
+            )
+        }
+        for (index in messages.length() - 1 downTo 0) {
+            if (messages.getJSONObject(index).optString("message_id") == messageId) {
+                messages.remove(index)
+            }
+        }
+        session.save()
+        if (forEveryone) syncPending(session)
+        println(if (forEveryone) "Сообщение удалено у участников." else "Сообщение удалено локально.")
     }
 
     private fun invite(session: MlsSession, args: List<String>) {
@@ -227,22 +285,43 @@ object GroupCommand {
                     } finally {
                         plaintext.fill(0)
                     }
+                    val payload = decodeGroupPayload(text)
                     val group = requireNotNull(findGroup(session, groupId)) {
                         "Получено сообщение неизвестной локальной группы"
                     }
-                    if ((0 until group.getJSONArray("messages").length()).none {
-                            group.getJSONArray("messages").getJSONObject(it).optString("event_id") == eventId
+                    when (payload) {
+                        is TerminalGroupPayload.Text -> {
+                            if ((0 until group.getJSONArray("messages").length()).none {
+                                    val stored = group.getJSONArray("messages").getJSONObject(it)
+                                    stored.optString("event_id") == eventId ||
+                                        (payload.messageId != null &&
+                                            stored.optString("message_id") == payload.messageId)
+                                }
+                            ) {
+                                group.getJSONArray("messages").put(
+                                    JSONObject()
+                                        .put("event_id", eventId)
+                                        .put("message_id", payload.messageId)
+                                        .put("sender", sender)
+                                        .put("text", payload.text)
+                                        .put("outgoing", false),
+                                )
+                            }
+                            println("[${shortId(groupId)}] @$sender: ${payload.text}")
                         }
-                    ) {
-                        group.getJSONArray("messages").put(
-                            JSONObject()
-                                .put("event_id", eventId)
-                                .put("sender", sender)
-                                .put("text", text)
-                                .put("outgoing", false),
-                        )
+                        is TerminalGroupPayload.Delete -> {
+                            val messages = group.getJSONArray("messages")
+                            for (messageIndex in messages.length() - 1 downTo 0) {
+                                val stored = messages.getJSONObject(messageIndex)
+                                if (stored.optString("message_id") == payload.messageId &&
+                                    stored.getString("sender") == sender
+                                ) {
+                                    messages.remove(messageIndex)
+                                }
+                            }
+                            println("[${shortId(groupId)}] @$sender удалил своё сообщение")
+                        }
                     }
-                    println("[${shortId(groupId)}] @$sender: $text")
                 }
                 else -> error("Неизвестный тип MLS event")
             }
@@ -342,6 +421,15 @@ object GroupCommand {
                     .put("envelope", event.getString("envelope")),
                 session.token,
             )
+            event.optString("delete_client_event_id").takeIf(String::isNotBlank)?.let { target ->
+                request(
+                    session.client,
+                    "DELETE",
+                    "${session.server}/v1/groups/${event.getString("group_id")}/messages/$target",
+                    null,
+                    session.token,
+                )
+            }
             pending.remove(0)
             session.save()
         }
@@ -353,8 +441,10 @@ object GroupCommand {
         kind: Int,
         recipients: List<String>,
         envelope: ByteArray,
+        clientEventId: String? = null,
+        deleteClientEventId: String? = null,
     ) {
-        val id = MessageDigest.getInstance("SHA-256")
+        val id = clientEventId ?: MessageDigest.getInstance("SHA-256")
             .digest(groupId + byteArrayOf(kind.toByte()) + envelope)
             .base64Url()
         if ((0 until session.pendingEvents.length()).none {
@@ -367,7 +457,8 @@ object GroupCommand {
                     .put("group_id", groupId.base64Url())
                     .put("kind", kind)
                     .put("recipients", JSONArray(recipients))
-                    .put("envelope", envelope.base64Url()),
+                    .put("envelope", envelope.base64Url())
+                    .put("delete_client_event_id", deleteClientEventId),
             )
         }
     }
@@ -522,13 +613,45 @@ object GroupCommand {
     }
 
     private fun shortId(groupId: ByteArray) = groupId.base64Url().take(10)
+    private fun encodeGroupText(messageId: String, text: String): ByteArray =
+        (GROUP_PAYLOAD_PREFIX + JSONObject()
+            .put("version", 1)
+            .put("type", "text")
+            .put("message_id", messageId)
+            .put("text", text)
+            .toString())
+            .encodeToByteArray()
+
+    private fun encodeGroupDelete(messageId: String): ByteArray =
+        (GROUP_PAYLOAD_PREFIX + JSONObject()
+            .put("version", 1)
+            .put("type", "delete")
+            .put("message_id", messageId)
+            .toString())
+            .encodeToByteArray()
+
+    private fun decodeGroupPayload(plaintext: String): TerminalGroupPayload {
+        if (!plaintext.startsWith(GROUP_PAYLOAD_PREFIX)) {
+            return TerminalGroupPayload.Text(null, plaintext)
+        }
+        val payload = JSONObject(plaintext.removePrefix(GROUP_PAYLOAD_PREFIX))
+        require(payload.optInt("version") == 1) { "Неподдерживаемая версия group payload" }
+        val messageId = payload.getString("message_id")
+        require(messageId.base64UrlDecode().size in 16..64) { "Некорректный group message id" }
+        return when (payload.getString("type")) {
+            "text" -> TerminalGroupPayload.Text(messageId, payload.getString("text"))
+            "delete" -> TerminalGroupPayload.Delete(messageId)
+            else -> error("Неизвестный тип group payload")
+        }
+    }
+
     private fun String.normalizeNickname() = trim().removePrefix("@").lowercase()
     private fun JSONArray.strings() = (0 until length()).map(::getString)
     private fun List<String>.option(name: String): String? =
         indexOf(name).takeIf { it >= 0 }?.let { getOrNull(it + 1) }
 
     private fun usage(): Nothing = error(
-        "Использование: group publish|create --with NICK|invite --with NICK|list|send|inbox|watch|sync|delete",
+        "Использование: group publish|create --with NICK|invite --with NICK|list|send|delete-message|inbox|watch|sync|delete",
     )
 
     private data class TerminalGroupDetails(
@@ -536,7 +659,13 @@ object GroupCommand {
         val members: List<String>,
     )
 
+    private sealed interface TerminalGroupPayload {
+        data class Text(val messageId: String?, val text: String) : TerminalGroupPayload
+        data class Delete(val messageId: String) : TerminalGroupPayload
+    }
+
     private const val KIND_WELCOME = 1
     private const val KIND_COMMIT = 2
     private const val KIND_APPLICATION = 3
+    private const val GROUP_PAYLOAD_PREFIX = "HIDDI_GROUP_V1:"
 }

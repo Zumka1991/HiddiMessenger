@@ -15,16 +15,24 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
         keyAlias = "ru.hiddi.messenger.pending-group-events.v1",
     )
 
-    fun enqueue(groupId: ByteArray, kind: Int, recipients: List<String>, envelope: ByteArray) =
+    fun enqueue(
+        groupId: ByteArray,
+        kind: Int,
+        recipients: List<String>,
+        envelope: ByteArray,
+        clientEventId: String? = null,
+        deleteClientEventId: String? = null,
+    ) =
         synchronized(lock) {
             val entry = PendingGroupEvent(
-                id = MessageDigest.getInstance("SHA-256")
+                id = clientEventId ?: MessageDigest.getInstance("SHA-256")
                     .digest(groupId + byteArrayOf(kind.toByte()) + envelope)
                     .b64(),
                 groupId = groupId.b64(),
                 kind = kind,
                 recipients = recipients.map { it.trim().removePrefix("@").lowercase() },
                 envelope = envelope.b64(),
+                deleteClientEventId = deleteClientEventId,
             )
             val entries = read()
             if (entries.none { it.id == entry.id }) write(entries + entry)
@@ -40,6 +48,9 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                 entry.recipients,
                 entry.envelope.decode(),
             )
+            entry.deleteClientEventId?.let {
+                api.deleteGroupMessage(profile, entry.groupId.decode(), it)
+            }
             remove(entry.id)
         }
     }
@@ -60,6 +71,8 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                         (0 until recipients.length()).map(recipients::getString)
                     },
                     envelope = item.getString("envelope"),
+                    deleteClientEventId = item.optString("delete_client_event_id")
+                        .takeIf(String::isNotBlank),
                 )
             }
         }
@@ -74,7 +87,8 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
                     .put("group_id", entry.groupId)
                     .put("kind", entry.kind)
                     .put("recipients", JSONArray(entry.recipients))
-                    .put("envelope", entry.envelope),
+                    .put("envelope", entry.envelope)
+                    .put("delete_client_event_id", entry.deleteClientEventId),
             )
         }
         store.write(items.toString().encodeToByteArray())
@@ -86,6 +100,7 @@ class GroupEventOutbox(context: Context, private val api: SignalMessagingApi) {
         val kind: Int,
         val recipients: List<String>,
         val envelope: String,
+        val deleteClientEventId: String?,
     )
 
     private companion object {

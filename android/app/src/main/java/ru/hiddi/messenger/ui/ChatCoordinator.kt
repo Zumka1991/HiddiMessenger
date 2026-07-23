@@ -635,6 +635,39 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                         }
                     }
                 },
+                onDeleteMessage = { message, forEveryone ->
+                    val messageId = message.messageId ?: return@GroupConversationScreen
+                    if (groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = if (forEveryone) {
+                        "Отправляем защищённую команду удаления…"
+                    } else {
+                        "Удаляем локально…"
+                    }
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.deleteMessage(
+                                    profile,
+                                    selectedGroup.groupId,
+                                    messageId,
+                                    forEveryone,
+                                )
+                            }
+                            refreshGroups()
+                            groupStatus = if (forEveryone) {
+                                "Сообщение удалено у участников"
+                            } else {
+                                "Сообщение удалено с этого устройства"
+                            }
+                        } catch (error: Exception) {
+                            refreshGroups()
+                            groupStatus = error.message ?: "Не удалось удалить сообщение"
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
                 onSend = {
                     val text = groupDraft.trim()
                     if (text.isEmpty() || groupBusy) return@GroupConversationScreen

@@ -128,6 +128,19 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             )
         }
 
+    suspend fun deleteGroupMessage(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        clientEventId: String,
+    ) = withContext(Dispatchers.IO) {
+        request(
+            "DELETE",
+            "${profile.serverUrl}/v1/groups/${groupId.b64()}/messages/$clientEventId",
+            null,
+            profile.accessToken,
+        )
+    }
+
     suspend fun pendingGroupDeletions(profile: AccountProfile): List<GroupDeletion> =
         withContext(Dispatchers.IO) {
             val response = JSONArray(
