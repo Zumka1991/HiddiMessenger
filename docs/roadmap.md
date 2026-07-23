@@ -74,7 +74,8 @@
 * [x] Воспроизводимая Android arm64 native-сборка OpenMLS core через NDK.
 * [x] Минимальный JNI bridge Android → Rust для fail-closed проверки MLS envelope.
 * [x] MLS round-trip test: создание, Welcome, join и application message между
-  двумя независимыми client state.
+  двумя независимыми client state, включая восстановление группы из OpenMLS
+  `StorageProvider`.
 * [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.

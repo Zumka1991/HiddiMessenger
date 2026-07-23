@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn welcome_join_and_application_message_round_trip() {
+    fn welcome_join_persists_and_restores_group_state() {
         let alice_provider = OpenMlsRustCrypto::default();
         let bob_provider = OpenMlsRustCrypto::default();
         let (alice_credential, alice_signer) = credential(b"alice", &alice_provider);
@@ -188,7 +188,17 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut bob_group = staged.into_group(&bob_provider).unwrap();
+        let bob_group = staged.into_group(&bob_provider).unwrap();
+        let bob_group_id = bob_group.group_id().clone();
+        drop(bob_group);
+
+        // `MlsGroup` itself is disposable: all ratchet and epoch state must come from the
+        // provider storage after an app restart.  The production Android provider will keep
+        // this storage encrypted with the Android Keystore; this test exercises OpenMLS'
+        // restore path rather than serialising individual MLS secrets ourselves.
+        let mut bob_group = MlsGroup::load(bob_provider.storage(), &bob_group_id)
+            .unwrap()
+            .expect("joined group must be persisted by the OpenMLS storage provider");
         let application = alice_group
             .create_message(&alice_provider, &alice_signer, b"family secret")
             .unwrap();
