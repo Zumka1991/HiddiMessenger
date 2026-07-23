@@ -26,6 +26,28 @@ import java.net.URL
 import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
+    suspend fun uploadMlsKeyPackage(profile: AccountProfile, keyPackage: ByteArray) = withContext(Dispatchers.IO) {
+        require(keyPackage.isNotEmpty()) { "Пустой MLS KeyPackage" }
+        request(
+            "PUT",
+            "${profile.serverUrl}/v1/groups/key-package",
+            JSONObject().put("key_package", keyPackage.b64()).toString(),
+            profile.accessToken,
+        )
+    }
+
+    suspend fun takeMlsKeyPackage(profile: AccountProfile, nickname: String): ByteArray = withContext(Dispatchers.IO) {
+        val normalized = nickname.trim().removePrefix("@").lowercase()
+        JSONObject(
+            request(
+                "GET",
+                "${profile.serverUrl}/v1/users/${URLEncoder.encode(normalized, Charsets.UTF_8.name())}/mls-key-package",
+                null,
+                profile.accessToken,
+            ),
+        ).getString("key_package").decode()
+    }
+
     /** Sends only group routing metadata; MLS state and keys never leave the native core. */
     suspend fun createGroup(
         profile: AccountProfile,
