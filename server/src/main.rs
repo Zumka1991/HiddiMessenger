@@ -248,7 +248,20 @@ async fn main() -> anyhow::Result<()> {
             entries: Mutex::new(HashMap::new()),
         }),
     };
-    let app = Router::new()
+    let app = build_app(state);
+
+    let address: SocketAddr = env::var("HIDDI_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:3000".into())
+        .parse()
+        .context("HIDDI_BIND_ADDR must be a socket address")?;
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    info!(%address, attachment_backend = attachment_backend.name(), "Hiddi server is listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route("/v1/admin/invites", post(create_invite))
         .route("/v1/auth/register", post(register))
@@ -285,16 +298,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let address: SocketAddr = env::var("HIDDI_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:3000".into())
-        .parse()
-        .context("HIDDI_BIND_ADDR must be a socket address")?;
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, attachment_backend = attachment_backend.name(), "Hiddi server is listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn upload_prekeys(
@@ -1365,10 +1369,22 @@ const ATTACHMENT_QUOTA_BYTES: usize = 1024 * 1024 * 1024;
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_ATTACHMENT_BYTES, RateLimiter, decode_attachment_ciphertext, normalize_nickname,
+        AppState, AttachmentStorageBackend, MAX_ATTACHMENT_BYTES, RateLimiter, build_app,
+        decode_attachment_ciphertext, migrate, normalize_nickname,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use std::time::Duration;
+    use rusqlite::Connection;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
 
     #[test]
     fn normalizes_valid_nickname() {
@@ -1397,5 +1413,132 @@ mod tests {
         assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_ok());
         assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_err());
         assert!(limiter.check("bob", 2, Duration::from_secs(60)).is_ok());
+    }
+
+    fn test_app() -> axum::Router {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        build_app(AppState {
+            db: Arc::new(Mutex::new(db)),
+            bootstrap_secret: "test-bootstrap-secret-with-enough-length".into(),
+            message_notify: Arc::new(Notify::new()),
+            attachment_backend: AttachmentStorageBackend::Sqlite,
+            rate_limiter: Arc::new(RateLimiter {
+                entries: Mutex::new(HashMap::new()),
+            }),
+        })
+    }
+
+    async fn request(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: String,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn registration_and_message_delivery_work_over_http() {
+        let app = test_app();
+        let admin = "test-bootstrap-secret-with-enough-length";
+        let (_, invite_alice) = request(
+            &app,
+            "POST",
+            "/v1/admin/invites",
+            Some(admin),
+            String::new(),
+        )
+        .await;
+        let invite_alice =
+            serde_json::from_str::<serde_json::Value>(&invite_alice).unwrap()["invite_code"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let (_, invite_bob) = request(
+            &app,
+            "POST",
+            "/v1/admin/invites",
+            Some(admin),
+            String::new(),
+        )
+        .await;
+        let invite_bob =
+            serde_json::from_str::<serde_json::Value>(&invite_bob).unwrap()["invite_code"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let registration = |nickname: &str, invite: String| {
+            serde_json::json!({"nickname": nickname, "invite_code": invite, "identity_public_key": URL_SAFE_NO_PAD.encode([5_u8; 33]), "registration_id": 42}).to_string()
+        };
+        let (alice_status, alice) = request(
+            &app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            registration("alice", invite_alice.clone()),
+        )
+        .await;
+        assert_eq!(alice_status, StatusCode::CREATED);
+        let alice_token =
+            serde_json::from_str::<serde_json::Value>(&alice).unwrap()["access_token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let (bob_status, bob) = request(
+            &app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            registration("bob", invite_bob),
+        )
+        .await;
+        assert_eq!(bob_status, StatusCode::CREATED);
+        let bob_token = serde_json::from_str::<serde_json::Value>(&bob).unwrap()["access_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (reused_status, _) = request(
+            &app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            registration("eve", invite_alice),
+        )
+        .await;
+        assert_eq!(reused_status, StatusCode::UNAUTHORIZED);
+        let (send_status, _) = request(
+            &app,
+            "POST",
+            "/v1/messages",
+            Some(&alice_token),
+            serde_json::json!({"recipient_nickname":"bob","ciphertext":"aGVsbG8"}).to_string(),
+        )
+        .await;
+        assert_eq!(send_status, StatusCode::CREATED);
+        let (inbox_status, inbox) =
+            request(&app, "GET", "/v1/messages", Some(&bob_token), String::new()).await;
+        assert_eq!(inbox_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["sender_nickname"],
+            "alice"
+        );
     }
 }
