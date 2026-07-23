@@ -253,14 +253,14 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         focusManager.clearFocus()
     }
 
-    fun createGroup(nickname: String) {
+    fun createGroup(nickname: String, name: String) {
         if (groupBusy) return
         groupBusy = true
-        status = "Создаём защищённую MLS-группу…"
+        status = "Создаём защищённую группу «${name.trim()}»…"
         scope.launch {
             try {
                 val groupId = withContext(Dispatchers.IO) {
-                    groupCoordinator.createTwoPartyGroup(profile, nickname)
+                    groupCoordinator.createTwoPartyGroup(profile, nickname, name)
                 }
                 refreshGroups()
                 openGroup(groupId)
@@ -503,6 +503,122 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         }
     }
 
+    fun sendGroupImage(groupId: ByteArray, uri: Uri) {
+        if (groupBusy) return
+        groupBusy = true
+        groupStatus = "Очищаем и шифруем изображение…"
+        scope.launch {
+            val uploadedIds = mutableListOf<String>()
+            try {
+                val (full, preview) = withContext(Dispatchers.IO) {
+                    val sanitized = sanitizeImage(context, uri)
+                    try {
+                        Pair(
+                            attachmentStore.encrypt(
+                                sanitized.full,
+                                EncryptedAttachmentStore.IMAGE_KIND,
+                                EncryptedAttachmentStore.JPEG_MIME,
+                            ),
+                            attachmentStore.encrypt(
+                                sanitized.preview,
+                                EncryptedAttachmentStore.IMAGE_KIND,
+                                EncryptedAttachmentStore.JPEG_MIME,
+                            ),
+                        )
+                    } finally {
+                        sanitized.full.fill(0)
+                        sanitized.preview.fill(0)
+                    }
+                }
+                try {
+                    val previewId = api.uploadGroupAttachment(profile, groupId, preview.ciphertext)
+                    uploadedIds += previewId
+                    val fullId = api.uploadGroupAttachment(profile, groupId, full.ciphertext)
+                    uploadedIds += fullId
+                    val descriptor = full.descriptor(fullId).copy(preview = preview.descriptor(previewId))
+                    withContext(Dispatchers.IO) {
+                        attachmentStore.saveCiphertext(previewId, preview.ciphertext)
+                        attachmentStore.saveCiphertext(fullId, full.ciphertext)
+                        groupCoordinator.sendAttachment(profile, groupId, descriptor)
+                    }
+                    refreshGroups()
+                    groupStatus = "Фото отправлено в MLS-группу"
+                } finally {
+                    full.ciphertext.fill(0)
+                    preview.ciphertext.fill(0)
+                }
+            } catch (error: Exception) {
+                uploadedIds.forEach { id ->
+                    runCatching { api.deleteAttachment(profile, id) }
+                    runCatching { attachmentStore.delete(id) }
+                }
+                groupStatus = error.message ?: "Не удалось отправить фото"
+            } finally {
+                groupBusy = false
+            }
+        }
+    }
+
+    fun startGroupVoiceRecording() {
+        if (groupBusy || voiceRecording) return
+        runCatching {
+            voiceRecorder.start(scope)
+            voiceRecording = true
+            groupStatus = "🔴 Идёт запись · нажмите квадрат для отправки"
+        }.onFailure {
+            voiceRecorder.cancel()
+            voiceRecording = false
+            groupStatus = it.message ?: "Не удалось начать запись"
+        }
+    }
+
+    fun stopAndSendGroupVoice(groupId: ByteArray) {
+        if (!voiceRecording) return
+        voiceRecording = false
+        groupBusy = true
+        groupStatus = "Шифруем войс для MLS-группы…"
+        scope.launch {
+            var uploadedId: String? = null
+            try {
+                val recorded = voiceRecorder.stop()
+                val prepared = withContext(Dispatchers.IO) {
+                    try {
+                        attachmentStore.encrypt(
+                            recorded.pcm,
+                            EncryptedAttachmentStore.VOICE_KIND,
+                            EncryptedAttachmentStore.AUDIO_MIME,
+                            recorded.durationMs,
+                        )
+                    } finally {
+                        recorded.pcm.fill(0)
+                    }
+                }
+                try {
+                    val id = api.uploadGroupAttachment(profile, groupId, prepared.ciphertext)
+                    uploadedId = id
+                    val descriptor = prepared.descriptor(id)
+                    withContext(Dispatchers.IO) {
+                        attachmentStore.saveCiphertext(id, prepared.ciphertext)
+                        groupCoordinator.sendAttachment(profile, groupId, descriptor)
+                    }
+                    refreshGroups()
+                    groupStatus = "Войс отправлен в MLS-группу"
+                } finally {
+                    prepared.ciphertext.fill(0)
+                }
+            } catch (error: Exception) {
+                voiceRecorder.cancel()
+                uploadedId?.let { id ->
+                    runCatching { api.deleteAttachment(profile, id) }
+                    runCatching { attachmentStore.delete(id) }
+                }
+                groupStatus = error.message ?: "Не удалось отправить войс"
+            } finally {
+                groupBusy = false
+            }
+        }
+    }
+
     DisposableEffect(voiceRecorder) {
         onDispose { voiceRecorder.cancel() }
     }
@@ -674,6 +790,9 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 draft = groupDraft,
                 status = groupStatus,
                 sending = groupBusy,
+                contacts = contacts,
+                attachmentStore = attachmentStore,
+                voiceRecording = voiceRecording,
                 onDraftChange = { groupDraft = it },
                 onBack = {
                     selectedGroupId = null
@@ -817,6 +936,16 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                             groupBusy = false
                         }
                     }
+                },
+                onImageSelected = { uri ->
+                    sendGroupImage(selectedGroup.groupId, uri)
+                },
+                onStartVoice = ::startGroupVoiceRecording,
+                onStopVoice = {
+                    stopAndSendGroupVoice(selectedGroup.groupId)
+                },
+                onVoicePermissionDenied = {
+                    groupStatus = "Без доступа к микрофону нельзя записать войс"
                 },
                 onSend = {
                     val text = groupDraft.trim()

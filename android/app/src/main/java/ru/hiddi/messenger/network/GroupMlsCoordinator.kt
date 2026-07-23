@@ -4,6 +4,8 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.hiddi.messenger.security.EncryptedGroupChatStore
+import ru.hiddi.messenger.security.EncryptedAttachmentStore
+import ru.hiddi.messenger.security.AttachmentDescriptor
 import ru.hiddi.messenger.security.GroupDirectoryMember
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.NativeMlsBridge
@@ -26,6 +28,7 @@ class GroupMlsCoordinator(
     private val memberOutbox = GroupMemberOutbox(appContext, api)
     private val eventOutbox = GroupEventOutbox(appContext, api)
     private val groupStore = EncryptedGroupChatStore(appContext)
+    private val attachmentStore = EncryptedAttachmentStore(appContext)
 
     suspend fun prepare(profile: AccountProfile): AccountProfile {
         val current = ensureDeviceId(profile)
@@ -41,11 +44,16 @@ class GroupMlsCoordinator(
         registrationOutbox.retry(current)
         memberOutbox.retry(current)
         eventOutbox.retry(current)
+        downloadPendingAttachments(current)
         return (deletedGroups + processPendingEvents(current))
             .distinctBy { it.contentHashCode() }
     }
 
-    suspend fun createTwoPartyGroup(profile: AccountProfile, invitedNickname: String): ByteArray {
+    suspend fun createTwoPartyGroup(
+        profile: AccountProfile,
+        invitedNickname: String,
+        name: String,
+    ): ByteArray {
         val current = ensureDeviceId(profile)
         val deviceId = requireNotNull(current.deviceId)
         val groupId = requireNotNull(NativeMlsBridge.createLocalGroup(deviceId)) {
@@ -65,6 +73,7 @@ class GroupMlsCoordinator(
                     GroupDirectoryMember(current.nickname, "owner", deviceId),
                     GroupDirectoryMember(invitedNickname, "member", ""),
                 ),
+                groupName = name,
             )
             requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage, operationId, context)) {
                 "OpenMLS отклонил KeyPackage приглашённого"
@@ -73,6 +82,8 @@ class GroupMlsCoordinator(
             handoffNativeJournal()
             registrationOutbox.retry(current)
             eventOutbox.retry(current)
+            groupStore.setGroupName(groupId, name)
+            sendGroupMetadata(current, groupId, name, listOf(invitedNickname))
             api.groupDetails(current, groupId).also { details ->
                 groupStore.replaceMembers(
                     groupId,
@@ -125,7 +136,9 @@ class GroupMlsCoordinator(
                     }
                     if (event.removesRecipient) {
                         NativeMlsBridge.deleteLocalGroup(event.groupId)
-                        groupStore.removeGroup(event.groupId)
+                        groupStore.removeGroup(event.groupId).forEach {
+                            attachmentStore.delete(it.attachmentId)
+                        }
                     } else {
                         val details = api.groupDetails(profile, event.groupId)
                         groupStore.replaceMembers(
@@ -154,11 +167,40 @@ class GroupMlsCoordinator(
                             payload.text,
                             event.createdAt,
                         )
-                        is GroupApplicationPayload.Delete -> groupStore.deleteMessage(
-                            event.groupId,
-                            payload.messageId,
-                            expectedSender = event.senderNickname,
-                        )
+                        is GroupApplicationPayload.Attachment -> {
+                            val descriptor = payload.descriptor
+                            groupStore.appendIncoming(
+                                event.groupId,
+                                event.eventId,
+                                payload.messageId,
+                                event.senderNickname,
+                                when (descriptor.kind) {
+                                    EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+                                    EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+                                    else -> "Вложение"
+                                },
+                                event.createdAt,
+                                descriptor,
+                            )
+                            listOfNotNull(descriptor.preview, descriptor).forEach { part ->
+                                if (!attachmentStore.exists(part.attachmentId)) {
+                                    attachmentStore.saveCiphertext(
+                                        part.attachmentId,
+                                        api.downloadAttachment(profile, part.attachmentId),
+                                    )
+                                }
+                            }
+                        }
+                        is GroupApplicationPayload.Metadata ->
+                            groupStore.setGroupName(event.groupId, payload.name)
+                        is GroupApplicationPayload.Delete ->
+                            groupStore.deleteMessage(
+                                event.groupId,
+                                payload.messageId,
+                                expectedSender = event.senderNickname,
+                            ).forEach {
+                                attachmentStore.delete(it.attachmentId)
+                            }
                     }
                     changedGroups += event.groupId
                 }
@@ -195,6 +237,44 @@ class GroupMlsCoordinator(
         eventOutbox.retry(profile)
     }
 
+    suspend fun sendAttachment(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        descriptor: AttachmentDescriptor,
+    ) {
+        val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
+            ?: error("Неизвестная локальная MLS-группа")
+        val recipients = group.members.filterNot { it == profile.nickname }
+        val messageId = GroupApplicationPayloadCodec.newMessageId()
+        val payload = GroupApplicationPayloadCodec.encodeAttachment(messageId, descriptor)
+        val envelope = try {
+            requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                "Не удалось зашифровать group attachment"
+            }
+        } finally {
+            payload.fill(0)
+        }
+        eventOutbox.enqueue(
+            groupId,
+            KIND_APPLICATION,
+            recipients,
+            envelope,
+            clientEventId = messageId,
+        )
+        groupStore.appendOutgoing(
+            groupId,
+            messageId,
+            profile.nickname,
+            when (descriptor.kind) {
+                EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+                EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+                else -> "Вложение"
+            },
+            descriptor,
+        )
+        eventOutbox.retry(profile)
+    }
+
     suspend fun deleteMessage(
         profile: AccountProfile,
         groupId: ByteArray,
@@ -226,7 +306,11 @@ class GroupMlsCoordinator(
                 deleteClientEventId = messageId,
             )
         }
-        groupStore.deleteMessage(groupId, messageId)
+        val attachments = groupStore.deleteMessage(groupId, messageId)
+        attachments.forEach { descriptor ->
+            attachmentStore.delete(descriptor.attachmentId)
+            if (forEveryone) runCatching { api.deleteAttachment(profile, descriptor.attachmentId) }
+        }
         if (forEveryone) eventOutbox.retry(profile)
     }
 
@@ -258,6 +342,7 @@ class GroupMlsCoordinator(
             targetNickname = normalized,
             recipients = existingRecipients,
             members = group.memberDetails + GroupDirectoryMember(normalized, "member", ""),
+            groupName = group.name,
         )
         requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage, operationId, context)) {
             "OpenMLS отклонил KeyPackage приглашённого"
@@ -265,6 +350,7 @@ class GroupMlsCoordinator(
         handoffNativeJournal()
         memberOutbox.retry(current)
         eventOutbox.retry(current)
+        sendGroupMetadata(current, groupId, group.name, listOf(normalized))
         val details = api.groupDetails(current, groupId)
         groupStore.replaceMembers(
             groupId,
@@ -300,6 +386,9 @@ class GroupMlsCoordinator(
             targetNickname = normalized,
             recipients = recipients,
             members = details.members.map(GroupMember::directory),
+            groupName = groupStore.groups()
+                .firstOrNull { it.groupId.contentEquals(groupId) }
+                ?.name,
         )
         requireNotNull(
             NativeMlsBridge.removeMember(
@@ -341,7 +430,9 @@ class GroupMlsCoordinator(
         require(group.ownerNickname == profile.nickname) {
             "Очищать историю группы может только создатель"
         }
-        groupStore.clearHistory(groupId)
+        groupStore.clearHistory(groupId).forEach {
+            attachmentStore.delete(it.attachmentId)
+        }
     }
 
     suspend fun deleteOwnedGroup(profile: AccountProfile, groupId: ByteArray) {
@@ -352,18 +443,33 @@ class GroupMlsCoordinator(
         }
         api.deleteGroup(profile, groupId)
         NativeMlsBridge.deleteLocalGroup(groupId)
-        groupStore.removeGroup(groupId)
+        groupStore.removeGroup(groupId).forEach {
+            attachmentStore.delete(it.attachmentId)
+        }
     }
 
     private suspend fun processGroupDeletions(profile: AccountProfile): List<ByteArray> {
         val deleted = mutableListOf<ByteArray>()
         api.pendingGroupDeletions(profile).forEach { deletion ->
             NativeMlsBridge.deleteLocalGroup(deletion.groupId)
-            groupStore.removeGroup(deletion.groupId)
+            groupStore.removeGroup(deletion.groupId).forEach {
+                attachmentStore.delete(it.attachmentId)
+            }
             api.acknowledgeGroupDeletion(profile, deletion.deletionId)
             deleted += deletion.groupId
         }
         return deleted
+    }
+
+    private suspend fun downloadPendingAttachments(profile: AccountProfile) {
+        groupStore.pendingIncomingAttachments().forEach { descriptor ->
+            if (!attachmentStore.exists(descriptor.attachmentId)) {
+                attachmentStore.saveCiphertext(
+                    descriptor.attachmentId,
+                    api.downloadAttachment(profile, descriptor.attachmentId),
+                )
+            }
+        }
     }
 
     private suspend fun ensureDeviceId(profile: AccountProfile): AccountProfile {
@@ -382,8 +488,9 @@ class GroupMlsCoordinator(
             val recipients = context.getJSONArray("recipients").strings()
             val members = context.getJSONArray("members").directoryMembers()
             val owner = context.getString("owner_nickname")
+            val groupName = context.optString("group_name").takeIf(String::isNotBlank)
 
-            groupStore.upsertGroup(operation.groupId, members, owner)
+            groupStore.upsertGroup(operation.groupId, members, owner, groupName)
             when (type) {
                 CONTEXT_CREATE_GROUP -> registrationOutbox.enqueue(
                     operation.groupId,
@@ -431,12 +538,14 @@ class GroupMlsCoordinator(
         targetNickname: String,
         recipients: List<String>,
         members: List<GroupDirectoryMember>,
+        groupName: String? = null,
     ): ByteArray = JSONObject()
         .put("version", 1)
         .put("type", type)
         .put("owner_nickname", ownerNickname)
         .put("owner_device_id", ownerDeviceId)
         .put("target_nickname", targetNickname)
+        .put("group_name", groupName)
         .put("recipients", JSONArray(recipients))
         .put(
             "members",
@@ -453,6 +562,31 @@ class GroupMlsCoordinator(
         )
         .toString()
         .encodeToByteArray()
+
+    private suspend fun sendGroupMetadata(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        name: String,
+        recipients: List<String>,
+    ) {
+        val messageId = GroupApplicationPayloadCodec.newMessageId()
+        val payload = GroupApplicationPayloadCodec.encodeMetadata(messageId, name)
+        val envelope = try {
+            requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
+                "Не удалось зашифровать название группы"
+            }
+        } finally {
+            payload.fill(0)
+        }
+        eventOutbox.enqueue(
+            groupId,
+            KIND_APPLICATION,
+            recipients,
+            envelope,
+            clientEventId = messageId,
+        )
+        eventOutbox.retry(profile)
+    }
 
     private fun JSONArray.strings(): List<String> =
         (0 until length()).map(::getString)

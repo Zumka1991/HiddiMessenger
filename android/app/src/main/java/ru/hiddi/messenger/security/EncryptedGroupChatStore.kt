@@ -18,6 +18,7 @@ class EncryptedGroupChatStore(context: Context) {
         groupId: ByteArray,
         members: List<GroupDirectoryMember>,
         ownerNickname: String,
+        name: String? = null,
     ) = synchronized(lock) {
         val root = read()
         val id = groupId.b64()
@@ -30,6 +31,7 @@ class EncryptedGroupChatStore(context: Context) {
                 JSONObject()
                     .put("group_id", id)
                     .put("owner_nickname", ownerNickname)
+                    .put("name", name?.trim()?.take(80)?.ifBlank { null } ?: "Защищённая группа")
                     .put("members", JSONArray(members.map(GroupDirectoryMember::nickname).distinct()))
                     .put("member_details", members.memberJson())
                     .put("messages", JSONArray()),
@@ -37,6 +39,9 @@ class EncryptedGroupChatStore(context: Context) {
         } else {
             if (existing.optString("owner_nickname").isBlank()) {
                 existing.put("owner_nickname", ownerNickname)
+            }
+            name?.trim()?.take(80)?.takeIf(String::isNotBlank)?.let {
+                existing.put("name", it)
             }
             val merged = (existing.memberDetails() + members)
                 .associateBy(GroupDirectoryMember::nickname)
@@ -54,6 +59,7 @@ class EncryptedGroupChatStore(context: Context) {
             groups.getJSONObject(index).let { group ->
                 LocalGroupChat(
                     groupId = group.getString("group_id").decode(),
+                    name = group.optString("name").ifBlank { "Защищённая группа" },
                     ownerNickname = group.optString("owner_nickname")
                         .takeIf(String::isNotBlank)
                         ?: group.members().first(),
@@ -71,6 +77,7 @@ class EncryptedGroupChatStore(context: Context) {
         sender: String,
         plaintext: String,
         createdAt: String,
+        attachment: AttachmentDescriptor? = null,
     ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
@@ -83,7 +90,12 @@ class EncryptedGroupChatStore(context: Context) {
                     .put("sender", sender)
                     .put("text", plaintext)
                     .put("outgoing", false)
-                    .put("time", createdAt),
+                    .put("time", createdAt)
+                    .apply {
+                        attachment?.let {
+                            put("attachment", EncryptedAttachmentStore.envelope(it))
+                        }
+                    },
             )
             write(root)
         }
@@ -94,6 +106,7 @@ class EncryptedGroupChatStore(context: Context) {
         messageId: String,
         sender: String,
         plaintext: String,
+        attachment: AttachmentDescriptor? = null,
     ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
@@ -103,7 +116,12 @@ class EncryptedGroupChatStore(context: Context) {
                 .put("sender", sender)
                 .put("text", plaintext)
                 .put("outgoing", true)
-                .put("time", Instant.now().toString()),
+                .put("time", Instant.now().toString())
+                .apply {
+                    attachment?.let {
+                        put("attachment", EncryptedAttachmentStore.envelope(it))
+                    }
+                },
         )
         write(root)
     }
@@ -112,34 +130,41 @@ class EncryptedGroupChatStore(context: Context) {
         groupId: ByteArray,
         messageId: String,
         expectedSender: String? = null,
-    ): Boolean = synchronized(lock) {
+    ): List<AttachmentDescriptor> = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
         val messages = group.getJSONArray("messages")
         val retained = JSONArray()
-        var deleted = false
+        val deletedAttachments = mutableListOf<AttachmentDescriptor>()
         for (index in 0 until messages.length()) {
             val message = messages.getJSONObject(index)
             val matches = message.optString("message_id") == messageId &&
                 (expectedSender == null || message.getString("sender") == expectedSender)
             if (matches) {
-                deleted = true
+                message.optString("attachment").takeIf(String::isNotBlank)
+                    ?.let(EncryptedAttachmentStore::parseEnvelope)
+                    ?.let {
+                        deletedAttachments += it
+                        it.preview?.let(deletedAttachments::add)
+                    }
             } else {
                 retained.put(message)
             }
         }
-        if (deleted) {
+        if (deletedAttachments.isNotEmpty() || retained.length() != messages.length()) {
             group.put("messages", retained)
             write(root)
         }
-        deleted
+        deletedAttachments.distinctBy(AttachmentDescriptor::attachmentId)
     }
 
-    fun clearHistory(groupId: ByteArray) = synchronized(lock) {
+    fun clearHistory(groupId: ByteArray): List<AttachmentDescriptor> = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
+        val attachments = group.getJSONArray("messages").attachments()
         group.put("messages", JSONArray())
         write(root)
+        attachments
     }
 
     fun replaceMembers(
@@ -155,17 +180,38 @@ class EncryptedGroupChatStore(context: Context) {
         write(root)
     }
 
-    fun removeGroup(groupId: ByteArray) = synchronized(lock) {
+    fun setGroupName(groupId: ByteArray, name: String) = synchronized(lock) {
+        val normalized = name.trim()
+        require(normalized.isNotEmpty() && normalized.length <= 80) {
+            "Название группы должно содержать от 1 до 80 символов"
+        }
+        val root = read()
+        val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
+        group.put("name", normalized)
+        write(root)
+    }
+
+    fun removeGroup(groupId: ByteArray): List<AttachmentDescriptor> = synchronized(lock) {
         val root = read()
         val groups = root.getJSONArray("groups")
         val retained = JSONArray()
         val id = groupId.b64()
+        val attachments = root.group(groupId)?.getJSONArray("messages")?.attachments().orEmpty()
         for (index in 0 until groups.length()) {
             val group = groups.getJSONObject(index)
             if (group.getString("group_id") != id) retained.put(group)
         }
         root.put("groups", retained)
         write(root)
+        attachments
+    }
+
+    fun pendingIncomingAttachments(): List<AttachmentDescriptor> = synchronized(lock) {
+        groups().flatMap { group ->
+            group.messages.filterNot(GroupChatMessage::outgoing)
+                .mapNotNull(GroupChatMessage::attachment)
+                .flatMap { listOfNotNull(it.preview, it) }
+        }.distinctBy(AttachmentDescriptor::attachmentId)
     }
 
     private fun read(): JSONObject = store.read()?.decodeToString()?.let(::JSONObject)
@@ -223,9 +269,20 @@ class EncryptedGroupChatStore(context: Context) {
                 text = message.getString("text"),
                 outgoing = message.getBoolean("outgoing"),
                 time = message.getString("time"),
+                attachment = message.optString("attachment")
+                    .takeIf(String::isNotBlank)
+                    ?.let(EncryptedAttachmentStore::parseEnvelope),
             )
         }
     }
+
+    private fun JSONArray.attachments(): List<AttachmentDescriptor> =
+        (0 until length()).mapNotNull { index ->
+            getJSONObject(index).optString("attachment")
+                .takeIf(String::isNotBlank)
+                ?.let(EncryptedAttachmentStore::parseEnvelope)
+        }.flatMap { listOfNotNull(it.preview, it) }
+            .distinctBy(AttachmentDescriptor::attachmentId)
 
     private companion object {
         val lock = Any()
@@ -239,6 +296,7 @@ class EncryptedGroupChatStore(context: Context) {
 
 data class LocalGroupChat(
     val groupId: ByteArray,
+    val name: String,
     val ownerNickname: String,
     val memberDetails: List<GroupDirectoryMember>,
     val messages: List<GroupChatMessage>,
@@ -258,4 +316,5 @@ data class GroupChatMessage(
     val text: String,
     val outgoing: Boolean,
     val time: String,
+    val attachment: AttachmentDescriptor? = null,
 )

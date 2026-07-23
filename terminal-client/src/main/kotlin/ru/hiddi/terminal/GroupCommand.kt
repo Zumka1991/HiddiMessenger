@@ -396,6 +396,22 @@ object GroupCommand {
                             }
                             println("[${shortId(groupId)}] @$sender: ${payload.text}")
                         }
+                        is TerminalGroupPayload.Attachment -> {
+                            group.getJSONArray("messages").put(
+                                JSONObject()
+                                    .put("event_id", eventId)
+                                    .put("message_id", payload.messageId)
+                                    .put("sender", sender)
+                                    .put("text", payload.label)
+                                    .put("attachment", payload.envelope)
+                                    .put("outgoing", false),
+                            )
+                            println("[${shortId(groupId)}] @$sender: ${payload.label}")
+                        }
+                        is TerminalGroupPayload.Metadata -> {
+                            group.put("name", payload.name)
+                            println("[${shortId(groupId)}] название группы: ${payload.name}")
+                        }
                         is TerminalGroupPayload.Delete -> {
                             val messages = group.getJSONArray("messages")
                             for (messageIndex in messages.length() - 1 downTo 0) {
@@ -824,6 +840,22 @@ object GroupCommand {
         require(messageId.base64UrlDecode().size in 16..64) { "Некорректный group message id" }
         return when (payload.getString("type")) {
             "text" -> TerminalGroupPayload.Text(messageId, payload.getString("text"))
+            "attachment" -> {
+                val envelope = payload.getString("attachment")
+                val attachment = JSONObject(envelope)
+                require(attachment.getString("type") == "hiddi.attachment.v1")
+                val label = when (attachment.getString("kind")) {
+                    "image" -> "📷 Изображение"
+                    "voice" -> "🎙 Голосовое сообщение"
+                    else -> error("Неизвестный тип вложения")
+                }
+                TerminalGroupPayload.Attachment(messageId, label, envelope)
+            }
+            "group_metadata" -> TerminalGroupPayload.Metadata(
+                payload.getString("name").also {
+                    require(it.isNotBlank() && it.length <= 80)
+                },
+            )
             "delete" -> TerminalGroupPayload.Delete(messageId)
             else -> error("Неизвестный тип group payload")
         }
@@ -853,6 +885,12 @@ object GroupCommand {
 
     private sealed interface TerminalGroupPayload {
         data class Text(val messageId: String?, val text: String) : TerminalGroupPayload
+        data class Attachment(
+            val messageId: String,
+            val label: String,
+            val envelope: String,
+        ) : TerminalGroupPayload
+        data class Metadata(val name: String) : TerminalGroupPayload
         data class Delete(val messageId: String) : TerminalGroupPayload
     }
 

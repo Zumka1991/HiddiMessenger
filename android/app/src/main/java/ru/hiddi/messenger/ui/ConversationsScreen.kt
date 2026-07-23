@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -51,6 +52,8 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -127,12 +130,16 @@ fun ConversationsScreen(
     onSearch: () -> Unit,
     onRefreshConnection: () -> Unit,
     onOpenConversation: (String) -> Unit,
-    onCreateGroup: (String) -> Unit,
+    onCreateGroup: (String, String) -> Unit,
     onOpenGroup: (ByteArray) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenProfile: (String) -> Unit,
 ) {
     var showContacts by rememberSaveable { mutableStateOf(false) }
+    var mainMenuExpanded by remember { mutableStateOf(false) }
+    var showCreateGroup by rememberSaveable { mutableStateOf(false) }
+    var newGroupName by rememberSaveable { mutableStateOf("") }
+    var firstMember by rememberSaveable { mutableStateOf("") }
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
     ) {
@@ -164,9 +171,39 @@ fun ConversationsScreen(
                 )
                 Text("@${profile.nickname}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface) {
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Rounded.MoreVert, contentDescription = "Настройки", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface) {
+                    IconButton(onClick = { mainMenuExpanded = true }) {
+                        Icon(Icons.Rounded.MoreVert, contentDescription = "Главное меню", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                DropdownMenu(
+                    expanded = mainMenuExpanded,
+                    onDismissRequest = { mainMenuExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Создать группу") },
+                        leadingIcon = { Icon(Icons.Rounded.GroupAdd, contentDescription = null) },
+                        onClick = {
+                            mainMenuExpanded = false
+                            showCreateGroup = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Контакты") },
+                        onClick = {
+                            mainMenuExpanded = false
+                            showContacts = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Настройки") },
+                        leadingIcon = { Icon(Icons.Rounded.MoreVert, contentDescription = null) },
+                        onClick = {
+                            mainMenuExpanded = false
+                            onOpenSettings()
+                        },
+                    )
                 }
             }
         }
@@ -234,16 +271,6 @@ fun ConversationsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        IconButton(
-                            onClick = { onCreateGroup(user.nickname) },
-                            enabled = !groupBusy,
-                        ) {
-                            Icon(
-                                Icons.Rounded.GroupAdd,
-                                contentDescription = "Создать MLS-группу",
-                                tint = MaterialTheme.colorScheme.primary,
                             )
                         }
                         Icon(
@@ -345,7 +372,6 @@ fun ConversationsScreen(
                 } else {
                     items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
                         GroupConversationRow(
-                            profileNickname = profile.nickname,
                             group = group,
                             onClick = { onOpenGroup(group.groupId) },
                         )
@@ -366,16 +392,87 @@ fun ConversationsScreen(
             }
         }
     }
+
+    if (showCreateGroup) {
+        AlertDialog(
+            onDismissRequest = { showCreateGroup = false },
+            title = { Text("Новая защищённая группа") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = newGroupName,
+                        onValueChange = { newGroupName = it.take(80) },
+                        label = { Text("Название группы") },
+                        singleLine = true,
+                    )
+                    val availableContacts = contacts.filterNot { it == profile.nickname }
+                    if (availableContacts.isNotEmpty()) {
+                        Text("Выберите первый контакт", style = MaterialTheme.typography.labelLarge)
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(availableContacts, key = { "new-group:$it" }) { nickname ->
+                                Surface(
+                                    onClick = { firstMember = nickname },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (firstMember == nickname) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        "@$nickname",
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = firstMember,
+                        onValueChange = { firstMember = it.trim().removePrefix("@").take(32) },
+                        label = { Text("Или найдите по @nickname") },
+                        prefix = { Text("@") },
+                        singleLine = true,
+                    )
+                    Text(
+                        "Название и сообщения сервер прочитать не сможет.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !groupBusy &&
+                        newGroupName.trim().isNotEmpty() &&
+                        firstMember.trim().removePrefix("@").length >= 3,
+                    onClick = {
+                        val name = newGroupName.trim()
+                        val nickname = firstMember.trim().removePrefix("@").lowercase()
+                        showCreateGroup = false
+                        newGroupName = ""
+                        firstMember = ""
+                        onCreateGroup(nickname, name)
+                    },
+                ) { Text("Создать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateGroup = false }) { Text("Отмена") }
+            },
+        )
+    }
 }
 
 @androidx.compose.runtime.Composable
 private fun GroupConversationRow(
-    profileNickname: String,
     group: LocalGroupChat,
     onClick: () -> Unit,
 ) {
-    val others = group.members.filterNot { it == profileNickname }
-    val title = others.joinToString { "@$it" }.ifBlank { "Защищённая группа" }
+    val title = group.name
     val lastMessage = group.messages.lastOrNull()
     Surface(
         onClick = onClick,

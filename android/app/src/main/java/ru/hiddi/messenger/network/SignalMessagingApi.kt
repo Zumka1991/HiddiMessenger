@@ -399,6 +399,21 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             ).getString("attachment_id")
         }
 
+    suspend fun uploadGroupAttachment(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        ciphertext: ByteArray,
+    ): String = withContext(Dispatchers.IO) {
+        JSONObject(
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/groups/${groupId.b64()}/attachments",
+                JSONObject().put("ciphertext", ciphertext.b64()).toString(),
+                profile.accessToken,
+            ),
+        ).getString("attachment_id")
+    }
+
     suspend fun downloadAttachment(profile: AccountProfile, attachmentId: String): ByteArray =
         withContext(Dispatchers.IO) {
             JSONObject(

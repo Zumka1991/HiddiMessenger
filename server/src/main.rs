@@ -292,6 +292,11 @@ struct UploadAttachmentRequest {
     ciphertext: String,
 }
 
+#[derive(Deserialize)]
+struct UploadGroupAttachmentRequest {
+    ciphertext: String,
+}
+
 #[derive(Serialize)]
 struct UploadAttachmentResponse {
     attachment_id: Uuid,
@@ -452,6 +457,10 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/groups/events/wait", get(wait_for_group_event))
         .route("/v1/groups/events/{event_id}", post(ack_group_event))
         .route("/v1/groups/{group_id}/events", post(send_group_event))
+        .route(
+            "/v1/groups/{group_id}/attachments",
+            post(upload_group_attachment),
+        )
         .route(
             "/v1/groups/{group_id}/messages/{client_event_id}",
             axum::routing::delete(delete_group_message),
@@ -2831,11 +2840,20 @@ async fn upload_attachment(
     }
     let used_bytes: i64 = db
         .query_row(
-            "SELECT COALESCE(SUM(length(ciphertext)), 0) FROM attachments WHERE sender_account_id = ?1",
+            "SELECT
+                COALESCE((SELECT SUM(length(ciphertext)) FROM attachments
+                          WHERE sender_account_id = ?1), 0) +
+                COALESCE((SELECT SUM(length(ciphertext)) FROM group_attachments
+                          WHERE sender_account_id = ?1), 0)",
             params![sender.account_id],
             |row| row.get(0),
         )
-        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not check attachment quota"))?;
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check attachment quota",
+            )
+        })?;
     if used_bytes.saturating_add(ciphertext.len() as i64) > ATTACHMENT_QUOTA_BYTES as i64 {
         return Err(Error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -2864,6 +2882,82 @@ async fn upload_attachment(
     ))
 }
 
+async fn upload_group_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+    Json(request): Json<UploadGroupAttachmentRequest>,
+) -> Result<(StatusCode, Json<UploadAttachmentResponse>), Error> {
+    let sender = authenticate(&state, &headers)?;
+    validate_group_id(&group_id)?;
+    let ciphertext = decode_attachment_ciphertext(&request.ciphertext)?;
+    let attachment_id = Uuid::new_v4();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let is_member: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM group_members
+                WHERE group_id = ?1 AND account_id = ?2
+             )",
+            params![group_id, sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not authorize group attachment",
+            )
+        })?;
+    if !is_member {
+        return Err(Error(StatusCode::NOT_FOUND, "group not found"));
+    }
+    let used_bytes: i64 = db
+        .query_row(
+            "SELECT
+                COALESCE((SELECT SUM(length(ciphertext)) FROM attachments
+                          WHERE sender_account_id = ?1), 0) +
+                COALESCE((SELECT SUM(length(ciphertext)) FROM group_attachments
+                          WHERE sender_account_id = ?1), 0)",
+            params![sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check attachment quota",
+            )
+        })?;
+    if used_bytes.saturating_add(ciphertext.len() as i64) > ATTACHMENT_QUOTA_BYTES as i64 {
+        return Err(Error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "encrypted attachment quota exceeded",
+        ));
+    }
+    db.execute(
+        "INSERT INTO group_attachments (id, group_id, sender_account_id, ciphertext)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            attachment_id.to_string(),
+            group_id,
+            sender.account_id,
+            ciphertext,
+        ],
+    )
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store group attachment",
+        )
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadAttachmentResponse { attachment_id }),
+    ))
+}
+
 async fn download_attachment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2876,7 +2970,13 @@ async fn download_attachment(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let ciphertext: Result<Vec<u8>, _> = db.query_row(
         "SELECT ciphertext FROM attachments
-         WHERE id = ?1 AND (sender_account_id = ?2 OR recipient_account_id = ?2)",
+         WHERE id = ?1 AND (sender_account_id = ?2 OR recipient_account_id = ?2)
+         UNION ALL
+         SELECT group_attachments.ciphertext
+         FROM group_attachments
+         JOIN group_members ON group_members.group_id = group_attachments.group_id
+         WHERE group_attachments.id = ?1 AND group_members.account_id = ?2
+         LIMIT 1",
         params![attachment_id.to_string(), account.account_id],
         |row| row.get(0),
     );
@@ -2905,7 +3005,7 @@ async fn delete_attachment(
         .db
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    let removed = db
+    let removed_personal = db
         .execute(
             "DELETE FROM attachments
              WHERE id = ?1 AND (sender_account_id = ?2 OR recipient_account_id = ?2)",
@@ -2917,7 +3017,19 @@ async fn delete_attachment(
                 "could not delete attachment",
             )
         })?;
-    if removed == 0 {
+    let removed_group = db
+        .execute(
+            "DELETE FROM group_attachments
+             WHERE id = ?1 AND sender_account_id = ?2",
+            params![attachment_id.to_string(), account.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not delete group attachment",
+            )
+        })?;
+    if removed_personal + removed_group == 0 {
         return Err(Error(StatusCode::NOT_FOUND, "attachment not found"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -3018,6 +3130,13 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             ciphertext TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             delivered_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS group_attachments (
+            id TEXT PRIMARY KEY NOT NULL,
+            group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            ciphertext TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS conversation_deletions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4218,5 +4337,81 @@ mod tests {
         )
         .await;
         assert_eq!(missing, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_attachment_is_shared_once_and_only_with_current_members() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let charlie = register_account(&app, "charlie").await;
+        let group_id = URL_SAFE_NO_PAD.encode([31_u8; 16]);
+        let (created, _) = request(
+            &app,
+            "POST",
+            "/v1/groups",
+            Some(&alice),
+            serde_json::json!({
+                "group_id": group_id,
+                "members": [{"nickname": "bob", "role": "member"}],
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED);
+        let ciphertext = URL_SAFE_NO_PAD.encode([17_u8; 96]);
+        let (uploaded, body) = request(
+            &app,
+            "POST",
+            &format!("/v1/groups/{group_id}/attachments"),
+            Some(&alice),
+            serde_json::json!({"ciphertext": ciphertext}).to_string(),
+        )
+        .await;
+        assert_eq!(uploaded, StatusCode::CREATED);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["attachment_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (downloaded, body) = request(
+            &app,
+            "GET",
+            &format!("/v1/attachments/{id}"),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(downloaded, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["ciphertext"],
+            ciphertext
+        );
+        let (outsider, _) = request(
+            &app,
+            "GET",
+            &format!("/v1/attachments/{id}"),
+            Some(&charlie),
+            String::new(),
+        )
+        .await;
+        assert_eq!(outsider, StatusCode::NOT_FOUND);
+        let (forbidden_delete, _) = request(
+            &app,
+            "DELETE",
+            &format!("/v1/attachments/{id}"),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(forbidden_delete, StatusCode::NOT_FOUND);
+        let (deleted, _) = request(
+            &app,
+            "DELETE",
+            &format!("/v1/attachments/{id}"),
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
     }
 }

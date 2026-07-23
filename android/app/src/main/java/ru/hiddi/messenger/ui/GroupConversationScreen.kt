@@ -1,5 +1,11 @@
 package ru.hiddi.messenger
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -26,6 +33,9 @@ import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material3.AlertDialog
@@ -50,9 +60,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import ru.hiddi.messenger.security.GroupChatMessage
 import ru.hiddi.messenger.security.LocalGroupChat
+import ru.hiddi.messenger.security.ChatHistoryItem
+import ru.hiddi.messenger.security.EncryptedAttachmentStore
 
 @Composable
 fun GroupConversationScreen(
@@ -61,6 +75,9 @@ fun GroupConversationScreen(
     draft: String,
     status: String,
     sending: Boolean,
+    contacts: List<String>,
+    attachmentStore: EncryptedAttachmentStore,
+    voiceRecording: Boolean,
     onDraftChange: (String) -> Unit,
     onBack: () -> Unit,
     onInviteMember: (String) -> Unit,
@@ -69,11 +86,15 @@ fun GroupConversationScreen(
     onClearHistory: () -> Unit,
     onDeleteGroup: () -> Unit,
     onDeleteMessage: (GroupChatMessage, Boolean) -> Unit,
+    onImageSelected: (Uri) -> Unit,
+    onStartVoice: () -> Unit,
+    onStopVoice: () -> Unit,
+    onVoicePermissionDenied: () -> Unit,
     onSend: () -> Unit,
 ) {
+    val context = LocalContext.current
     val listState = rememberLazyListState()
-    val others = group.members.filterNot { it == profileNickname }
-    val title = others.joinToString { "@$it" }.ifBlank { "Защищённая группа" }
+    val title = group.name
     val ownRole = group.memberDetails.firstOrNull { it.nickname == profileNickname }?.role
     val isOwner = ownRole == "owner"
     val canManage = ownRole == "owner" || ownRole == "admin"
@@ -86,6 +107,26 @@ fun GroupConversationScreen(
     var selectedForActions by remember { mutableStateOf<GroupChatMessage?>(null) }
     var selectedForDeletion by remember { mutableStateOf<GroupChatMessage?>(null) }
     var inviteNickname by remember { mutableStateOf("") }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let(onImageSelected)
+    }
+    val microphonePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) onStartVoice() else onVoicePermissionDenied()
+    }
+    fun startVoiceWithPermission() {
+        if (
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            onStartVoice()
+        } else {
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     LaunchedEffect(group.messages.size) {
         if (group.messages.isNotEmpty()) {
             delay(60)
@@ -188,43 +229,32 @@ fun GroupConversationScreen(
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             items(group.messages) { message ->
-                val longPressModifier = if (message.outgoing && message.messageId != null) {
-                    Modifier.pointerInput(message.messageId) {
-                        detectTapGestures(onLongPress = { selectedForActions = message })
+                Column(Modifier.fillMaxWidth()) {
+                    if (!message.outgoing) {
+                        Text(
+                            "@${message.sender}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 10.dp, bottom = 2.dp),
+                        )
                     }
-                } else {
-                    Modifier
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
-                ) {
-                    Surface(
-                        modifier = longPressModifier,
-                        shape = RoundedCornerShape(
-                            topStart = 18.dp,
-                            topEnd = 18.dp,
-                            bottomStart = if (message.outgoing) 18.dp else 5.dp,
-                            bottomEnd = if (message.outgoing) 5.dp else 18.dp,
+                    MessageBubble(
+                        item = ChatHistoryItem(
+                            peer = message.sender,
+                            text = message.text,
+                            outgoing = message.outgoing,
+                            time = message.time,
+                            attachment = message.attachment,
+                            messageId = message.messageId,
                         ),
-                        color = if (message.outgoing) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        },
-                    ) {
-                        Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                            if (!message.outgoing) {
-                                Text(
-                                    "@${message.sender}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
+                        attachmentStore = attachmentStore,
+                        onLongPress = {
+                            if (message.outgoing && message.messageId != null) {
+                                selectedForActions = message
                             }
-                            Text(message.text)
-                        }
-                    }
+                        },
+                    )
                 }
             }
         }
@@ -239,11 +269,21 @@ fun GroupConversationScreen(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            IconButton(
+                onClick = { imagePicker.launch("image/*") },
+                enabled = !sending && !voiceRecording,
+            ) {
+                Icon(
+                    Icons.Rounded.Add,
+                    contentDescription = "Прикрепить изображение",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraftChange,
                 placeholder = { Text("Сообщение в группу") },
-                enabled = !sending,
+                enabled = !sending && !voiceRecording,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { onSend() }),
                 shape = RoundedCornerShape(22.dp),
@@ -254,12 +294,27 @@ fun GroupConversationScreen(
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.size(6.dp))
-            IconButton(onClick = onSend, enabled = draft.isNotBlank() && !sending) {
-                Icon(
-                    Icons.AutoMirrored.Rounded.Send,
-                    contentDescription = "Отправить",
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+            if (draft.isNotBlank()) {
+                IconButton(onClick = onSend, enabled = !sending && !voiceRecording) {
+                    Icon(
+                        Icons.AutoMirrored.Rounded.Send,
+                        contentDescription = "Отправить",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = {
+                        if (voiceRecording) onStopVoice() else startVoiceWithPermission()
+                    },
+                    enabled = !sending,
+                ) {
+                    Icon(
+                        if (voiceRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
+                        contentDescription = if (voiceRecording) "Остановить и отправить" else "Записать войс",
+                        tint = if (voiceRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
     }
@@ -269,13 +324,44 @@ fun GroupConversationScreen(
             onDismissRequest = { showInviteDialog = false },
             title = { Text("Пригласить в группу") },
             text = {
-                OutlinedTextField(
-                    value = inviteNickname,
-                    onValueChange = { inviteNickname = it },
-                    label = { Text("Никнейм") },
-                    prefix = { Text("@") },
-                    singleLine = true,
-                )
+                Column {
+                    val availableContacts = contacts.filterNot {
+                        it == profileNickname || it in group.members
+                    }
+                    if (availableContacts.isNotEmpty()) {
+                        Text("Из контактов", style = MaterialTheme.typography.labelLarge)
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(availableContacts, key = { it }) { nickname ->
+                                Surface(
+                                    onClick = {
+                                        showInviteDialog = false
+                                        inviteNickname = ""
+                                        onInviteMember(nickname)
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        "@$nickname",
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.size(10.dp))
+                    }
+                    OutlinedTextField(
+                        value = inviteNickname,
+                        onValueChange = { inviteNickname = it },
+                        label = { Text("Или введите никнейм") },
+                        prefix = { Text("@") },
+                        singleLine = true,
+                    )
+                }
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(
