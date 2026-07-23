@@ -123,6 +123,36 @@ struct SendMessageRequest {
     ciphertext: String,
 }
 
+#[derive(Deserialize)]
+struct CreateGroupRequest {
+    group_id: String,
+    #[serde(default)]
+    members: Vec<GroupMemberRequest>,
+}
+
+#[derive(Deserialize)]
+struct GroupMemberRequest {
+    nickname: String,
+    role: String,
+}
+
+#[derive(Serialize)]
+struct CreateGroupResponse {
+    group_id: String,
+}
+
+#[derive(Deserialize)]
+struct SendGroupEventRequest {
+    kind: u8,
+    recipient_nicknames: Vec<String>,
+    envelope: String,
+}
+
+#[derive(Serialize)]
+struct SendGroupEventResponse {
+    event_ids: Vec<Uuid>,
+}
+
 #[derive(Serialize)]
 struct MessageResponse {
     message_id: Uuid,
@@ -273,6 +303,8 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/v1/users", get(search_users))
         .route("/v1/users/{nickname}", get(find_user))
+        .route("/v1/groups", post(create_group))
+        .route("/v1/groups/{group_id}/events", post(send_group_event))
         .route("/v1/messages", post(send_message).get(inbox))
         .route("/v1/messages/wait", get(wait_for_message))
         .route(
@@ -756,6 +788,216 @@ async fn send_message(
     ))
 }
 
+/// Registers only routing metadata for a new MLS group. No title, MLS state,
+/// epoch, public key, or message content is supplied to the server.
+async fn create_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateGroupRequest>,
+) -> Result<(StatusCode, Json<CreateGroupResponse>), Error> {
+    let creator = authenticate(&state, &headers)?;
+    state.rate_limiter.check(
+        format!("group-create:{}", creator.account_id),
+        10,
+        Duration::from_secs(60),
+    )?;
+    validate_group_id(&request.group_id)?;
+    if request.members.len() > 31 {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "too many initial group members",
+        ));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    transaction
+        .execute(
+            "INSERT INTO groups (id, owner_account_id) VALUES (?1, ?2)",
+            params![request.group_id, creator.account_id],
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(ref failure, _)
+                if failure.code == ErrorCode::ConstraintViolation =>
+            {
+                Error(StatusCode::CONFLICT, "group already exists")
+            }
+            _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not create group"),
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO group_members (group_id, account_id, role) VALUES (?1, ?2, 'owner')",
+            params![request.group_id, creator.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not add group owner",
+            )
+        })?;
+    for member in request.members {
+        let nickname = normalize_nickname(&member.nickname).ok_or(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid group member nickname",
+        ))?;
+        let role = match member.role.as_str() {
+            "admin" | "member" => member.role,
+            _ => return Err(Error(StatusCode::BAD_REQUEST, "invalid group member role")),
+        };
+        let account_id: String = transaction
+            .query_row(
+                "SELECT id FROM accounts WHERE nickname = ?1",
+                params![nickname],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error(StatusCode::NOT_FOUND, "group member not found")
+                }
+                _ => Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not find group member",
+                ),
+            })?;
+        if account_id == creator.account_id {
+            return Err(Error(
+                StatusCode::BAD_REQUEST,
+                "creator role is always owner",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO group_members (group_id, account_id, role) VALUES (?1, ?2, ?3)",
+                params![request.group_id, account_id, role],
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(ref failure, _)
+                    if failure.code == ErrorCode::ConstraintViolation =>
+                {
+                    Error(StatusCode::BAD_REQUEST, "duplicate group member")
+                }
+                _ => Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not add group member",
+                ),
+            })?;
+    }
+    transaction
+        .commit()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not create group"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateGroupResponse {
+            group_id: request.group_id,
+        }),
+    ))
+}
+
+/// Stores versioned opaque MLS bytes for selected group members. The `kind`
+/// byte is a server-side authorization hint only; OpenMLS validates all bytes.
+async fn send_group_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+    Json(request): Json<SendGroupEventRequest>,
+) -> Result<(StatusCode, Json<SendGroupEventResponse>), Error> {
+    let sender = authenticate(&state, &headers)?;
+    state.rate_limiter.check(
+        format!("group-event:{}", sender.account_id),
+        120,
+        Duration::from_secs(60),
+    )?;
+    validate_group_id(&group_id)?;
+    validate_group_envelope(request.kind, &request.envelope)?;
+    if request.recipient_nicknames.is_empty() || request.recipient_nicknames.len() > 32 {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid group event recipients",
+        ));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let sender_role: String = db
+        .query_row(
+            "SELECT role FROM group_members WHERE group_id = ?1 AND account_id = ?2",
+            params![group_id, sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                Error(StatusCode::FORBIDDEN, "not a group member")
+            }
+            _ => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not authorize group event",
+            ),
+        })?;
+    if matches!(request.kind, 1 | 2) && !matches!(sender_role.as_str(), "owner" | "admin") {
+        return Err(Error(
+            StatusCode::FORBIDDEN,
+            "only an owner or admin may send this MLS event",
+        ));
+    }
+    let mut event_ids = Vec::with_capacity(request.recipient_nicknames.len());
+    for raw_nickname in request.recipient_nicknames {
+        let nickname = normalize_nickname(&raw_nickname).ok_or(Error(
+            StatusCode::BAD_REQUEST,
+            "invalid group member nickname",
+        ))?;
+        let recipient_id: String = db.query_row(
+            "SELECT accounts.id FROM accounts JOIN group_members ON group_members.account_id = accounts.id WHERE accounts.nickname = ?1 AND group_members.group_id = ?2",
+            params![nickname, group_id], |row| row.get(0),
+        ).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::FORBIDDEN, "recipient is not a group member"),
+            _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not authorize group recipient"),
+        })?;
+        let event_id = Uuid::new_v4();
+        db.execute(
+            "INSERT INTO group_events (id, group_id, sender_account_id, recipient_account_id, kind, envelope) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![event_id.to_string(), group_id, sender.account_id, recipient_id, request.kind, request.envelope],
+        ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store group event"))?;
+        event_ids.push(event_id);
+    }
+    drop(db);
+    state.message_notify.notify_waiters();
+    Ok((
+        StatusCode::CREATED,
+        Json(SendGroupEventResponse { event_ids }),
+    ))
+}
+
+fn validate_group_id(value: &str) -> Result<(), Error> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| Error(StatusCode::BAD_REQUEST, "group id must be URL-safe base64"))?;
+    if !(8..=64).contains(&decoded.len()) {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid group id length"));
+    }
+    Ok(())
+}
+
+fn validate_group_envelope(kind: u8, envelope: &str) -> Result<(), Error> {
+    if !matches!(kind, 1..=3) || envelope.len() < 4 || envelope.len() > 2_800_000 {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid MLS envelope"));
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(envelope).map_err(|_| {
+        Error(
+            StatusCode::BAD_REQUEST,
+            "MLS envelope must be URL-safe base64",
+        )
+    })?;
+    if decoded.len() < 3 || decoded.len() > 2_800_000 || decoded[0] != 1 || decoded[1] != kind {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid MLS envelope"));
+    }
+    Ok(())
+}
+
 async fn wait_for_message(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1181,6 +1423,27 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             ciphertext BLOB NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
+         CREATE TABLE IF NOT EXISTS groups (
+            id TEXT PRIMARY KEY NOT NULL,
+            owner_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS group_members (
+            group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+            PRIMARY KEY(group_id, account_id)
+         );
+         CREATE TABLE IF NOT EXISTS group_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            kind INTEGER NOT NULL CHECK(kind IN (1, 2, 3)),
+            envelope TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            delivered_at TEXT
+         );
          CREATE TABLE IF NOT EXISTS attachments (
             id TEXT PRIMARY KEY NOT NULL,
             sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -1247,6 +1510,11 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_pending
          ON messages(recipient_account_id, delivered_at, created_at)",
+        [],
+    )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_events_pending
+         ON group_events(recipient_account_id, delivered_at, created_at)",
         [],
     )?;
     db.execute(
@@ -1563,6 +1831,43 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["sender_nickname"],
             "alice"
         );
+    }
+
+    #[tokio::test]
+    async fn group_transport_accepts_only_member_routed_opaque_mls_events() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let group_id = URL_SAFE_NO_PAD.encode([9_u8; 16]);
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/v1/groups",
+            Some(&alice),
+            serde_json::json!({"group_id": group_id, "members": [{"nickname":"bob", "role":"member"}]}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let envelope = URL_SAFE_NO_PAD.encode([1_u8, 1, 42]);
+        let (status, _) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&alice),
+            serde_json::json!({"kind": 1, "recipient_nicknames": ["bob"], "envelope": envelope})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = request(
+            &app,
+            "POST",
+            format!("/v1/groups/{group_id}/events").as_str(),
+            Some(&bob),
+            serde_json::json!({"kind": 2, "recipient_nicknames": ["alice"], "envelope": URL_SAFE_NO_PAD.encode([1_u8, 2, 42])}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

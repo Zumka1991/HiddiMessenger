@@ -100,10 +100,14 @@ Kotlin начинается с fail-closed `NativeMlsBridge.isValidEnvelope`: о
 
 ## Transport, который будет реализован
 
-`POST /v1/groups` и последующие endpoints принимают только versioned opaque
-envelopes: `welcome`, `commit` или `application`. Поля plaintext не появятся в
-API. До подключения OpenMLS Android-клиент не будет показывать создание групп,
-чтобы не выпускать небезопасную «заглушку группы».
+`POST /v1/groups` создаёт только routing metadata: случайный group id,
+участников и их роли. `POST /v1/groups/{group_id}/events` принимает только
+versioned opaque envelopes: `welcome`, `commit` или `application`, и адресатов
+из текущего server-side списка участников. Поля plaintext не появятся в API.
+Для Welcome/Commit сервер разрешает отправку только owner/admin, но не считает
+себя источником криптографической истины. До подключения OpenMLS Android-клиент
+не будет показывать создание групп, чтобы не выпускать небезопасную «заглушку
+группы».
 
 ## Проверка до релиза
 

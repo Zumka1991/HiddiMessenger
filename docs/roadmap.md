@@ -84,6 +84,8 @@
   persistent provider; без UI и сетевой отправки до Commit/Welcome transport.
 * [x] Welcome/join/application-message round-trip между двумя независимыми
   зашифрованными SQLite MLS-профилями.
+* [x] Server transport: routing metadata, роли и адресная доставка только
+  versioned opaque MLS envelopes без расшифровки на сервере.
 * [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.
