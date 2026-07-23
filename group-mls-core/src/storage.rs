@@ -12,7 +12,8 @@ use aes_siv::{
     aead::{Aead, KeyInit, Payload},
 };
 use openmls::prelude::{
-    BasicCredential, Ciphersuite, CredentialWithKey, GroupId, MlsGroup, MlsGroupCreateConfig,
+    BasicCredential, Ciphersuite, CredentialWithKey, GroupId, KeyPackage, MlsGroup,
+    MlsGroupCreateConfig, tls_codec::Serialize as TlsSerialize,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
@@ -93,6 +94,23 @@ pub fn create_local_group(device_identity: &[u8]) -> Result<Vec<u8>, StorageErro
         .lock()
         .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
     provider.create_group(device_identity)
+}
+
+/// Produces a public MLS KeyPackage for an invitation. Its matching private
+/// material and signer are persisted only in the encrypted local provider.
+pub fn create_key_package(device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+    if device_identity.is_empty() || device_identity.len() > 256 {
+        return Err(StorageError::OpenMls(
+            "invalid MLS device identity".to_owned(),
+        ));
+    }
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    provider.create_key_package(device_identity)
 }
 
 /// Permanently removes a locally stored MLS group. This is for an explicit
@@ -220,6 +238,30 @@ impl EncryptedSqliteMlsProvider {
         let group = MlsGroup::new(self, &signer, &config, credential)
             .map_err(|error| StorageError::OpenMls(error.to_string()))?;
         Ok(group.group_id().as_slice().to_vec())
+    }
+
+    pub fn create_key_package(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        if device_identity.is_empty() || device_identity.len() > 256 {
+            return Err(StorageError::OpenMls(
+                "invalid MLS device identity".to_owned(),
+            ));
+        }
+        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+        let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        signer
+            .store(self.storage())
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(device_identity.to_vec()).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+        KeyPackage::builder()
+            .build(ciphersuite, self, &signer, credential)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?
+            .key_package()
+            .tls_serialize_detached()
+            .map_err(|error| StorageError::OpenMls(error.to_string()))
     }
 
     #[cfg(test)]

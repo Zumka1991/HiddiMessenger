@@ -183,6 +183,25 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeDe
         .resolve::<jni::errors::LogErrorAndDefault>()
 }
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeCreateKeyPackage(
+    mut unowned_env: EnvUnowned,
+    _class: JClass,
+    device_identity: JByteArray,
+) -> jbyteArray {
+    unowned_env
+        .with_env(|env| {
+            let identity = env.convert_byte_array(&device_identity)?;
+            let key_package = storage::create_key_package(&identity)
+                .map_err(|_| jni::errors::Error::NullPtr("could not create MLS KeyPackage"))?;
+            Ok::<jbyteArray, jni::errors::Error>(
+                env.byte_array_from_slice(&key_package)?.into_raw(),
+            )
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
