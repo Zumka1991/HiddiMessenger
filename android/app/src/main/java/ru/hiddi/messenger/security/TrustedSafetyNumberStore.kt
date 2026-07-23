@@ -15,6 +15,10 @@ class TrustedSafetyNumberStore(context: Context) {
         read().optString(peer) == safetyNumber
     }
 
+    fun trustedSafetyNumber(peer: String): String? = synchronized(lock) {
+        read().optString(peer).takeIf(String::isNotBlank)
+    }
+
     fun trust(peer: String, safetyNumber: String) = synchronized(lock) {
         read().put(peer, safetyNumber).also { records ->
             store.write(records.toString().encodeToByteArray())

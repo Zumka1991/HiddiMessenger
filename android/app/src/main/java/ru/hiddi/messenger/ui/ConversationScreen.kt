@@ -112,6 +112,7 @@ fun ConversationScreen(
     attachmentStore: EncryptedAttachmentStore,
     attachmentInProgress: Boolean,
     voiceRecording: Boolean,
+    identityChanged: Boolean,
     onDraftChange: (String) -> Unit,
     onBack: () -> Unit,
     onImageSelected: (Uri) -> Unit,
@@ -157,7 +158,12 @@ fun ConversationScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.size(4.dp))
-                    Text("сквозное шифрование", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+                    Text(
+                        if (identityChanged) "ключ изменился — нужна проверка" else "сквозное шифрование",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (identityChanged) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                    )
                 }
             }
             Box {

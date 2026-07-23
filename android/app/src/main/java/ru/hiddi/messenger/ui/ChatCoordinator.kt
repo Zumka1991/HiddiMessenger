@@ -134,6 +134,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
     var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
     var safetyNumberTrusted by rememberSaveable { mutableStateOf(false) }
+    var identityChanged by rememberSaveable { mutableStateOf(false) }
     val safetyQrPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
@@ -142,6 +143,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             if (scanned != null && scanned == expected && recipient != null) {
                 trustedSafetyNumbers.trust(recipient!!, safetyNumber!!)
                 safetyNumberTrusted = true
+                identityChanged = false
                 status = "QR-код совпал · ключ подтверждён"
             } else {
                 status = "QR-код не совпадает с ключом этого диалога"
@@ -153,6 +155,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         if (scanned != null && scanned == expected && recipient != null) {
             trustedSafetyNumbers.trust(recipient!!, safetyNumber!!)
             safetyNumberTrusted = true
+            identityChanged = false
             status = "QR-код совпал · ключ подтверждён"
         } else {
             status = "QR-код не совпадает с ключом этого диалога"
@@ -167,6 +170,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
+        identityChanged = false
         historyStore.markRead(peer)
         recipient = peer
         history = historyStore.messagesWith(peer)
@@ -176,6 +180,15 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
         searchError = null
         search = ""
         focusManager.clearFocus()
+        trustedSafetyNumbers.trustedSafetyNumber(peer)?.let { known ->
+            scope.launch {
+                val current = runCatching { api.safetyNumber(profile, peer) }.getOrNull()
+                if (current != null && current != known) {
+                    identityChanged = true
+                    status = "⚠ Ключ @$peer изменился — проверьте его перед отправкой"
+                }
+            }
+        }
     }
 
     fun findUser() {
@@ -252,6 +265,10 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     fun sendImage(uri: Uri) {
         val target = recipient ?: return
+        if (identityChanged) {
+            status = "Сначала проверьте изменившийся ключ собеседника"
+            return
+        }
         if (attachmentInProgress) return
         attachmentInProgress = true
         status = "Подготавливаем и шифруем фото…"
@@ -339,6 +356,10 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
 
     fun stopAndSendVoice() {
         val target = recipient ?: return
+        if (identityChanged) {
+            status = "Сначала проверьте изменившийся ключ собеседника"
+            return
+        }
         if (!voiceRecording) return
         voiceRecording = false
         attachmentInProgress = true
@@ -516,6 +537,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 attachmentStore = attachmentStore,
                 attachmentInProgress = attachmentInProgress,
                 voiceRecording = voiceRecording,
+                identityChanged = identityChanged,
                 onDraftChange = { draft = it },
                 onBack = { recipient = null; draft = ""; focusManager.clearFocus() },
                 onImageSelected = ::sendImage,
@@ -538,6 +560,10 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 },
                 onSend = {
                     val target = recipient ?: return@ConversationScreen
+                    if (identityChanged) {
+                        status = "Сначала проверьте изменившийся ключ собеседника"
+                        return@ConversationScreen
+                    }
                     val text = draft.trim()
                     if (text.isEmpty()) return@ConversationScreen
                     scope.launch {
@@ -607,6 +633,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let {
                         trustedSafetyNumbers.trust(recipient!!, it)
                         safetyNumberTrusted = true
+                        identityChanged = false
                     }
                     showSafetyNumberDialog = false
                 }) { Text(if (safetyNumberTrusted) "Готово" else "Ключ совпадает") }
