@@ -1,0 +1,4 @@
+hiddi.myaifriend.su {
+	encode zstd gzip
+	reverse_proxy hiddi-server:3000
+}

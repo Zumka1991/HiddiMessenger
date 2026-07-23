@@ -41,16 +41,20 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -138,7 +142,6 @@ fun ConversationScreen(
     val listState = rememberLazyListState()
     var menuExpanded by remember { mutableStateOf(false) }
     var selectedForActions by remember { mutableStateOf<ChatHistoryItem?>(null) }
-    var selectedForDeletion by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var showBlockDialog by remember { mutableStateOf(false) }
     var pendingPrependSize by remember(recipient) { mutableIntStateOf(-1) }
     var pendingAnchorIndex by remember(recipient) { mutableIntStateOf(0) }
@@ -231,6 +234,8 @@ fun ConversationScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (identityChanged || isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
@@ -238,20 +243,47 @@ fun ConversationScreen(
                 IconButton(onClick = { menuExpanded = true }) {
                     Icon(Icons.Rounded.MoreVert, contentDescription = "Меню диалога", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Проверить ключ") },
-                        leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
-                        onClick = { menuExpanded = false; onVerifyKey() },
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
+                    Text(
+                        "БЕЗОПАСНОСТЬ",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
                     DropdownMenuItem(
-                        text = { Text("Очистить историю") },
-                        leadingIcon = { Icon(Icons.Rounded.Close, contentDescription = null) },
+                        text = { Text("Проверить E2EE") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Security,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        onClick = { menuExpanded = false; onVerifyKey() },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+                    DropdownMenuItem(
+                        text = { Text("Очистить чат") },
+                        leadingIcon = { Icon(Icons.Rounded.DeleteSweep, contentDescription = null) },
                         onClick = { menuExpanded = false; onClearHistory() },
                     )
                     DropdownMenuItem(
-                        text = { Text(if (isBlocked) "Убрать из игнора" else "Добавить в игнор") },
-                        leadingIcon = { Icon(Icons.Rounded.Close, contentDescription = null) },
+                        text = { Text(if (isBlocked) "Разблокировать" else "Заблокировать") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Block,
+                                contentDescription = null,
+                                tint = if (isBlocked) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                },
+                            )
+                        },
                         onClick = {
                             menuExpanded = false
                             showBlockDialog = true
@@ -439,67 +471,18 @@ fun ConversationScreen(
     }
 
     selectedForActions?.let { item ->
-        AlertDialog(
-            onDismissRequest = { selectedForActions = null },
-            title = { Text("Действия с сообщением") },
-            text = {
-                Column {
-                    TextButton(
-                        onClick = {},
-                        enabled = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Редактировать — скоро", modifier = Modifier.fillMaxWidth())
-                    }
-                    TextButton(
-                        onClick = {
-                            selectedForActions = null
-                            selectedForDeletion = item
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            "Удалить…",
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
+        MessageActionDialog(
+            preview = item.text,
+            canDeleteForEveryone = item.outgoing,
+            onDeleteLocal = {
+                selectedForActions = null
+                onDeleteMessage(item, false)
             },
-            confirmButton = {
-                TextButton(onClick = { selectedForActions = null }) {
-                    Text("Отмена")
-                }
+            onDeleteEveryone = {
+                selectedForActions = null
+                onDeleteMessage(item, true)
             },
-        )
-    }
-
-    selectedForDeletion?.let { item ->
-        AlertDialog(
-            onDismissRequest = { selectedForDeletion = null },
-            title = { Text("Удалить сообщение?") },
-            text = {
-                Text(
-                    "Можно удалить его только с этого телефона или отправить собеседнику команду удаления. " +
-                        "Уже сохранённые копии и скриншоты стереть невозможно.",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        selectedForDeletion = null
-                        onDeleteMessage(item, true)
-                    },
-                ) { Text("У всех") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        selectedForDeletion = null
-                        onDeleteMessage(item, false)
-                    },
-                ) { Text("Только у меня") }
-            },
+            onDismiss = { selectedForActions = null },
         )
     }
 }

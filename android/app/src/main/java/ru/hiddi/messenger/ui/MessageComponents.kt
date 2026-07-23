@@ -363,18 +363,3 @@ fun messageTime(value: String): String = runCatching {
         "${match.groupValues[1]}:${match.groupValues[2]}"
     } ?: ""
 }
-
-val hiddiColors = darkColorScheme(
-    primary = Color(0xFF63DFF6),
-    onPrimary = Color(0xFF042F38),
-    primaryContainer = Color(0xFF164753),
-    onPrimaryContainer = Color(0xFFD5F7FF),
-    secondary = Color(0xFFA99BFF),
-    background = Color(0xFF080D14),
-    surface = Color(0xFF111925),
-    surfaceVariant = Color(0xFF1B2735),
-    onSurface = Color(0xFFEAF0F8),
-    onSurfaceVariant = Color(0xFFAEB9C8),
-    onBackground = Color(0xFFEAF0F8),
-    error = Color(0xFFFF6F7D),
-)

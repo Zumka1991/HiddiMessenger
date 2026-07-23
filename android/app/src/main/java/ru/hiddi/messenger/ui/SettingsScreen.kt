@@ -23,14 +23,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -48,6 +51,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -63,6 +67,7 @@ fun SettingsScreen(
     api: SignalMessagingApi,
     onBack: () -> Unit,
     onProfileChanged: (UserSearchResult, ByteArray?) -> Unit,
+    onLogout: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -72,6 +77,8 @@ fun SettingsScreen(
     var avatar by remember { mutableStateOf<ByteArray?>(null) }
     var loading by remember { mutableStateOf(true) }
     var saving by remember { mutableStateOf(false) }
+    var loggingOut by remember { mutableStateOf(false) }
+    var showLogoutDialog by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
     suspend fun reload() {
@@ -139,11 +146,18 @@ fun SettingsScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад")
             }
-            Text(
-                "Настройки",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Column {
+                Text(
+                    "Настройки",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "Профиль и безопасность",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         if (loading && profile == null) {
@@ -157,68 +171,109 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier
-                    .size(118.dp)
-                    .clip(CircleShape)
-                    .clickable(enabled = !saving) { imagePicker.launch("image/*") },
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                val bitmap = remember(avatar?.contentHashCode()) {
-                    avatar?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-                }
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Аватар",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(contentAlignment = Alignment.Center) {
-                        HiddiAvatar(profile?.displayName?.ifBlank { account.nickname } ?: account.nickname, 108)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier
+                            .size(86.dp)
+                            .clip(CircleShape)
+                            .clickable(enabled = !saving) { imagePicker.launch("image/*") },
+                    ) {
+                        val bitmap = remember(avatar?.contentHashCode()) {
+                            avatar?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                        }
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "Аватар",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Box(contentAlignment = Alignment.Center) {
+                                HiddiAvatar(
+                                    profile?.displayName?.ifBlank { account.nickname }
+                                        ?: account.nickname,
+                                    78,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.size(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            displayName.ifBlank { "@${account.nickname}" },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "@${account.nickname}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        TextButton(
+                            onClick = { imagePicker.launch("image/*") },
+                            enabled = !saving,
+                        ) {
+                            Icon(Icons.Rounded.Add, contentDescription = null)
+                            Spacer(Modifier.size(5.dp))
+                            Text(if (avatar == null) "Добавить фото" else "Сменить фото")
+                        }
+                        if (avatar != null) {
+                            TextButton(
+                                onClick = {
+                                    if (saving) return@TextButton
+                                    saving = true
+                                    scope.launch {
+                                        try {
+                                            api.deleteAvatar(account)
+                                            avatar = null
+                                            val updated = api.currentProfile(account)
+                                            profile = updated
+                                            onProfileChanged(updated, null)
+                                            status = "Аватар удалён"
+                                        } catch (error: Exception) {
+                                            status = error.message ?: "Не удалось удалить аватар"
+                                        } finally {
+                                            saving = false
+                                        }
+                                    }
+                                },
+                                enabled = !saving,
+                            ) {
+                                Text(
+                                    "Удалить",
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
                     }
                 }
             }
-            TextButton(
-                onClick = { imagePicker.launch("image/*") },
-                enabled = !saving,
-            ) {
-                Icon(Icons.Rounded.Add, contentDescription = null)
-                Spacer(Modifier.size(6.dp))
-                Text(if (avatar == null) "Добавить аватар" else "Сменить аватар")
-            }
-            if (avatar != null) {
-                TextButton(
-                    onClick = {
-                        if (saving) return@TextButton
-                        saving = true
-                        scope.launch {
-                            try {
-                                api.deleteAvatar(account)
-                                avatar = null
-                                val updated = api.currentProfile(account)
-                                profile = updated
-                                onProfileChanged(updated, null)
-                                status = "Аватар удалён"
-                            } catch (error: Exception) {
-                                status = error.message ?: "Не удалось удалить аватар"
-                            } finally {
-                                saving = false
-                            }
-                        }
-                    },
-                    enabled = !saving,
-                ) {
-                    Text("Удалить аватар", color = MaterialTheme.colorScheme.error)
-                }
-            }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "ПРОФИЛЬ",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
+            )
             OutlinedTextField(
                 value = displayName,
                 onValueChange = { candidate ->
@@ -230,6 +285,7 @@ fun SettingsScreen(
                 supportingText = { Text("${displayName.length}/64") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -239,6 +295,7 @@ fun SettingsScreen(
                 label = { Text("Никнейм") },
                 supportingText = { Text("Постоянный адрес для поиска и сообщений") },
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -251,11 +308,12 @@ fun SettingsScreen(
                 minLines = 4,
                 maxLines = 7,
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
             )
             Spacer(Modifier.height(18.dp))
             Surface(
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surface,
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
@@ -314,7 +372,79 @@ fun SettingsScreen(
                     Text("Сохранить")
                 }
             }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "СЕССИЯ УСТРОЙСТВА",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
+            )
+            OutlinedButton(
+                onClick = { showLogoutDialog = true },
+                enabled = !saving && !loggingOut,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Rounded.Logout,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.size(9.dp))
+                Text(
+                    "Выйти с этого устройства",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!loggingOut) showLogoutDialog = false
+            },
+            title = { Text("Удалить сессию устройства?") },
+            text = {
+                Text(
+                    "Сервер отзовёт токен этого устройства. Затем Hiddi безвозвратно " +
+                        "удалит с телефона локальные ключи, сообщения, контакты и вложения. " +
+                        "Для повторного входа понадобится новый инвайт.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !loggingOut,
+                    onClick = {
+                        loggingOut = true
+                        status = "Отзываем сессию устройства…"
+                        scope.launch {
+                            try {
+                                api.deleteCurrentDevice(account)
+                                onLogout()
+                            } catch (error: Exception) {
+                                status = error.message ?: "Не удалось удалить сессию устройства"
+                                loggingOut = false
+                                showLogoutDialog = false
+                            }
+                        }
+                    },
+                ) {
+                    Text(
+                        if (loggingOut) "Удаляем…" else "Выйти и удалить",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !loggingOut,
+                    onClick = { showLogoutDialog = false },
+                ) {
+                    Text("Отмена")
+                }
+            },
+        )
     }
 }

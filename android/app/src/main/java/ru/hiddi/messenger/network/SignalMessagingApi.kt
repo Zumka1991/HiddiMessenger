@@ -27,6 +27,15 @@ import java.net.URL
 import java.security.MessageDigest
 
 class SignalMessagingApi(private val repository: SignalStateRepository) {
+    suspend fun deleteCurrentDevice(profile: AccountProfile) = withContext(Dispatchers.IO) {
+        request(
+            "DELETE",
+            "${profile.serverUrl}/v1/devices/current",
+            null,
+            profile.accessToken,
+        )
+    }
+
     suspend fun uploadMlsKeyPackage(profile: AccountProfile, keyPackage: ByteArray): Int = withContext(Dispatchers.IO) {
         require(keyPackage.isNotEmpty()) { "Пустой MLS KeyPackage" }
         JSONObject(

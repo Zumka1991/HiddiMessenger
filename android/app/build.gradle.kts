@@ -4,6 +4,35 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val hiddiProductionServerUrl = providers.gradleProperty("hiddiServerUrl")
+    .orElse("https://hiddi.myaifriend.su")
+    .get()
+val releaseRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+val releaseKeystoreFile = providers.gradleProperty("hiddiKeystorePath")
+    .orNull
+    ?.let(rootProject::file)
+val releasePasswordFile = providers.gradleProperty("hiddiKeystorePasswordFile")
+    .orNull
+    ?.let(rootProject::file)
+val releaseKeystorePassword = releasePasswordFile
+    ?.takeIf { it.isFile }
+    ?.readText()
+    ?.trim()
+val releaseKeyAlias = providers.gradleProperty("hiddiKeyAlias")
+    .orElse("hiddi-release")
+    .get()
+
+if (releaseRequested) {
+    require(hiddiProductionServerUrl.startsWith("https://")) {
+        "Release APK requires -PhiddiServerUrl=https://your-server.example"
+    }
+    require(releaseKeystoreFile?.isFile == true && !releaseKeystorePassword.isNullOrBlank()) {
+        "Release APK requires -PhiddiKeystorePath and -PhiddiKeystorePasswordFile"
+    }
+}
+
 android {
     namespace = "ru.hiddi.messenger"
     compileSdk = 35
@@ -13,8 +42,7 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0-dev"
-
+        versionName = "0.1.0-alpha.1"
         ndk {
             // Development APKs target physical modern Android devices. Release
             // distribution will use ABI splits/App Bundle instead of a universal APK.
@@ -25,6 +53,38 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+    }
+
+    signingConfigs {
+        if (releaseKeystoreFile != null && !releaseKeystorePassword.isNullOrBlank()) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeystorePassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-dev"
+            buildConfigField(
+                "String",
+                "DEFAULT_SERVER_URL",
+                "\"http://127.0.0.1:3000\"",
+            )
+        }
+        release {
+            signingConfig = signingConfigs.findByName("release")
+            isMinifyEnabled = false
+            buildConfigField(
+                "String",
+                "DEFAULT_SERVER_URL",
+                "\"${hiddiProductionServerUrl.replace("\"", "\\\"")}\"",
+            )
+        }
     }
 
     compileOptions {

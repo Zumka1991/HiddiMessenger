@@ -48,9 +48,11 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.GroupAdd
+import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -146,7 +148,7 @@ fun ConversationsScreen(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val avatarBitmap = remember(selfAvatar?.contentHashCode()) {
@@ -157,21 +159,29 @@ fun ConversationsScreen(
                     bitmap = avatarBitmap.asImageBitmap(),
                     contentDescription = "Мой аватар",
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(48.dp).clip(CircleShape),
+                    modifier = Modifier.size(46.dp).clip(CircleShape),
                 )
             } else {
-                HiddiAvatar(selfProfile?.displayName?.ifBlank { "H" } ?: "H", 48)
+                HiddiAvatar(selfProfile?.displayName?.ifBlank { "H" } ?: "H", 46)
             }
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     selfProfile?.displayName?.ifBlank { "Hiddi" } ?: "Hiddi",
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text("@${profile.nickname}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "@${profile.nickname}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.size(9.dp))
+                    ConnectionPill(connection, onRefreshConnection)
+                }
             }
             Box {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface) {
@@ -183,9 +193,22 @@ fun ConversationsScreen(
                     expanded = mainMenuExpanded,
                     onDismissRequest = { mainMenuExpanded = false },
                 ) {
+                    Text(
+                        "HIDDI",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
                     DropdownMenuItem(
                         text = { Text("Создать группу") },
-                        leadingIcon = { Icon(Icons.Rounded.GroupAdd, contentDescription = null) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.GroupAdd,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                            )
+                        },
                         onClick = {
                             mainMenuExpanded = false
                             onClearGroupCreationError()
@@ -194,6 +217,13 @@ fun ConversationsScreen(
                     )
                     DropdownMenuItem(
                         text = { Text("Контакты") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Contacts,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
                         onClick = {
                             mainMenuExpanded = false
                             showContacts = true
@@ -201,7 +231,13 @@ fun ConversationsScreen(
                     )
                     DropdownMenuItem(
                         text = { Text("Настройки") },
-                        leadingIcon = { Icon(Icons.Rounded.MoreVert, contentDescription = null) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Settings,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
                         onClick = {
                             mainMenuExpanded = false
                             onOpenSettings()
@@ -268,6 +304,8 @@ fun ConversationsScreen(
                             Text(
                                 user.displayName.ifBlank { "@${user.nickname}" },
                                 fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                             Text(
                                 user.bio.ifBlank { "@${user.nickname} · начать защищённый диалог" },
@@ -286,47 +324,31 @@ fun ConversationsScreen(
             }
 
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 10.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 9.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    if (showContacts) "Контакты" else "Диалоги",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { showContacts = !showContacts }) {
-                    Text(if (showContacts) "К диалогам" else "Контакты")
-                }
-                IconButton(onClick = onRefreshConnection) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Проверить связь", tint = MaterialTheme.colorScheme.primary)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(9.dp).clip(CircleShape).background(
-                            when (connection) {
-                                ServerConnection.ONLINE -> Color(0xFF53DC88)
-                                ServerConnection.OFFLINE -> MaterialTheme.colorScheme.error
-                                ServerConnection.CHECKING -> MaterialTheme.colorScheme.secondary
-                            },
-                        ),
-                    )
-                    Spacer(Modifier.size(5.dp))
+                Column(Modifier.weight(1f)) {
                     Text(
-                        when (connection) {
-                            ServerConnection.ONLINE -> "Сервер доступен"
-                            ServerConnection.OFFLINE -> "Нет связи"
-                            ServerConnection.CHECKING -> "Проверяем…"
+                        if (showContacts) "Контакты" else "Чаты",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        if (showContacts) {
+                            "${contacts.size} сохранено на устройстве"
+                        } else {
+                            "${groups.size + peers.size} защищённых диалогов"
                         },
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
 
-        if (showContacts && contacts.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (showContacts && contacts.isEmpty()) {
+                Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Контактов пока нет", fontWeight = FontWeight.Medium)
                     Text(
@@ -336,9 +358,9 @@ fun ConversationsScreen(
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
                 }
-            }
-        } else if (!showContacts && peers.isEmpty() && groups.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                }
+            } else if (!showContacts && peers.isEmpty() && groups.isEmpty()) {
+                Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Surface(
                         shape = CircleShape,
@@ -353,47 +375,54 @@ fun ConversationsScreen(
                     Text("Здесь появятся ваши диалоги и группы", fontWeight = FontWeight.Medium)
                     Text("Найдите человека по никнейму", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                if (showContacts) {
-                    items(contacts, key = { "contact:$it:$historyRevision" }) { contact ->
-                        ConversationRow(
-                            peer = contact,
-                            profile = knownProfiles[contact],
-                            avatar = knownAvatars[contact],
-                            lastMessage = historyStore.messagesWith(contact).lastOrNull(),
-                            unreadCount = historyStore.unreadCount(contact),
-                            onClick = { onOpenConversation(contact) },
-                            onOpenProfile = { onOpenProfile(contact) },
-                        )
-                    }
-                } else {
-                    items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
-                        GroupConversationRow(
-                            group = group,
-                            onClick = { onOpenGroup(group.groupId) },
-                        )
-                    }
-                    items(peers, key = { "$it:$historyRevision" }) { peer ->
-                        val lastMessage = historyStore.messagesWith(peer).lastOrNull()
-                        ConversationRow(
-                            peer = peer,
-                            profile = knownProfiles[peer],
-                            avatar = knownAvatars[peer],
-                            lastMessage = lastMessage,
-                            unreadCount = historyStore.unreadCount(peer),
-                            onClick = { onOpenConversation(peer) },
-                            onOpenProfile = { onOpenProfile(peer) },
-                        )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (showContacts) {
+                        items(contacts, key = { "contact:$it:$historyRevision" }) { contact ->
+                            ConversationRow(
+                                peer = contact,
+                                profile = knownProfiles[contact],
+                                avatar = knownAvatars[contact],
+                                lastMessage = historyStore.messagesWith(contact).lastOrNull(),
+                                unreadCount = historyStore.unreadCount(contact),
+                                onClick = { onOpenConversation(contact) },
+                                onOpenProfile = { onOpenProfile(contact) },
+                            )
+                        }
+                    } else {
+                        items(groups, key = { "group:${it.groupId.contentHashCode()}:$historyRevision" }) { group ->
+                            GroupConversationRow(
+                                group = group,
+                                onClick = { onOpenGroup(group.groupId) },
+                            )
+                        }
+                        items(peers, key = { "$it:$historyRevision" }) { peer ->
+                            val lastMessage = historyStore.messagesWith(peer).lastOrNull()
+                            ConversationRow(
+                                peer = peer,
+                                profile = knownProfiles[peer],
+                                avatar = knownAvatars[peer],
+                                lastMessage = lastMessage,
+                                unreadCount = historyStore.unreadCount(peer),
+                                onClick = { onOpenConversation(peer) },
+                                onOpenProfile = { onOpenProfile(peer) },
+                            )
+                        }
                     }
                 }
             }
         }
+        HiddiHomeNavigation(
+            selected = if (showContacts) HiddiHomeSection.CONTACTS else HiddiHomeSection.CHATS,
+            onChats = { showContacts = false },
+            onContacts = { showContacts = true },
+            onSettings = onOpenSettings,
+        )
     }
 
     if (showCreateGroup) {
@@ -499,12 +528,12 @@ private fun GroupConversationRow(
     val lastMessage = group.messages.lastOrNull()
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Transparent,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            Modifier.padding(horizontal = 10.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Surface(
@@ -522,7 +551,22 @@ private fun GroupConversationRow(
             }
             Spacer(Modifier.size(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        title,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        Icons.Rounded.Lock,
+                        contentDescription = "MLS E2EE",
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     lastMessage?.let { (if (it.outgoing) "Вы: " else "@${it.sender}: ") + it.text }
@@ -533,7 +577,6 @@ private fun GroupConversationRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Icon(Icons.Rounded.Lock, contentDescription = "MLS E2EE", tint = MaterialTheme.colorScheme.secondary)
         }
     }
 }

@@ -1,0 +1,38 @@
+services:
+  server:
+    image: hiddi-server:0.1.0-alpha.1
+    container_name: hiddi-server
+    restart: unless-stopped
+    environment:
+      HIDDI_BIND_ADDR: 0.0.0.0:3000
+      HIDDI_DATABASE_PATH: /var/lib/hiddi/hiddi.db
+      HIDDI_ATTACHMENT_BACKEND: sqlite
+      HIDDI_BOOTSTRAP_SECRET_FILE: /run/secrets/bootstrap_secret
+      RUST_LOG: hiddi_server=info,tower_http=info
+    volumes:
+      - hiddi_data:/var/lib/hiddi
+    secrets:
+      - bootstrap_secret
+    networks:
+      - lucky
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 128m
+    cpus: 0.50
+
+volumes:
+  hiddi_data:
+
+secrets:
+  bootstrap_secret:
+    file: ./secrets/bootstrap_secret
+
+networks:
+  lucky:
+    external: true
+    name: lucky_default

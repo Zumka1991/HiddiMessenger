@@ -47,6 +47,14 @@ class AndroidKeystoreSecretStore(
         }
     }
 
+    fun delete() {
+        file.delete()
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        if (keyStore.containsAlias(keyAlias)) {
+            keyStore.deleteEntry(keyAlias)
+        }
+    }
+
     private fun cipher(mode: Int, iv: ByteArray? = null): Cipher = Cipher.getInstance(AES_GCM).apply {
         if (iv == null) init(mode, getOrCreateKey()) else init(mode, getOrCreateKey(), GCMParameterSpec(TAG_BITS, iv))
     }

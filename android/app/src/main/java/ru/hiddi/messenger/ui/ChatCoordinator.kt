@@ -10,6 +10,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -112,7 +113,13 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @androidx.compose.runtime.Composable
-fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: Int, onPeerOpened: () -> Unit) {
+fun ChatScreen(
+    profile: AccountProfile,
+    requestedPeer: String?,
+    resumeRevision: Int,
+    onPeerOpened: () -> Unit,
+    onLogout: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -749,6 +756,27 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     val selectedGroup: LocalGroupChat? = selectedGroupId?.let { selected ->
         groups.firstOrNull { it.groupId.groupIdText() == selected }
     }
+    BackHandler(
+        enabled = showSettings ||
+            viewedProfileNickname != null ||
+            selectedGroupId != null ||
+            recipient != null,
+    ) {
+        when {
+            showSettings -> showSettings = false
+            viewedProfileNickname != null -> viewedProfileNickname = null
+            selectedGroupId != null -> {
+                selectedGroupId = null
+                groupDraft = ""
+                focusManager.clearFocus()
+            }
+            recipient != null -> {
+                recipient = null
+                draft = ""
+                focusManager.clearFocus()
+            }
+        }
+    }
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
         if (showSettings) {
             SettingsScreen(
@@ -760,6 +788,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     currentAvatar = avatar
                     knownProfiles = knownProfiles + (updated.nickname to updated)
                 },
+                onLogout = onLogout,
             )
         } else if (viewedProfileNickname != null) {
             val nickname = requireNotNull(viewedProfileNickname)
@@ -1152,47 +1181,21 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     }
 
     if (showSafetyNumberDialog && recipient != null) {
-        AlertDialog(
-            onDismissRequest = { showSafetyNumberDialog = false },
-            title = { Text("Проверка ключа @$recipient") },
-            text = {
-                Column {
-                    Text("Сверьте этот код у себя и у @$recipient по голосу или лично. Совпадение подтверждает ключи этого диалога.")
-                    Spacer(Modifier.height(16.dp))
-                    Text(safetyNumber ?: "Получаем код…", style = MaterialTheme.typography.titleMedium, letterSpacing = 1.sp)
-                    safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let { code ->
-                        Image(
-                            bitmap = remember(code) { safetyQrBitmap(code).asImageBitmap() },
-                            contentDescription = "QR-код проверки ключа",
-                            modifier = Modifier.size(220.dp).align(Alignment.CenterHorizontally).padding(top = 14.dp),
-                        )
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Text(if (safetyNumberTrusted) "✓ Этот ключ уже подтверждён на устройстве." else "Если код изменился неожиданно, не отправляйте секретные данные до проверки.", style = MaterialTheme.typography.bodySmall)
+        SafetyNumberDialog(
+            recipient = recipient!!,
+            safetyNumber = safetyNumber,
+            trusted = safetyNumberTrusted,
+            onConfirm = {
+                safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let {
+                    trustedSafetyNumbers.trust(recipient!!, it)
+                    safetyNumberTrusted = true
+                    identityChanged = false
                 }
+                showSafetyNumberDialog = false
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let {
-                        trustedSafetyNumbers.trust(recipient!!, it)
-                        safetyNumberTrusted = true
-                        identityChanged = false
-                    }
-                    showSafetyNumberDialog = false
-                }) { Text(if (safetyNumberTrusted) "Готово" else "Ключ совпадает") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(
-                        onClick = { safetyQrCamera.launch(null) },
-                        enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
-                    ) { Text("Снять QR") }
-                    TextButton(
-                        onClick = { safetyQrPicker.launch("image/*") },
-                        enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
-                    ) { Text("Из фото") }
-                }
-            },
+            onTakeQrPhoto = { safetyQrCamera.launch(null) },
+            onPickQrPhoto = { safetyQrPicker.launch("image/*") },
+            onDismiss = { showSafetyNumberDialog = false },
         )
     }
 }

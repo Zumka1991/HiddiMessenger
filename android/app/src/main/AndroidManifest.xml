@@ -6,7 +6,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_hiddi_launcher"
         android:label="Hiddi Messenger"
+        android:roundIcon="@mipmap/ic_hiddi_launcher_round"
+        android:usesCleartextTraffic="false"
         android:theme="@style/Theme.Hiddi">
         <activity
             android:name=".MainActivity"

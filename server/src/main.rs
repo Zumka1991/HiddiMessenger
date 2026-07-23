@@ -2,7 +2,7 @@ mod attachment_storage;
 
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
@@ -378,8 +378,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let bootstrap_secret =
-        env::var("HIDDI_BOOTSTRAP_SECRET").context("HIDDI_BOOTSTRAP_SECRET must be set")?;
+    let bootstrap_secret = load_bootstrap_secret()?;
     if bootstrap_secret.len() < 32 {
         anyhow::bail!("HIDDI_BOOTSTRAP_SECRET must be at least 32 characters");
     }
@@ -415,13 +414,26 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn load_bootstrap_secret() -> anyhow::Result<String> {
+    if let Ok(path) = env::var("HIDDI_BOOTSTRAP_SECRET_FILE") {
+        return fs::read_to_string(&path)
+            .with_context(|| format!("could not read HIDDI_BOOTSTRAP_SECRET_FILE at {path}"))
+            .map(|value| value.trim().to_owned());
+    }
+    env::var("HIDDI_BOOTSTRAP_SECRET")
+        .context("HIDDI_BOOTSTRAP_SECRET or HIDDI_BOOTSTRAP_SECRET_FILE must be set")
+}
+
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/admin/invites", post(create_invite))
         .route("/v1/auth/register", post(register))
         .route("/v1/devices/prekeys", put(upload_prekeys))
-        .route("/v1/devices/current", get(current_device))
+        .route(
+            "/v1/devices/current",
+            get(current_device).delete(delete_current_device),
+        )
         .route(
             "/v1/users/{nickname}/prekey-bundle",
             get(take_prekey_bundle),
@@ -611,6 +623,32 @@ async fn current_device(
             .expect("authenticated device id is a valid UUID"),
         registration_id,
     }))
+}
+
+async fn delete_current_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let deleted = db
+        .execute(
+            "DELETE FROM devices WHERE id = ?1 AND account_id = ?2",
+            params![account.device_id, account.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not delete device session",
+            )
+        })?;
+    if deleted != 1 {
+        return Err(Error(StatusCode::NOT_FOUND, "device session not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn take_prekey_bundle(
@@ -3799,6 +3837,32 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["sender_nickname"],
             "alice"
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_current_device_revokes_its_session() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+
+        let (status, _) = request(
+            &app,
+            "DELETE",
+            "/v1/devices/current",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = request(
+            &app,
+            "GET",
+            "/v1/devices/current",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

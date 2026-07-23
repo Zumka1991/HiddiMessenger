@@ -110,6 +110,7 @@ import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.NativeMlsBridge
+import ru.hiddi.messenger.security.LocalSessionWiper
 import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
@@ -174,120 +175,33 @@ private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: 
             }
         }
     }
-    MaterialTheme(colorScheme = hiddiColors) {
-        if (account != null) {
-            ChatScreen(account!!, requestedPeer, resumeRevision, onPeerOpened)
-        } else if (showRegistration) {
-            RegistrationScreen(
-                onBack = { showRegistration = false },
-                onRegistered = { account = it },
-                onRecover = if (hasLegacyToken) { server, nickname -> accountStore.recoverLegacy(server, nickname)?.also { account = it } } else null,
-            )
-        } else {
-            WelcomeScreen(onRegister = { showRegistration = true })
-        }
-    }
-}
-
-@androidx.compose.runtime.Composable
-private fun WelcomeScreen(onRegister: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text("Hiddi Messenger", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(12.dp))
-        Text("Закрытый мессенджер для знакомых. Содержимое сообщений шифруется на устройствах.")
-        Spacer(Modifier.height(32.dp))
-        Button(onClick = onRegister, modifier = Modifier.fillMaxWidth()) {
-            Text("Зарегистрироваться по приглашению")
-        }
-    }
-}
-
-@androidx.compose.runtime.Composable
-private fun RegistrationScreen(
-    onBack: () -> Unit,
-    onRegistered: (AccountProfile) -> Unit,
-    onRecover: ((String, String) -> AccountProfile?)?,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var nickname by rememberSaveable { mutableStateOf("") }
-    var inviteCode by rememberSaveable { mutableStateOf("") }
-    var serverUrl by rememberSaveable { mutableStateOf("http://127.0.0.1:3000") }
-    var message by rememberSaveable { mutableStateOf<String?>(null) }
-    var isRegistering by rememberSaveable { mutableStateOf(false) }
-
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
-        Text("Регистрация", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(20.dp))
-        OutlinedTextField(
-            value = serverUrl,
-            onValueChange = { serverUrl = it },
-            label = { Text("Адрес сервера") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = nickname,
-            onValueChange = { nickname = it },
-            label = { Text("Никнейм") },
-            prefix = { Text("@") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = inviteCode,
-            onValueChange = { inviteCode = it },
-            label = { Text("Код приглашения") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = {
-                isRegistering = true
-                message = null
-                scope.launch {
-                    try {
-                        val crypto = SignalCryptoBoundary(AndroidKeystoreSecretStore(context))
-                        val device = RegistrationApi(crypto).register(serverUrl, nickname, inviteCode)
-                        val profile = AccountProfile(serverUrl, nickname, device.accessToken, device.deviceId)
-                        AccountStore(context).save(profile)
-                        onRegistered(profile)
-                        message = "Устройство зарегистрировано: @${nickname.removePrefix("@")}"
-                    } catch (error: Exception) {
-                        message = error.message ?: "Не удалось зарегистрировать устройство"
-                    } finally {
-                        isRegistering = false
-                    }
-                }
-            },
-            enabled = !isRegistering && nickname.isNotBlank() && inviteCode.isNotBlank() &&
-                (serverUrl.startsWith("https://") || (BuildConfig.DEBUG && serverUrl.startsWith("http://"))),
-            modifier = Modifier.fillMaxWidth(),
+    MaterialTheme(colorScheme = hiddiColors, typography = hiddiTypography) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
         ) {
-            Text(if (isRegistering) "Создаём защищённое устройство…" else "Создать защищённое устройство")
+            if (account != null) {
+                ChatScreen(
+                    account!!,
+                    requestedPeer,
+                    resumeRevision,
+                    onPeerOpened,
+                    onLogout = {
+                        context.stopService(Intent(context, MessagingService::class.java))
+                        LocalSessionWiper(context).wipe()
+                        (context as? android.app.Activity)?.finishAndRemoveTask()
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                    },
+                )
+            } else if (showRegistration) {
+                RegistrationScreen(
+                    onBack = { showRegistration = false },
+                    onRegistered = { account = it },
+                    onRecover = if (hasLegacyToken) { server, nickname -> accountStore.recoverLegacy(server, nickname)?.also { account = it } } else null,
+                )
+            } else {
+                WelcomeScreen(onRegister = { showRegistration = true })
+            }
         }
-        onRecover?.let { recover ->
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    val recovered = recover(serverUrl, nickname)
-                    message = if (recovered == null) "Не удалось восстановить прежнее устройство" else "Устройство восстановлено"
-                },
-                enabled = nickname.isNotBlank() && (serverUrl.startsWith("https://") || (BuildConfig.DEBUG && serverUrl.startsWith("http://"))),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Подключить ранее зарегистрированное устройство") }
-        }
-        message?.let {
-            Spacer(Modifier.height(12.dp))
-            Text(it, color = MaterialTheme.colorScheme.error)
-        }
-        Spacer(Modifier.weight(1f))
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Назад") }
     }
 }

@@ -59,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -105,7 +106,6 @@ fun GroupConversationScreen(
     var showClearDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var selectedForActions by remember { mutableStateOf<GroupChatMessage?>(null) }
-    var selectedForDeletion by remember { mutableStateOf<GroupChatMessage?>(null) }
     var inviteNickname by remember { mutableStateOf("") }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(onImageSelected)
@@ -158,7 +158,12 @@ fun GroupConversationScreen(
             }
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(
+                    title,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Rounded.Lock,
@@ -171,6 +176,8 @@ fun GroupConversationScreen(
                         "OpenMLS · ${group.members.size} участника",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -510,66 +517,18 @@ fun GroupConversationScreen(
         )
     }
     selectedForActions?.let { message ->
-        AlertDialog(
-            onDismissRequest = { selectedForActions = null },
-            title = { Text("Действия с сообщением") },
-            text = {
-                Column {
-                    androidx.compose.material3.TextButton(
-                        onClick = {},
-                        enabled = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Редактировать — скоро", modifier = Modifier.fillMaxWidth())
-                    }
-                    androidx.compose.material3.TextButton(
-                        onClick = {
-                            selectedForActions = null
-                            selectedForDeletion = message
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            "Удалить…",
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
+        MessageActionDialog(
+            preview = message.text,
+            canDeleteForEveryone = message.outgoing,
+            onDeleteLocal = {
+                selectedForActions = null
+                onDeleteMessage(message, false)
             },
-            confirmButton = {
-                androidx.compose.material3.TextButton(onClick = { selectedForActions = null }) {
-                    Text("Отмена")
-                }
+            onDeleteEveryone = {
+                selectedForActions = null
+                onDeleteMessage(message, true)
             },
-        )
-    }
-    selectedForDeletion?.let { message ->
-        AlertDialog(
-            onDismissRequest = { selectedForDeletion = null },
-            title = { Text("Удалить сообщение?") },
-            text = {
-                Text(
-                    "Удаление у всех будет отправлено участникам внутри OpenMLS. " +
-                        "Уже сохранённые копии и скриншоты стереть невозможно.",
-                )
-            },
-            confirmButton = {
-                androidx.compose.material3.TextButton(
-                    onClick = {
-                        selectedForDeletion = null
-                        onDeleteMessage(message, true)
-                    },
-                ) { Text("У всех") }
-            },
-            dismissButton = {
-                androidx.compose.material3.TextButton(
-                    onClick = {
-                        selectedForDeletion = null
-                        onDeleteMessage(message, false)
-                    },
-                ) { Text("Только у меня") }
-            },
+            onDismiss = { selectedForActions = null },
         )
     }
 }
