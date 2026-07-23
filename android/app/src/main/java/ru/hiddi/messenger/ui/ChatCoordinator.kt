@@ -97,6 +97,7 @@ import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.SignalStateRepository
+import ru.hiddi.messenger.security.TrustedSafetyNumberStore
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
 import java.time.Instant
@@ -121,6 +122,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     val historyStore = remember { EncryptedChatHistory(context) }
     val attachmentStore = remember { EncryptedAttachmentStore(context) }
     val voiceRecorder = remember { InMemoryVoiceRecorder() }
+    val trustedSafetyNumbers = remember { TrustedSafetyNumberStore(context) }
     var history by remember { mutableStateOf(emptyList<ChatHistoryItem>()) }
     var peers by remember { mutableStateOf(historyStore.peers()) }
     var historyRevision by remember { mutableIntStateOf(0) }
@@ -129,6 +131,7 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
     var clearForBothSides by rememberSaveable { mutableStateOf(false) }
     var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
     var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
+    var safetyNumberTrusted by rememberSaveable { mutableStateOf(false) }
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
@@ -491,12 +494,14 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 onVerifyKey = {
                     val target = recipient ?: return@ConversationScreen
                     safetyNumber = null
+                    safetyNumberTrusted = false
                     showSafetyNumberDialog = true
                     scope.launch {
                         safetyNumber = runCatching { api.safetyNumber(profile, target) }.getOrElse {
                             status = it.message ?: "Не удалось получить ключ собеседника"
                             "Ошибка получения кода"
                         }
+                        safetyNumberTrusted = safetyNumber?.let { trustedSafetyNumbers.isTrusted(target, it) } == true
                     }
                 },
                 onSend = {
@@ -555,10 +560,18 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     Spacer(Modifier.height(16.dp))
                     Text(safetyNumber ?: "Получаем код…", style = MaterialTheme.typography.titleMedium, letterSpacing = 1.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("Если код изменился неожиданно, не отправляйте секретные данные до проверки.", style = MaterialTheme.typography.bodySmall)
+                    Text(if (safetyNumberTrusted) "✓ Этот ключ уже подтверждён на устройстве." else "Если код изменился неожиданно, не отправляйте секретные данные до проверки.", style = MaterialTheme.typography.bodySmall)
                 }
             },
-            confirmButton = { TextButton(onClick = { showSafetyNumberDialog = false }) { Text("Готово") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    safetyNumber?.takeUnless { it == "Ошибка получения кода" }?.let {
+                        trustedSafetyNumbers.trust(recipient!!, it)
+                        safetyNumberTrusted = true
+                    }
+                    showSafetyNumberDialog = false
+                }) { Text(if (safetyNumberTrusted) "Готово" else "Ключ совпадает") }
+            },
         )
     }
 }
