@@ -79,6 +79,85 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         ).getString("group_id")
     }
 
+    suspend fun groupDetails(profile: AccountProfile, groupId: ByteArray): GroupDetails =
+        withContext(Dispatchers.IO) {
+            val response = JSONObject(
+                request(
+                    "GET",
+                    "${profile.serverUrl}/v1/groups/${groupId.b64()}",
+                    null,
+                    profile.accessToken,
+                ),
+            )
+            GroupDetails(
+                groupId = response.getString("group_id").decode(),
+                ownerNickname = response.getString("owner_nickname"),
+                members = response.getJSONArray("members").let { members ->
+                    (0 until members.length()).map { index ->
+                        members.getJSONObject(index).let {
+                            GroupMember(it.getString("nickname"), it.getString("role"))
+                        }
+                    }
+                },
+            )
+        }
+
+    suspend fun addGroupMember(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        member: GroupMember,
+    ) = withContext(Dispatchers.IO) {
+        request(
+            "POST",
+            "${profile.serverUrl}/v1/groups/${groupId.b64()}/members",
+            JSONObject()
+                .put("nickname", member.nickname.trim().removePrefix("@").lowercase())
+                .put("role", member.role)
+                .toString(),
+            profile.accessToken,
+        )
+    }
+
+    suspend fun deleteGroup(profile: AccountProfile, groupId: ByteArray) =
+        withContext(Dispatchers.IO) {
+            request(
+                "DELETE",
+                "${profile.serverUrl}/v1/groups/${groupId.b64()}",
+                null,
+                profile.accessToken,
+            )
+        }
+
+    suspend fun pendingGroupDeletions(profile: AccountProfile): List<GroupDeletion> =
+        withContext(Dispatchers.IO) {
+            val response = JSONArray(
+                request(
+                    "GET",
+                    "${profile.serverUrl}/v1/groups/deletions",
+                    null,
+                    profile.accessToken,
+                ),
+            )
+            List(response.length()) { index ->
+                response.getJSONObject(index).let {
+                    GroupDeletion(
+                        deletionId = it.getString("deletion_id"),
+                        groupId = it.getString("group_id").decode(),
+                    )
+                }
+            }
+        }
+
+    suspend fun acknowledgeGroupDeletion(profile: AccountProfile, deletionId: String) =
+        withContext(Dispatchers.IO) {
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/groups/deletions/$deletionId",
+                null,
+                profile.accessToken,
+            )
+        }
+
     suspend fun sendGroupEvent(
         profile: AccountProfile,
         groupId: ByteArray,
@@ -242,6 +321,46 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         }
     }
 
+    suspend fun deleteMessageForEveryone(profile: AccountProfile, messageId: String) =
+        withContext(Dispatchers.IO) {
+            request(
+                "DELETE",
+                "${profile.serverUrl}/v1/messages/$messageId?for_everyone=true",
+                null,
+                profile.accessToken,
+            )
+        }
+
+    suspend fun pendingMessageDeletions(profile: AccountProfile): List<MessageDeletion> =
+        withContext(Dispatchers.IO) {
+            val response = JSONArray(
+                request(
+                    "GET",
+                    "${profile.serverUrl}/v1/messages/deletions",
+                    null,
+                    profile.accessToken,
+                ),
+            )
+            List(response.length()) { index ->
+                response.getJSONObject(index).let {
+                    MessageDeletion(
+                        deletionId = it.getString("deletion_id"),
+                        messageId = it.getString("message_id"),
+                    )
+                }
+            }
+        }
+
+    suspend fun acknowledgeMessageDeletion(profile: AccountProfile, deletionId: String) =
+        withContext(Dispatchers.IO) {
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/messages/deletions/$deletionId",
+                null,
+                profile.accessToken,
+            )
+        }
+
     suspend fun markPeerMessagesRead(profile: AccountProfile, peer: String) = withContext(Dispatchers.IO) {
         val normalized = peer.trim().removePrefix("@").lowercase()
         request("POST", "${profile.serverUrl}/v1/messages/read/$normalized", null, profile.accessToken)
@@ -291,7 +410,13 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                 }
                 repository.save(store.snapshot())
             request("POST", "${profile.serverUrl}/v1/messages/${item.getString("message_id")}", null, profile.accessToken)
-                output += DecryptedMessage(sender, plain.decodeToString(), item.getString("created_at"))
+                output += DecryptedMessage(
+                    messageId = item.getString("message_id"),
+                    senderNickname = sender,
+                    text = plain.decodeToString(),
+                    createdAt = item.getString("created_at"),
+                )
+                plain.fill(0)
             }
             output
         }
@@ -337,9 +462,21 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     }
 }
 
-data class DecryptedMessage(val senderNickname: String, val text: String, val createdAt: String)
+data class DecryptedMessage(
+    val messageId: String,
+    val senderNickname: String,
+    val text: String,
+    val createdAt: String,
+)
+data class MessageDeletion(val deletionId: String, val messageId: String)
 data class UserSearchResult(val nickname: String)
 data class GroupMember(val nickname: String, val role: String = "member")
+data class GroupDetails(
+    val groupId: ByteArray,
+    val ownerNickname: String,
+    val members: List<GroupMember>,
+)
+data class GroupDeletion(val deletionId: String, val groupId: ByteArray)
 data class GroupEvent(
     val eventId: String,
     val groupId: ByteArray,

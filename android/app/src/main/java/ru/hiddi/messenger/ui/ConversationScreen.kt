@@ -121,11 +121,14 @@ fun ConversationScreen(
     onVoicePermissionDenied: () -> Unit,
     onClearHistory: () -> Unit,
     onVerifyKey: () -> Unit,
+    onDeleteMessage: (ChatHistoryItem, Boolean) -> Unit,
     onSend: () -> Unit,
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
     var menuExpanded by remember { mutableStateOf(false) }
+    var selectedForActions by remember { mutableStateOf<ChatHistoryItem?>(null) }
+    var selectedForDeletion by remember { mutableStateOf<ChatHistoryItem?>(null) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(onImageSelected)
     }
@@ -226,7 +229,13 @@ fun ConversationScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
-                    items(history) { item -> MessageBubble(item, attachmentStore) }
+                    items(history) { item ->
+                        MessageBubble(
+                            item = item,
+                            attachmentStore = attachmentStore,
+                            onLongPress = { selectedForActions = it },
+                        )
+                    }
                 }
             }
         }
@@ -311,5 +320,70 @@ fun ConversationScreen(
                 }
             }
         }
+    }
+
+    selectedForActions?.let { item ->
+        AlertDialog(
+            onDismissRequest = { selectedForActions = null },
+            title = { Text("Действия с сообщением") },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Редактировать — скоро", modifier = Modifier.fillMaxWidth())
+                    }
+                    TextButton(
+                        onClick = {
+                            selectedForActions = null
+                            selectedForDeletion = item
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "Удалить…",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedForActions = null }) {
+                    Text("Отмена")
+                }
+            },
+        )
+    }
+
+    selectedForDeletion?.let { item ->
+        AlertDialog(
+            onDismissRequest = { selectedForDeletion = null },
+            title = { Text("Удалить сообщение?") },
+            text = {
+                Text(
+                    "Можно удалить его только с этого телефона или отправить собеседнику команду удаления. " +
+                        "Уже сохранённые копии и скриншоты стереть невозможно.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedForDeletion = null
+                        onDeleteMessage(item, true)
+                    },
+                ) { Text("У всех") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        selectedForDeletion = null
+                        onDeleteMessage(item, false)
+                    },
+                ) { Text("Только у меня") }
+            },
+        )
     }
 }

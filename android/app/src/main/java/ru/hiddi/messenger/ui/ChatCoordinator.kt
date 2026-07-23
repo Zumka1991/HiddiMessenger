@@ -580,6 +580,61 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                     groupDraft = ""
                     focusManager.clearFocus()
                 },
+                onInviteMember = { nickname ->
+                    if (groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = "Добавляем @$nickname и меняем MLS-эпоху…"
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.inviteMember(
+                                    profile,
+                                    selectedGroup.groupId,
+                                    nickname,
+                                )
+                            }
+                            refreshGroups()
+                            groupStatus = "@$nickname приглашён · ключи группы обновлены"
+                        } catch (error: Exception) {
+                            groupStatus = when {
+                                error.message?.contains("key package", ignoreCase = true) == true ->
+                                    "@$nickname ещё не подготовил устройство для групп"
+                                else -> error.message ?: "Не удалось пригласить участника"
+                            }
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
+                onClearHistory = {
+                    runCatching {
+                        groupCoordinator.clearLocalHistory(profile, selectedGroup.groupId)
+                    }.onSuccess {
+                        refreshGroups()
+                        groupStatus = "Локальная история группы очищена"
+                    }.onFailure {
+                        groupStatus = it.message ?: "Не удалось очистить историю"
+                    }
+                },
+                onDeleteGroup = {
+                    if (groupBusy) return@GroupConversationScreen
+                    groupBusy = true
+                    groupStatus = "Удаляем группу…"
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                groupCoordinator.deleteOwnedGroup(profile, selectedGroup.groupId)
+                            }
+                            selectedGroupId = null
+                            refreshGroups()
+                            status = "Группа удалена"
+                        } catch (error: Exception) {
+                            groupStatus = error.message ?: "Не удалось удалить группу"
+                        } finally {
+                            groupBusy = false
+                        }
+                    }
+                },
                 onSend = {
                     val text = groupDraft.trim()
                     if (text.isEmpty() || groupBusy) return@GroupConversationScreen
@@ -653,6 +708,40 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                             "Ошибка получения кода"
                         }
                         safetyNumberTrusted = safetyNumber?.let { trustedSafetyNumbers.isTrusted(target, it) } == true
+                    }
+                },
+                onDeleteMessage = { item, forEveryone ->
+                    val messageId = item.messageId
+                    if (messageId == null) {
+                        status = "У старого сообщения нет идентификатора удаления"
+                        return@ConversationScreen
+                    }
+                    scope.launch {
+                        try {
+                            if (forEveryone) {
+                                item.attachment?.let { attachment ->
+                                    listOfNotNull(attachment.preview, attachment).forEach { part ->
+                                        runCatching {
+                                            api.deleteAttachment(profile, part.attachmentId)
+                                        }
+                                    }
+                                }
+                                api.deleteMessageForEveryone(profile, messageId)
+                            }
+                            historyStore.deleteMessage(messageId).forEach { descriptor ->
+                                runCatching { attachmentStore.delete(descriptor.attachmentId) }
+                            }
+                            recipient?.let { history = historyStore.messagesWith(it) }
+                            peers = historyStore.peers()
+                            historyRevision++
+                            status = if (forEveryone) {
+                                "Сообщение удалено; команда отправлена собеседнику"
+                            } else {
+                                "Сообщение удалено только с этого устройства"
+                            }
+                        } catch (error: Exception) {
+                            status = error.message ?: "Не удалось удалить сообщение"
+                        }
                     }
                 },
                 onSend = {

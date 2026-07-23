@@ -14,6 +14,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -77,6 +78,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -104,12 +106,24 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @androidx.compose.runtime.Composable
-fun MessageBubble(item: ChatHistoryItem, attachmentStore: EncryptedAttachmentStore) {
+fun MessageBubble(
+    item: ChatHistoryItem,
+    attachmentStore: EncryptedAttachmentStore,
+    onLongPress: ((ChatHistoryItem) -> Unit)? = null,
+) {
     val isImage = item.attachment?.kind == EncryptedAttachmentStore.IMAGE_KIND
+    val longPressModifier = if (item.outgoing && item.messageId != null && onLongPress != null) {
+        Modifier.pointerInput(item.messageId) {
+            detectTapGestures(onLongPress = { onLongPress(item) })
+        }
+    } else {
+        Modifier
+    }
     Box(Modifier.fillMaxWidth()) {
         Surface(
             modifier = Modifier.align(if (item.outgoing) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = if (isImage) 340.dp else 320.dp),
+                .widthIn(max = if (isImage) 340.dp else 320.dp)
+                .then(longPressModifier),
             shape = RoundedCornerShape(
                 topStart = 20.dp,
                 topEnd = 20.dp,

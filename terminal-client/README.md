@@ -42,11 +42,15 @@ env JAVA_HOME=/opt/android-studio/jbr gradle installDist --no-daemon
 ```fish
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group publish
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group create --with nickname
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group invite --group GROUP_PREFIX --with another_nickname
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group list
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group send --message 'Привет группе'
 env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group inbox
+env JAVA_HOME=/opt/android-studio/jbr ./build/install/hiddi-terminal/bin/hiddi-terminal group delete --group GROUP_PREFIX
 ```
 
 64-байтный ключ шифрования OpenMLS SQLite хранится только внутри существующего
-Argon2id/AES-GCM vault. Сейчас сервер поддерживает одно устройство на ник;
-multi-device и изменение состава группы остаются следующим этапом.
+Argon2id/AES-GCM vault. Владелец уже может приглашать третьего и последующих
+участников через OpenMLS Add Commit/Welcome и удалять группу. Удаление
+участников с обязательной ротацией epoch и multi-device остаются следующим
+этапом.

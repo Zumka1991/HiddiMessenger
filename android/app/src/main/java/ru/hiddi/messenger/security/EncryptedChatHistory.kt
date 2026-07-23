@@ -82,6 +82,27 @@ class EncryptedChatHistory(context: Context) {
         if (changed) store.write(entries.toString().encodeToByteArray())
     }
 
+    fun deleteMessage(messageId: String): List<AttachmentDescriptor> = synchronized(historyLock) {
+        val entries = read()
+        val retained = JSONArray()
+        val attachments = mutableListOf<AttachmentDescriptor>()
+        for (index in 0 until entries.length()) {
+            val item = entries.getJSONObject(index)
+            if (item.optString("message_id") == messageId) {
+                item.optJSONObject("attachment")?.toAttachmentDescriptor()?.let { descriptor ->
+                    attachments += descriptor
+                    descriptor.preview?.let(attachments::add)
+                }
+            } else {
+                retained.put(item)
+            }
+        }
+        if (retained.length() != entries.length()) {
+            store.write(retained.toString().encodeToByteArray())
+        }
+        attachments.distinctBy { it.attachmentId }
+    }
+
     /** Removes this dialogue only from this device and returns ciphertext blobs safe to discard locally. */
     fun clearConversation(nickname: String): List<AttachmentDescriptor> = synchronized(historyLock) {
         val entries = read()

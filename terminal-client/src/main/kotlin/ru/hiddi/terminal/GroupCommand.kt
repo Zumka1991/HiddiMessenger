@@ -20,7 +20,9 @@ object GroupCommand {
         when (args.firstOrNull()) {
             "publish" -> withMls(args.drop(1)) { session -> publishKeyPackage(session) }
             "create" -> withMls(args.drop(1)) { session -> create(session, args.drop(1)) }
+            "invite" -> withMls(args.drop(1)) { session -> invite(session, args.drop(1)) }
             "send" -> withMls(args.drop(1)) { session -> send(session, args.drop(1)) }
+            "delete" -> withMls(args.drop(1)) { session -> delete(session, args.drop(1)) }
             "inbox" -> withMls(args.drop(1)) { session -> receive(session, printEmpty = true) }
             "watch" -> withMls(args.drop(1)) { session -> watch(session) }
             "sync" -> withMls(args.drop(1)) { session ->
@@ -72,6 +74,7 @@ object GroupCommand {
             memberAdded = true
             val group = JSONObject()
                 .put("group_id", groupId.base64Url())
+                .put("owner_nickname", session.nickname)
                 .put("members", JSONArray(listOf(session.nickname, peer)))
                 .put("messages", JSONArray())
                 .put("registered", false)
@@ -109,8 +112,70 @@ object GroupCommand {
         println("Групповое сообщение зашифровано и отправлено.")
     }
 
+    private fun invite(session: MlsSession, args: List<String>) {
+        val group = resolveGroup(session, args.option("--group"))
+        require(group.optString("owner_nickname", session.nickname) == session.nickname) {
+            "Приглашать участников может только создатель группы"
+        }
+        val nickname = args.option("--with")?.normalizeNickname()
+            ?: error("Укажите участника: group invite --with nickname")
+        val currentMembers = group.getJSONArray("members").strings()
+        require(nickname !in currentMembers) { "@$nickname уже состоит в группе" }
+        val encodedNickname = URLEncoder.encode(nickname, Charsets.UTF_8)
+        val packageResponse = request(
+            session.client,
+            "GET",
+            "${session.server}/v1/users/$encodedNickname/mls-key-package",
+            null,
+            session.token,
+        ) as JSONObject
+        val groupId = group.getString("group_id").base64UrlDecode()
+        val output = requireNotNull(
+            NativeMlsBridge.addMember(
+                groupId,
+                packageResponse.getString("key_package").base64UrlDecode(),
+            ),
+        ) { "OpenMLS отклонил KeyPackage @$nickname" }
+        val existingRecipients = currentMembers.filterNot { it == session.nickname }
+        if (existingRecipients.isNotEmpty()) {
+            enqueueEvent(session, groupId, KIND_COMMIT, existingRecipients, output.commitEnvelope)
+        }
+        enqueueEvent(session, groupId, KIND_WELCOME, listOf(nickname), output.welcomeEnvelope)
+        enqueueMember(session, groupId, nickname)
+        group.put("members", JSONArray(currentMembers + nickname))
+        session.save()
+        syncPending(session)
+        println("@$nickname приглашён; Commit и Welcome отправлены.")
+    }
+
+    private fun delete(session: MlsSession, args: List<String>) {
+        val group = resolveGroup(session, args.option("--group"))
+        require(group.optString("owner_nickname", session.nickname) == session.nickname) {
+            "Удалить группу может только создатель"
+        }
+        val groupId = group.getString("group_id").base64UrlDecode()
+        request(
+            session.client,
+            "DELETE",
+            "${session.server}/v1/groups/${group.getString("group_id")}",
+            null,
+            session.token,
+        )
+        require(NativeMlsBridge.deleteLocalGroup(groupId)) {
+            "Сервер удалил группу, но локальное MLS-состояние не очистилось"
+        }
+        for (index in session.groups.length() - 1 downTo 0) {
+            if (session.groups.getJSONObject(index).getString("group_id") == group.getString("group_id")) {
+                session.groups.remove(index)
+            }
+        }
+        session.save()
+        println("Группа ${shortId(groupId)} удалена.")
+    }
+
     private fun receive(session: MlsSession, printEmpty: Boolean): Int {
         syncPending(session)
+        processGroupDeletions(session)
         val events = request(
             session.client,
             "GET",
@@ -131,11 +196,27 @@ object GroupCommand {
                         "OpenMLS отклонил Welcome от @$sender"
                     }
                     require(joinedId.contentEquals(groupId)) { "Group ID в Welcome не совпадает с маршрутом" }
-                    upsertGroup(session, groupId, listOf(session.nickname, sender))
+                    val details = fetchGroupDetails(session, groupId)
+                    upsertGroup(
+                        session,
+                        groupId,
+                        details.members,
+                        details.ownerNickname,
+                    )
                     println("Принято защищённое приглашение в группу от @$sender")
                 }
-                KIND_COMMIT -> require(NativeMlsBridge.processCommit(groupId, envelope)) {
-                    "OpenMLS отклонил Commit от @$sender"
+                KIND_COMMIT -> {
+                    require(NativeMlsBridge.processCommit(groupId, envelope)) {
+                        "OpenMLS отклонил Commit от @$sender"
+                    }
+                    val details = fetchGroupDetails(session, groupId)
+                    upsertGroup(
+                        session,
+                        groupId,
+                        details.members,
+                        details.ownerNickname,
+                    )
+                    println("Состав группы ${shortId(groupId)} обновлён")
                 }
                 KIND_APPLICATION -> {
                     val plaintext = requireNotNull(
@@ -233,6 +314,20 @@ object GroupCommand {
                 session.save()
             }
         }
+        while (session.pendingMembers.length() > 0) {
+            val member = session.pendingMembers.getJSONObject(0)
+            request(
+                session.client,
+                "POST",
+                "${session.server}/v1/groups/${member.getString("group_id")}/members",
+                JSONObject()
+                    .put("nickname", member.getString("nickname"))
+                    .put("role", member.getString("role")),
+                session.token,
+            )
+            session.pendingMembers.remove(0)
+            session.save()
+        }
         val pending = session.pendingEvents
         while (pending.length() > 0) {
             val event = pending.getJSONObject(0)
@@ -277,18 +372,89 @@ object GroupCommand {
         }
     }
 
-    private fun upsertGroup(session: MlsSession, groupId: ByteArray, members: List<String>): JSONObject {
+    private fun enqueueMember(
+        session: MlsSession,
+        groupId: ByteArray,
+        nickname: String,
+    ) {
+        val id = "${groupId.base64Url()}:$nickname:member"
+        if ((0 until session.pendingMembers.length()).none {
+                session.pendingMembers.getJSONObject(it).getString("id") == id
+            }
+        ) {
+            session.pendingMembers.put(
+                JSONObject()
+                    .put("id", id)
+                    .put("group_id", groupId.base64Url())
+                    .put("nickname", nickname)
+                    .put("role", "member"),
+            )
+        }
+    }
+
+    private fun upsertGroup(
+        session: MlsSession,
+        groupId: ByteArray,
+        members: List<String>,
+        ownerNickname: String,
+    ): JSONObject {
         findGroup(session, groupId)?.let { existing ->
-            val combined = (existing.getJSONArray("members").strings() + members).distinct()
-            existing.put("members", JSONArray(combined))
+            existing.put("owner_nickname", ownerNickname)
+            existing.put("members", JSONArray(members.distinct()))
             return existing
         }
         return JSONObject()
             .put("group_id", groupId.base64Url())
+            .put("owner_nickname", ownerNickname)
             .put("members", JSONArray(members.distinct()))
             .put("messages", JSONArray())
             .put("registered", true)
             .also(session.groups::put)
+    }
+
+    private fun fetchGroupDetails(session: MlsSession, groupId: ByteArray): TerminalGroupDetails {
+        val response = request(
+            session.client,
+            "GET",
+            "${session.server}/v1/groups/${groupId.base64Url()}",
+            null,
+            session.token,
+        ) as JSONObject
+        return TerminalGroupDetails(
+            ownerNickname = response.getString("owner_nickname"),
+            members = response.getJSONArray("members").let { members ->
+                (0 until members.length()).map { members.getJSONObject(it).getString("nickname") }
+            },
+        )
+    }
+
+    private fun processGroupDeletions(session: MlsSession) {
+        val deletions = request(
+            session.client,
+            "GET",
+            "${session.server}/v1/groups/deletions",
+            null,
+            session.token,
+        ) as JSONArray
+        for (index in 0 until deletions.length()) {
+            val deletion = deletions.getJSONObject(index)
+            val groupId = deletion.getString("group_id").base64UrlDecode()
+            NativeMlsBridge.deleteLocalGroup(groupId)
+            for (groupIndex in session.groups.length() - 1 downTo 0) {
+                if (session.groups.getJSONObject(groupIndex).getString("group_id") == deletion.getString("group_id")) {
+                    session.groups.remove(groupIndex)
+                }
+            }
+            session.save()
+            request(
+                session.client,
+                "POST",
+                "${session.server}/v1/groups/deletions/${deletion.getString("deletion_id")}",
+                null,
+                session.token,
+            )
+            println("Группа ${shortId(groupId)} удалена её создателем")
+        }
     }
 
     private fun resolveGroup(session: MlsSession, requested: String?): JSONObject {
@@ -324,6 +490,7 @@ object GroupCommand {
             }
             if (!state.has("mls_groups")) state.put("mls_groups", JSONArray())
             if (!state.has("mls_pending_events")) state.put("mls_pending_events", JSONArray())
+            if (!state.has("mls_pending_members")) state.put("mls_pending_members", JSONArray())
             vault.write(state.toString().encodeToByteArray(), passphrase)
             val storageKey = state.getString("mls_storage_key").base64UrlDecode()
             try {
@@ -350,6 +517,7 @@ object GroupCommand {
         val nickname: String get() = state.getString("nickname")
         val groups: JSONArray get() = state.getJSONArray("mls_groups")
         val pendingEvents: JSONArray get() = state.getJSONArray("mls_pending_events")
+        val pendingMembers: JSONArray get() = state.getJSONArray("mls_pending_members")
         fun save() = vault.write(state.toString().encodeToByteArray(), passphrase)
     }
 
@@ -360,7 +528,12 @@ object GroupCommand {
         indexOf(name).takeIf { it >= 0 }?.let { getOrNull(it + 1) }
 
     private fun usage(): Nothing = error(
-        "Использование: group publish|create --with NICK|list|send [--group ID] --message TEXT|inbox|watch|sync",
+        "Использование: group publish|create --with NICK|invite --with NICK|list|send|inbox|watch|sync|delete",
+    )
+
+    private data class TerminalGroupDetails(
+        val ownerNickname: String,
+        val members: List<String>,
     )
 
     private const val KIND_WELCOME = 1

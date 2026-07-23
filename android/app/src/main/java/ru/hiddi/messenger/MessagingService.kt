@@ -79,6 +79,13 @@ class MessagingService : Service() {
 
         while (serviceScope.isActive) {
             try {
+                api.pendingMessageDeletions(profile).forEach { deletion ->
+                    history.deleteMessage(deletion.messageId).forEach { descriptor ->
+                        runCatching { attachments.delete(descriptor.attachmentId) }
+                    }
+                    api.acknowledgeMessageDeletion(profile, deletion.deletionId)
+                    sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
+                }
                 api.pendingConversationDeletions(profile).forEach { peer ->
                     history.clearConversation(peer).forEach { descriptor ->
                         runCatching { attachments.delete(descriptor.attachmentId) }
@@ -103,6 +110,7 @@ class MessagingService : Service() {
                                 time = message.createdAt,
                                 unread = true,
                                 attachment = descriptor,
+                                messageId = message.messageId,
                             ),
                         )
                         descriptor?.let {

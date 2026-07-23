@@ -14,7 +14,11 @@ class EncryptedGroupChatStore(context: Context) {
         keyAlias = "ru.hiddi.messenger.group-chats.v1",
     )
 
-    fun upsertGroup(groupId: ByteArray, members: List<String>) = synchronized(lock) {
+    fun upsertGroup(
+        groupId: ByteArray,
+        members: List<String>,
+        ownerNickname: String,
+    ) = synchronized(lock) {
         val root = read()
         val id = groupId.b64()
         val groups = root.getJSONArray("groups")
@@ -25,10 +29,14 @@ class EncryptedGroupChatStore(context: Context) {
             groups.put(
                 JSONObject()
                     .put("group_id", id)
+                    .put("owner_nickname", ownerNickname)
                     .put("members", JSONArray(members.distinct()))
                     .put("messages", JSONArray()),
             )
         } else {
+            if (existing.optString("owner_nickname").isBlank()) {
+                existing.put("owner_nickname", ownerNickname)
+            }
             existing.put("members", JSONArray((existing.members() + members).distinct()))
         }
         write(root)
@@ -40,6 +48,9 @@ class EncryptedGroupChatStore(context: Context) {
             groups.getJSONObject(index).let { group ->
                 LocalGroupChat(
                     groupId = group.getString("group_id").decode(),
+                    ownerNickname = group.optString("owner_nickname")
+                        .takeIf(String::isNotBlank)
+                        ?: group.members().first(),
                     members = group.members(),
                     messages = group.getJSONArray("messages").messages(),
                 )
@@ -83,6 +94,38 @@ class EncryptedGroupChatStore(context: Context) {
         write(root)
     }
 
+    fun clearHistory(groupId: ByteArray) = synchronized(lock) {
+        val root = read()
+        val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
+        group.put("messages", JSONArray())
+        write(root)
+    }
+
+    fun replaceMembers(
+        groupId: ByteArray,
+        members: List<String>,
+        ownerNickname: String,
+    ) = synchronized(lock) {
+        val root = read()
+        val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
+        group.put("owner_nickname", ownerNickname)
+        group.put("members", JSONArray(members.distinct()))
+        write(root)
+    }
+
+    fun removeGroup(groupId: ByteArray) = synchronized(lock) {
+        val root = read()
+        val groups = root.getJSONArray("groups")
+        val retained = JSONArray()
+        val id = groupId.b64()
+        for (index in 0 until groups.length()) {
+            val group = groups.getJSONObject(index)
+            if (group.getString("group_id") != id) retained.put(group)
+        }
+        root.put("groups", retained)
+        write(root)
+    }
+
     private fun read(): JSONObject = store.read()?.decodeToString()?.let(::JSONObject)
         ?: JSONObject().put("groups", JSONArray())
 
@@ -122,6 +165,7 @@ class EncryptedGroupChatStore(context: Context) {
 
 data class LocalGroupChat(
     val groupId: ByteArray,
+    val ownerNickname: String,
     val members: List<String>,
     val messages: List<GroupChatMessage>,
 )

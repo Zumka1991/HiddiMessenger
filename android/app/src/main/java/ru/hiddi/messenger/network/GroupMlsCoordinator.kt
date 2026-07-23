@@ -18,6 +18,7 @@ class GroupMlsCoordinator(
     private val appContext = context.applicationContext
     private val accountStore = AccountStore(appContext)
     private val registrationOutbox = GroupRegistrationOutbox(appContext, api)
+    private val memberOutbox = GroupMemberOutbox(appContext, api)
     private val eventOutbox = GroupEventOutbox(appContext, api)
     private val groupStore = EncryptedGroupChatStore(appContext)
 
@@ -30,9 +31,12 @@ class GroupMlsCoordinator(
 
     suspend fun synchronize(profile: AccountProfile): List<ByteArray> {
         val current = ensureDeviceId(profile)
+        val deletedGroups = processGroupDeletions(current)
         registrationOutbox.retry(current)
+        memberOutbox.retry(current)
         eventOutbox.retry(current)
-        return processPendingEvents(current)
+        return (deletedGroups + processPendingEvents(current))
+            .distinctBy { it.contentHashCode() }
     }
 
     suspend fun createTwoPartyGroup(profile: AccountProfile, invitedNickname: String): ByteArray {
@@ -54,7 +58,11 @@ class GroupMlsCoordinator(
                 listOf(invitedNickname),
                 output.welcomeEnvelope,
             )
-            groupStore.upsertGroup(groupId, listOf(current.nickname, invitedNickname))
+            groupStore.upsertGroup(
+                groupId,
+                listOf(current.nickname, invitedNickname),
+                ownerNickname = current.nickname,
+            )
             registrationOutbox.register(
                 current,
                 groupId,
@@ -91,13 +99,24 @@ class GroupMlsCoordinator(
                     require(groupId.contentEquals(event.groupId)) {
                         "Server group id не совпадает с MLS Welcome"
                     }
-                    groupStore.upsertGroup(groupId, listOf(profile.nickname, event.senderNickname))
+                    val details = api.groupDetails(profile, groupId)
+                    groupStore.upsertGroup(
+                        groupId,
+                        details.members.map(GroupMember::nickname),
+                        ownerNickname = details.ownerNickname,
+                    )
                     changedGroups += groupId
                 }
                 KIND_COMMIT -> {
                     require(NativeMlsBridge.processCommit(event.groupId, event.envelope)) {
                         "OpenMLS отклонил Commit"
                     }
+                    val details = api.groupDetails(profile, event.groupId)
+                    groupStore.replaceMembers(
+                        event.groupId,
+                        details.members.map(GroupMember::nickname),
+                        details.ownerNickname,
+                    )
                     changedGroups += event.groupId
                 }
                 KIND_APPLICATION -> {
@@ -135,6 +154,84 @@ class GroupMlsCoordinator(
     }
 
     fun groups(): List<LocalGroupChat> = groupStore.groups()
+
+    suspend fun inviteMember(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        nickname: String,
+    ) {
+        val current = ensureDeviceId(profile)
+        val normalized = nickname.trim().removePrefix("@").lowercase()
+        val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
+            ?: error("Неизвестная локальная MLS-группа")
+        require(group.ownerNickname == current.nickname) {
+            "Приглашать участников пока может только создатель"
+        }
+        require(normalized !in group.members) { "@$normalized уже состоит в группе" }
+        val keyPackage = api.takeMlsKeyPackage(current, normalized)
+        val output = requireNotNull(NativeMlsBridge.addMember(groupId, keyPackage)) {
+            "OpenMLS отклонил KeyPackage приглашённого"
+        }
+        val existingRecipients = group.members.filterNot { it == current.nickname }
+        if (existingRecipients.isNotEmpty()) {
+            eventOutbox.enqueue(
+                groupId,
+                KIND_COMMIT,
+                existingRecipients,
+                output.commitEnvelope,
+            )
+        }
+        eventOutbox.enqueue(
+            groupId,
+            KIND_WELCOME,
+            listOf(normalized),
+            output.welcomeEnvelope,
+        )
+        groupStore.upsertGroup(
+            groupId,
+            group.members + normalized,
+            ownerNickname = group.ownerNickname,
+        )
+        memberOutbox.register(current, groupId, GroupMember(normalized))
+        eventOutbox.retry(current)
+        val details = api.groupDetails(current, groupId)
+        groupStore.replaceMembers(
+            groupId,
+            details.members.map(GroupMember::nickname),
+            details.ownerNickname,
+        )
+    }
+
+    fun clearLocalHistory(profile: AccountProfile, groupId: ByteArray) {
+        val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
+            ?: error("Неизвестная локальная MLS-группа")
+        require(group.ownerNickname == profile.nickname) {
+            "Очищать историю группы может только создатель"
+        }
+        groupStore.clearHistory(groupId)
+    }
+
+    suspend fun deleteOwnedGroup(profile: AccountProfile, groupId: ByteArray) {
+        val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
+            ?: error("Неизвестная локальная MLS-группа")
+        require(group.ownerNickname == profile.nickname) {
+            "Удалить группу может только создатель"
+        }
+        api.deleteGroup(profile, groupId)
+        NativeMlsBridge.deleteLocalGroup(groupId)
+        groupStore.removeGroup(groupId)
+    }
+
+    private suspend fun processGroupDeletions(profile: AccountProfile): List<ByteArray> {
+        val deleted = mutableListOf<ByteArray>()
+        api.pendingGroupDeletions(profile).forEach { deletion ->
+            NativeMlsBridge.deleteLocalGroup(deletion.groupId)
+            groupStore.removeGroup(deletion.groupId)
+            api.acknowledgeGroupDeletion(profile, deletion.deletionId)
+            deleted += deletion.groupId
+        }
+        return deleted
+    }
 
     private suspend fun ensureDeviceId(profile: AccountProfile): AccountProfile {
         profile.deviceId?.let { return profile }

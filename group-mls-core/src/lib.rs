@@ -620,6 +620,7 @@ mod tests {
         storage::tests::configure_test_storage_key();
         let alice_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
         let bob_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+        let charlie_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
 
         let group_id = alice_provider.create_group(b"alice-device").unwrap();
         let bob_key_package = bob_provider.create_key_package(b"bob-device").unwrap();
@@ -647,6 +648,36 @@ mod tests {
                 .process_application_message(&group_id, &reply)
                 .unwrap(),
             b"welcome to the group"
+        );
+        let charlie_key_package = charlie_provider
+            .create_key_package(b"charlie-device")
+            .unwrap();
+        let add_charlie = alice_provider
+            .add_member(&group_id, &charlie_key_package)
+            .unwrap();
+        bob_provider
+            .process_commit(&group_id, &add_charlie.commit)
+            .unwrap();
+        assert_eq!(
+            charlie_provider
+                .join_from_welcome(&add_charlie.welcome)
+                .unwrap(),
+            group_id
+        );
+        let three_party_message = alice_provider
+            .create_application_message(&group_id, b"hello three-member MLS")
+            .unwrap();
+        assert_eq!(
+            bob_provider
+                .process_application_message(&group_id, &three_party_message)
+                .unwrap(),
+            b"hello three-member MLS"
+        );
+        assert_eq!(
+            charlie_provider
+                .process_application_message(&group_id, &three_party_message)
+                .unwrap(),
+            b"hello three-member MLS"
         );
         assert!(
             MlsGroup::load(alice_provider.storage(), &GroupId::from_slice(&group_id))
