@@ -33,4 +33,5 @@ cargo run
 секретов и поместите сервер за reverse-proxy с HTTPS.
 
 Подробности API: [`docs/api.md`](docs/api.md). Проектные решения и границы
-безопасности: [`docs/architecture.md`](docs/architecture.md).
+безопасности: [`docs/architecture.md`](docs/architecture.md). План группового
+MLS-шифрования: [`docs/groups-mls.md`](docs/groups-mls.md).
