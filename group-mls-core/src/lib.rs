@@ -274,4 +274,67 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[test]
+    fn encrypted_sqlite_profiles_join_through_welcome() {
+        storage::tests::configure_test_storage_key();
+        let alice_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+        let bob_provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
+        let (alice_credential, alice_signer) = credential(b"alice-device", &alice_provider);
+        let (bob_credential, bob_signer) = credential(b"bob-device", &bob_provider);
+        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+        let bob_key_package = KeyPackage::builder()
+            .build(ciphersuite, &bob_provider, &bob_signer, bob_credential)
+            .unwrap();
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(ciphersuite)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let mut alice_group =
+            MlsGroup::new(&alice_provider, &alice_signer, &config, alice_credential).unwrap();
+        let (_commit, welcome, _) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice_signer,
+                core::slice::from_ref(bob_key_package.key_package()),
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+        let welcome = MlsMessageIn::tls_deserialize_exact(welcome.to_bytes().unwrap()).unwrap();
+        let welcome = match welcome.extract() {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => panic!("expected MLS Welcome"),
+        };
+        let staged = StagedWelcome::new_from_welcome(
+            &bob_provider,
+            &MlsGroupJoinConfig::builder()
+                .use_ratchet_tree_extension(true)
+                .build(),
+            welcome,
+            None,
+        )
+        .unwrap();
+        let bob_group = staged.into_group(&bob_provider).unwrap();
+        let bob_group_id = bob_group.group_id().clone();
+        drop(bob_group);
+        let mut bob_group = MlsGroup::load(bob_provider.storage(), &bob_group_id)
+            .unwrap()
+            .expect("Welcome join must persist encrypted SQLite state");
+
+        let application = alice_group
+            .create_message(&alice_provider, &alice_signer, b"encrypted family message")
+            .unwrap();
+        let incoming = MlsMessageIn::tls_deserialize_exact(application.to_bytes().unwrap())
+            .unwrap()
+            .try_into_protocol_message()
+            .unwrap();
+        let processed = bob_group.process_message(&bob_provider, incoming).unwrap();
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(message) => {
+                assert_eq!(message.into_bytes(), b"encrypted family message");
+            }
+            _ => panic!("expected MLS application message"),
+        }
+    }
 }

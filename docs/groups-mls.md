@@ -45,6 +45,11 @@ credential зарегистрированного `device_id`; этот иден
 названием группы. Операция намеренно не имеет Android UI и не отправляет данных:
 она станет пользовательской только вместе с server transport для Commit/Welcome.
 
+Отдельный тест проверяет полный криптографический путь на двух независимых
+зашифрованных SQLite-профилях: Alice создаёт Commit и Welcome для Bob, Bob
+присоединяется, перезапускает объект группы из storage и расшифровывает
+application message. Это ещё тест core, а не сетевой endpoint.
+
 ## Нативная сборка Android
 
 Для разработки bridge нужен Android NDK и Rust target `aarch64-linux-android`.
