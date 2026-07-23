@@ -153,6 +153,16 @@ struct SendGroupEventResponse {
     event_ids: Vec<Uuid>,
 }
 
+#[derive(Deserialize)]
+struct UploadMlsKeyPackageRequest {
+    key_package: String,
+}
+#[derive(Serialize)]
+struct MlsKeyPackageResponse {
+    nickname: String,
+    key_package: String,
+}
+
 #[derive(Serialize)]
 struct MessageResponse {
     message_id: Uuid,
@@ -304,6 +314,11 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/users", get(search_users))
         .route("/v1/users/{nickname}", get(find_user))
         .route("/v1/groups", post(create_group))
+        .route("/v1/groups/key-package", put(upload_mls_key_package))
+        .route(
+            "/v1/users/{nickname}/mls-key-package",
+            get(take_mls_key_package),
+        )
         .route("/v1/groups/{group_id}/events", post(send_group_event))
         .route("/v1/messages", post(send_message).get(inbox))
         .route("/v1/messages/wait", get(wait_for_message))
@@ -897,6 +912,68 @@ async fn create_group(
     ))
 }
 
+async fn upload_mls_key_package(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UploadMlsKeyPackageRequest>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    if request.key_package.len() < 4
+        || request.key_package.len() > 65_536
+        || URL_SAFE_NO_PAD.decode(&request.key_package).is_err()
+    {
+        return Err(Error(StatusCode::BAD_REQUEST, "invalid MLS key package"));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute("INSERT INTO mls_key_packages (device_id, key_package) VALUES (?1, ?2) ON CONFLICT(device_id) DO UPDATE SET key_package = excluded.key_package, created_at = CURRENT_TIMESTAMP", params![account.device_id, request.key_package])
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store MLS key package"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn take_mls_key_package(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<Json<MlsKeyPackageResponse>, Error> {
+    let _requester = authenticate(&state, &headers)?;
+    let nickname =
+        normalize_nickname(&nickname).ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let (device_id, key_package): (String, String) = transaction.query_row(
+        "SELECT devices.id, mls_key_packages.key_package FROM accounts JOIN devices ON devices.account_id = accounts.id JOIN mls_key_packages ON mls_key_packages.device_id = devices.id WHERE accounts.nickname = ?1 ORDER BY mls_key_packages.created_at ASC LIMIT 1", params![nickname], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "MLS key package not found"), _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load MLS key package") })?;
+    transaction
+        .execute(
+            "DELETE FROM mls_key_packages WHERE device_id = ?1",
+            params![device_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not consume MLS key package",
+            )
+        })?;
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not consume MLS key package",
+        )
+    })?;
+    Ok(Json(MlsKeyPackageResponse {
+        nickname,
+        key_package,
+    }))
+}
+
 /// Stores versioned opaque MLS bytes for selected group members. The `kind`
 /// byte is a server-side authorization hint only; OpenMLS validates all bytes.
 async fn send_group_event(
@@ -1443,6 +1520,11 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
             envelope TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             delivered_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS mls_key_packages (
+            device_id TEXT PRIMARY KEY NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            key_package TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS attachments (
             id TEXT PRIMARY KEY NOT NULL,
