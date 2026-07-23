@@ -149,7 +149,7 @@ pub extern "system" fn Java_ru_hiddi_messenger_security_NativeMlsBridge_nativeIn
 mod tests {
     use super::*;
     use openmls::prelude::{
-        BasicCredential, Ciphersuite, CredentialWithKey, KeyPackage, MlsGroup,
+        BasicCredential, Ciphersuite, CredentialWithKey, GroupId, KeyPackage, MlsGroup,
         MlsGroupCreateConfig, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
         ProcessedMessageContent, StagedWelcome, tls_codec::Deserialize,
     };
@@ -266,14 +266,7 @@ mod tests {
     fn encrypted_sqlite_provider_restores_a_group() {
         storage::tests::configure_test_storage_key();
         let provider = storage::EncryptedSqliteMlsProvider::open_in_memory().unwrap();
-        let (credential, signer) = credential(b"family", &provider);
-        let config = MlsGroupCreateConfig::builder()
-            .ciphersuite(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
-            .use_ratchet_tree_extension(true)
-            .build();
-        let group = MlsGroup::new(&provider, &signer, &config, credential).unwrap();
-        let group_id = group.group_id().clone();
-        drop(group);
+        let group_id = GroupId::from_slice(&provider.create_group(b"family-device").unwrap());
 
         assert!(
             MlsGroup::load(provider.storage(), &group_id)

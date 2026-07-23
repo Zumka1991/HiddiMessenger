@@ -80,6 +80,8 @@
   AES-256-SIV шифрованием каждой записи и тестом восстановления группы.
 * [x] Android Keystore → JNI: 64-байтный ключ MLS storage создаётся локально,
   зашифрованно хранится вне backup и передаётся Rust только в память процесса.
+* [x] Локальное создание и восстановление одноучастниковой MLS-группы в
+  persistent provider; без UI и сетевой отправки до Commit/Welcome transport.
 * [ ] Rust bridge OpenMLS для Android: настоящее MLS state, Welcome и Commit round-trip.
 * [ ] Группы и роли администратора, MLS Commit/Welcome и ротация epoch.
 * [ ] Кросс-платформенные тесты MLS и отдельный криптографический review.

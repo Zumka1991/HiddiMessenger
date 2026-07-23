@@ -11,6 +11,10 @@ use aes_siv::{
     Aes256SivAead, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
+use openmls::prelude::{
+    BasicCredential, Ciphersuite, CredentialWithKey, MlsGroup, MlsGroupCreateConfig,
+};
+use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
 use openmls_sqlite_storage::{Codec, Connection, SqliteStorageProvider};
 use openmls_traits::OpenMlsProvider;
@@ -46,6 +50,8 @@ pub enum StorageError {
     Sqlite(String),
     #[error("MLS SQLite migration failed: {0}")]
     Migration(String),
+    #[error("OpenMLS operation failed: {0}")]
+    OpenMls(String),
 }
 
 /// Installs the per-profile key unwrapped by Android Keystore (or desktop's
@@ -74,6 +80,19 @@ pub fn initialize_persistent_provider(path: impl AsRef<Path>) -> Result<(), Stor
     let provider = Mutex::new(EncryptedSqliteMlsProvider::open(path)?);
     let _ = PERSISTENT_PROVIDER.set(provider);
     Ok(())
+}
+
+/// Creates a local group in the already initialized process-local provider.
+/// The caller must transmit resulting MLS commits/welcomes separately; no
+/// unencrypted group data is accepted or sent here.
+pub fn create_local_group(device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let provider = PERSISTENT_PROVIDER
+        .get()
+        .ok_or_else(|| StorageError::OpenMls("MLS provider is not initialized".to_owned()))?;
+    let provider = provider
+        .lock()
+        .map_err(|_| StorageError::OpenMls("MLS provider lock is poisoned".to_owned()))?;
+    provider.create_group(device_identity)
 }
 
 /// Codec used by OpenMLS' upstream SQLite provider. Query keys must remain
@@ -153,6 +172,33 @@ impl EncryptedSqliteMlsProvider {
             crypto: RustCrypto::default(),
             storage,
         })
+    }
+
+    /// Creates a locally persisted one-member MLS group for the registered
+    /// device. This method does not send members or messages to the server.
+    pub fn create_group(&self, device_identity: &[u8]) -> Result<Vec<u8>, StorageError> {
+        if device_identity.is_empty() || device_identity.len() > 256 {
+            return Err(StorageError::OpenMls(
+                "invalid MLS device identity".to_owned(),
+            ));
+        }
+        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+        let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        signer
+            .store(self.storage())
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(device_identity.to_vec()).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(ciphersuite)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group = MlsGroup::new(self, &signer, &config, credential)
+            .map_err(|error| StorageError::OpenMls(error.to_string()))?;
+        Ok(group.group_id().as_slice().to_vec())
     }
 
     #[cfg(test)]
