@@ -1,10 +1,12 @@
 mod attachment_storage;
 
 use std::{
+    collections::HashMap,
     env,
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -32,6 +34,38 @@ struct AppState {
     bootstrap_secret: Arc<str>,
     message_notify: Arc<Notify>,
     attachment_backend: AttachmentStorageBackend,
+    rate_limiter: Arc<RateLimiter>,
+}
+
+struct RateLimiter {
+    entries: Mutex<HashMap<String, RateLimitWindow>>,
+}
+
+struct RateLimitWindow {
+    started: Instant,
+    count: u32,
+}
+
+impl RateLimiter {
+    fn check(&self, key: impl Into<String>, limit: u32, window: Duration) -> Result<(), Error> {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "rate limiter unavailable",
+            )
+        })?;
+        entries.retain(|_, entry| now.duration_since(entry.started) < window);
+        let entry = entries.entry(key.into()).or_insert(RateLimitWindow {
+            started: now,
+            count: 0,
+        });
+        if entry.count >= limit {
+            return Err(Error(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded"));
+        }
+        entry.count += 1;
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -210,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_secret: bootstrap_secret.into(),
         message_notify: Arc::new(Notify::new()),
         attachment_backend,
+        rate_limiter: Arc::new(RateLimiter {
+            entries: Mutex::new(HashMap::new()),
+        }),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -493,6 +530,9 @@ async fn create_invite(
     if !authorized(&headers, &state.bootstrap_secret) {
         return Err(Error(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
+    state
+        .rate_limiter
+        .check("invite", 10, Duration::from_secs(60))?;
     let code = random_token(32);
     let hash = hash(&code);
     let db = state
@@ -508,6 +548,9 @@ async fn register(
     State(state): State<AppState>,
     Json(request): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), Error> {
+    state
+        .rate_limiter
+        .check("register", 12, Duration::from_secs(60))?;
     let nickname = normalize_nickname(&request.nickname)
         .ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
     if request.identity_public_key.len() < 20 || request.identity_public_key.len() > 4096 {
@@ -654,6 +697,11 @@ async fn send_message(
     Json(request): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), Error> {
     let sender = authenticate(&state, &headers)?;
+    state.rate_limiter.check(
+        format!("send:{}", sender.account_id),
+        120,
+        Duration::from_secs(60),
+    )?;
     let recipient_nickname = normalize_nickname(&request.recipient_nickname)
         .ok_or(Error(StatusCode::BAD_REQUEST, "invalid recipient nickname"))?;
     if request.ciphertext.len() < 4
@@ -1316,8 +1364,11 @@ const ATTACHMENT_QUOTA_BYTES: usize = 1024 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ATTACHMENT_BYTES, decode_attachment_ciphertext, normalize_nickname};
+    use super::{
+        MAX_ATTACHMENT_BYTES, RateLimiter, decode_attachment_ciphertext, normalize_nickname,
+    };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::time::Duration;
 
     #[test]
     fn normalizes_valid_nickname() {
@@ -1335,5 +1386,16 @@ mod tests {
         assert!(decode_attachment_ciphertext("not base64!").is_err());
         let oversized = vec![0_u8; MAX_ATTACHMENT_BYTES + 1];
         assert!(decode_attachment_ciphertext(&URL_SAFE_NO_PAD.encode(oversized)).is_err());
+    }
+
+    #[test]
+    fn rate_limiter_rejects_excess_and_keeps_keys_independent() {
+        let limiter = RateLimiter {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_ok());
+        assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_ok());
+        assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_err());
+        assert!(limiter.check("bob", 2, Duration::from_secs(60)).is_ok());
     }
 }
