@@ -25,6 +25,10 @@ fun safetyQrBitmap(safetyNumber: String, size: Int = 720): Bitmap {
 
 fun readSafetyQr(resolver: ContentResolver, uri: Uri): String? {
     val bitmap = resolver.openInputStream(uri)?.use(BitmapFactory::decodeStream) ?: return null
+    return readSafetyQr(bitmap)
+}
+
+fun readSafetyQr(bitmap: Bitmap): String? {
     val pixels = IntArray(bitmap.width * bitmap.height)
     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
     val text = runCatching {

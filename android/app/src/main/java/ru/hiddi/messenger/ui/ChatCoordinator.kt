@@ -148,6 +148,22 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
             }
         }
     }
+    fun confirmScannedSafetyQr(scanned: String?) {
+        val expected = safetyNumber?.replace(" ", "")
+        if (scanned != null && scanned == expected && recipient != null) {
+            trustedSafetyNumbers.trust(recipient!!, safetyNumber!!)
+            safetyNumberTrusted = true
+            status = "QR-код совпал · ключ подтверждён"
+        } else {
+            status = "QR-код не совпадает с ключом этого диалога"
+        }
+    }
+    val safetyQrCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        bitmap ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            confirmScannedSafetyQr(withContext(Dispatchers.Default) { readSafetyQr(bitmap) })
+        }
+    }
 
     fun openConversation(nickname: String) {
         val peer = nickname.removePrefix("@").lowercase()
@@ -596,10 +612,16 @@ fun ChatScreen(profile: AccountProfile, requestedPeer: String?, resumeRevision: 
                 }) { Text(if (safetyNumberTrusted) "Готово" else "Ключ совпадает") }
             },
             dismissButton = {
-                TextButton(
-                    onClick = { safetyQrPicker.launch("image/*") },
-                    enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
-                ) { Text("Сканировать QR из фото") }
+                Row {
+                    TextButton(
+                        onClick = { safetyQrCamera.launch(null) },
+                        enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
+                    ) { Text("Снять QR") }
+                    TextButton(
+                        onClick = { safetyQrPicker.launch("image/*") },
+                        enabled = safetyNumber?.let { it != "Ошибка получения кода" } == true,
+                    ) { Text("Из фото") }
+                }
             },
         )
     }
