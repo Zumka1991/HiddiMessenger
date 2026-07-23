@@ -1,3 +1,5 @@
+mod attachment_storage;
+
 use std::{
     env,
     net::SocketAddr,
@@ -6,6 +8,7 @@ use std::{
 };
 
 use anyhow::Context;
+use attachment_storage::AttachmentStorageBackend;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Query, State},
@@ -28,11 +31,13 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     bootstrap_secret: Arc<str>,
     message_notify: Arc<Notify>,
+    attachment_backend: AttachmentStorageBackend,
 }
 
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+    attachment_backend: &'static str,
 }
 
 #[derive(Serialize)]
@@ -197,11 +202,14 @@ async fn main() -> anyhow::Result<()> {
     }
     let db = Connection::open(&database_path)?;
     migrate(&db)?;
+    let attachment_backend = AttachmentStorageBackend::from_environment()?;
+    attachment_backend.ensure_ready()?;
 
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         bootstrap_secret: bootstrap_secret.into(),
         message_notify: Arc::new(Notify::new()),
+        attachment_backend,
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -247,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("HIDDI_BIND_ADDR must be a socket address")?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, "Hiddi server is listening");
+    info!(%address, attachment_backend = attachment_backend.name(), "Hiddi server is listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -471,8 +479,11 @@ fn take_one_time_prekey(
     Ok(Some(key))
 }
 
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+async fn health(State(state): State<AppState>) -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        attachment_backend: state.attachment_backend.name(),
+    })
 }
 
 async fn create_invite(

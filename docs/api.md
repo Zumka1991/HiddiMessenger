@@ -4,7 +4,10 @@
 
 ## `GET /health`
 
-Возвращает `{"status":"ok"}`.
+Возвращает `{"status":"ok","attachment_backend":"sqlite"}`. Поле
+`attachment_backend` — только диагностическое: `sqlite` работает сейчас;
+выбор `s3` пока намеренно завершит запуск ошибкой, пока не пройдёт отдельную
+интеграцию и проверку bucket policy.
 
 ## `POST /v1/admin/invites`
 

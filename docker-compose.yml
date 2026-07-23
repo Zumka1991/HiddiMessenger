@@ -8,6 +8,7 @@ services:
       HIDDI_BOOTSTRAP_SECRET: ${HIDDI_BOOTSTRAP_SECRET:?set_in_dotenv}
       HIDDI_BIND_ADDR: 0.0.0.0:3000
       HIDDI_DATABASE_PATH: /var/lib/hiddi/hiddi.db
+      HIDDI_ATTACHMENT_BACKEND: ${HIDDI_ATTACHMENT_BACKEND:-sqlite}
       RUST_LOG: hiddi_server=info,tower_http=info
     ports:
       - "127.0.0.1:3000:3000"
