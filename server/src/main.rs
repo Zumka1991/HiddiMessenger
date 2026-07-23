@@ -1455,6 +1455,29 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    async fn register_account(app: &axum::Router, nickname: &str) -> String {
+        let admin = "test-bootstrap-secret-with-enough-length";
+        let (_, invite) =
+            request(app, "POST", "/v1/admin/invites", Some(admin), String::new()).await;
+        let invite = serde_json::from_str::<serde_json::Value>(&invite).unwrap()["invite_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (status, registered) = request(
+            app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            serde_json::json!({"nickname": nickname, "invite_code": invite, "identity_public_key": URL_SAFE_NO_PAD.encode([5_u8; 33]), "registration_id": 42}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        serde_json::from_str::<serde_json::Value>(&registered).unwrap()["access_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     #[tokio::test]
     async fn registration_and_message_delivery_work_over_http() {
         let app = test_app();
@@ -1539,6 +1562,55 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["sender_nickname"],
             "alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_deletion_erases_server_data_and_notifies_peer() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+        let (sent, _) = request(
+            &app,
+            "POST",
+            "/v1/messages",
+            Some(&alice),
+            serde_json::json!({"recipient_nickname":"bob","ciphertext":"aGVsbG8"}).to_string(),
+        )
+        .await;
+        assert_eq!(sent, StatusCode::CREATED);
+        let (deleted, _) = request(
+            &app,
+            "DELETE",
+            "/v1/conversations/bob",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        let (notice_status, notices) = request(
+            &app,
+            "GET",
+            "/v1/conversations/deletions",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(notice_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&notices).unwrap()[0]["peer_nickname"],
+            "alice"
+        );
+        let (inbox_status, inbox) =
+            request(&app, "GET", "/v1/messages", Some(&bob), String::new()).await;
+        assert_eq!(inbox_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inbox)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
         );
     }
 }
