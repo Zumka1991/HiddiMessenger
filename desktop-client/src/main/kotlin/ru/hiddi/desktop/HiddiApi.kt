@@ -5,6 +5,9 @@ import org.json.JSONObject
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
+import org.signal.libsignal.protocol.message.CiphertextMessage
+import org.signal.libsignal.protocol.message.PreKeySignalMessage
+import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.signal.libsignal.protocol.kem.KEMPublicKey
@@ -179,7 +182,61 @@ class HiddiSession internal constructor(
     }
 
     @Synchronized
-    fun send(recipient: String, plaintext: String): String {
+    fun history(): List<ChatEntry> =
+        state.optJSONArray("chat_history")?.let { entries ->
+            (0 until entries.length()).mapNotNull { index ->
+                runCatching {
+                    entries.getJSONObject(index).let { item ->
+                        ChatEntry(
+                            peer = item.getString("peer"),
+                            text = item.getString("text"),
+                            outgoing = item.getBoolean("outgoing"),
+                            createdAt = item.optLong("created_at", System.currentTimeMillis()),
+                            messageId = item.optString("message_id").takeIf(String::isNotBlank),
+                            deliveryStatus = item.optString("delivery_status", "sent"),
+                        )
+                    }
+                }.getOrNull()
+            }
+        } ?: emptyList()
+
+    @Synchronized
+    fun syncInbox(): List<ChatEntry> {
+        val inbox = authenticatedRequest("GET", "$server/v1/messages", null) as JSONArray
+        val received = mutableListOf<ChatEntry>()
+        for (index in 0 until inbox.length()) {
+            val item = inbox.getJSONObject(index)
+            val messageId = item.getString("message_id")
+            if (history().any { it.messageId == messageId }) {
+                authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+                continue
+            }
+            val raw = item.getString("ciphertext").base64UrlDecode()
+            require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
+            val sender = item.getString("sender_nickname")
+            val remote = SignalProtocolAddress(sender, item.optInt("sender_device_number", 1))
+            val local = SignalProtocolAddress(nickname, deviceNumber)
+            val plain = when (raw.first().toInt()) {
+                CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
+                CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
+                else -> error("Неизвестный тип сообщения")
+            }
+            try {
+                val entry = ChatEntry(sender, plain.decodeToString(), outgoing = false, messageId = messageId, deliveryStatus = "delivered")
+                appendHistory(entry)
+                persist()
+                authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+                received += entry
+            } finally {
+                plain.fill(0)
+                raw.fill(0)
+            }
+        }
+        return received
+    }
+
+    @Synchronized
+    fun send(recipient: String, plaintext: String): ChatEntry {
         val peer = recipient.trim().removePrefix("@").lowercase()
         require(peer.matches(Regex("[a-z0-9_]{3,32}"))) { "Некорректный никнейм" }
         require(plaintext.isNotBlank()) { "Сообщение пустое" }
@@ -209,7 +266,29 @@ class HiddiSession internal constructor(
                     .put("ciphertext", envelope.base64Url()),
             ) as JSONObject
         envelope.fill(0)
-        return result.getString("message_id")
+        val entry = ChatEntry(peer, plaintext, outgoing = true, messageId = result.getString("message_id"), deliveryStatus = "sent")
+        appendHistory(entry)
+        persist()
+        return entry
+    }
+
+    @Synchronized
+    fun updateDeliveryStatus(messageId: String): String? {
+        val status = authenticatedRequest("GET", "$server/v1/messages/$messageId", null) as JSONObject
+        val next = when {
+            status.optBoolean("read") -> "read"
+            status.optBoolean("delivered") -> "delivered"
+            else -> "sent"
+        }
+        val history = historyJson()
+        for (index in 0 until history.length()) {
+            if (history.getJSONObject(index).optString("message_id") == messageId) {
+                history.getJSONObject(index).put("delivery_status", next)
+                persist()
+                return next
+            }
+        }
+        return null
     }
 
     private fun bundle(json: JSONObject): PreKeyBundle {
@@ -236,6 +315,20 @@ class HiddiSession internal constructor(
 
     private fun authenticatedRequest(method: String, url: String, body: JSONObject?): Any =
         httpRequest(client, method, url, body, state.getString("access_token"))
+
+    private fun appendHistory(entry: ChatEntry) {
+        historyJson().put(
+            JSONObject()
+                .put("peer", entry.peer)
+                .put("text", entry.text)
+                .put("outgoing", entry.outgoing)
+                .put("created_at", entry.createdAt)
+                .put("message_id", entry.messageId)
+                .put("delivery_status", entry.deliveryStatus),
+        )
+    }
+
+    private fun historyJson(): JSONArray = state.optJSONArray("chat_history") ?: JSONArray().also { state.put("chat_history", it) }
 
     private fun persist() {
         val plaintext = store.snapshot().toString().encodeToByteArray()

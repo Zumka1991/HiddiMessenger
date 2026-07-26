@@ -11,6 +11,8 @@ data class ChatEntry(
     val text: String,
     val outgoing: Boolean,
     val createdAt: Long = System.currentTimeMillis(),
+    val messageId: String? = null,
+    val deliveryStatus: String = "sent",
 )
 
 data class DeviceLinkResult(

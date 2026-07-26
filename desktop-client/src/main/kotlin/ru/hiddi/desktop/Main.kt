@@ -3,6 +3,7 @@ package ru.hiddi.desktop
 import androidx.compose.desktop.ui.tooling.preview.Preview
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,11 +43,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +61,9 @@ import java.nio.file.Path
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 private val Ink = Color(0xFF0B1016)
 private val Panel = Color(0xFF121A23)
@@ -417,8 +424,10 @@ private fun MessengerScreen(session: HiddiSession) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
-    val messages = remember { mutableStateListOf<ChatEntry>() }
+    var listWidth by remember { mutableStateOf(350.dp) }
+    val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
 
     DisposableEffect(session) {
         onDispose { session.close() }
@@ -435,12 +444,25 @@ private fun MessengerScreen(session: HiddiSession) {
             runCatching { withContext(Dispatchers.IO) { session.search(query) } }
                 .getOrDefault(emptyList())
     }
+    LaunchedEffect(session) {
+        while (true) {
+            val incoming = runCatching { withContext(Dispatchers.IO) { session.syncInbox() } }.getOrDefault(emptyList())
+            incoming.forEach { entry -> if (messages.none { it.messageId == entry.messageId }) messages += entry }
+            messages.forEachIndexed { index, entry ->
+                entry.messageId?.takeIf { entry.outgoing }?.let { messageId ->
+                    val status = runCatching { withContext(Dispatchers.IO) { session.updateDeliveryStatus(messageId) } }.getOrNull()
+                    if (status != null && status != entry.deliveryStatus) messages[index] = entry.copy(deliveryStatus = status)
+                }
+            }
+            delay(2_500)
+        }
+    }
 
     Surface(color = Ink, contentColor = Color(0xFFEAF3F7), modifier = Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize()) {
             DesktopNavigation(section, online) { section = it }
-            Divider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.width(1.dp).fillMaxHeight())
-            Column(Modifier.width(350.dp).fillMaxHeight().background(Panel)) {
+            ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(260.dp, 560.dp) }
+            Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
                 AccountHeader(session, online)
                 when (section) {
                     DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
@@ -451,7 +473,7 @@ private fun MessengerScreen(session: HiddiSession) {
                     DesktopSection.Settings -> DesktopSettingsPane(session, online)
                 }
             }
-            Divider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.width(1.dp).fillMaxHeight())
+            ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(260.dp, 560.dp) }
             if (section == DesktopSection.Settings) {
                 DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
             } else {
@@ -464,7 +486,7 @@ private fun MessengerScreen(session: HiddiSession) {
                                 runCatching {
                                     withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
                                 }.onSuccess {
-                                    messages += ChatEntry(profile.nickname, text, outgoing = true)
+                                    messages += it
                                     report(null)
                                 }.onFailure { report(it.message ?: "Не удалось отправить") }
                             }
@@ -475,6 +497,16 @@ private fun MessengerScreen(session: HiddiSession) {
             }
         }
     }
+}
+
+private fun Dp.clamp(min: Dp, max: Dp): Dp = coerceIn(min, max)
+
+@Composable
+private fun ResizeHandle(onDrag: (Float) -> Unit) {
+    Box(
+        Modifier.width(7.dp).fillMaxHeight().background(Color.White.copy(alpha = 0.04f))
+            .pointerInput(Unit) { detectDragGestures { change, amount -> change.consume(); onDrag(amount.x) } },
+    )
 }
 
 @Composable
@@ -690,7 +722,10 @@ private fun ChatPane(
                         color = if (message.outgoing) Color(0xFF174B42) else PanelRaised,
                         shape = RoundedCornerShape(18.dp),
                     ) {
-                        Text(message.text, modifier = Modifier.padding(13.dp))
+                        Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), horizontalAlignment = Alignment.End) {
+                            Text(message.text)
+                            MessageMeta(message)
+                        }
                     }
                 }
             }
@@ -725,6 +760,24 @@ private fun ChatPane(
             }
         }
     }
+}
+
+@Composable
+private fun MessageMeta(message: ChatEntry) {
+    val time = remember(message.createdAt) {
+        DateTimeFormatter.ofPattern("HH:mm").format(Instant.ofEpochMilli(message.createdAt).atZone(ZoneId.systemDefault()))
+    }
+    val status = when (message.deliveryStatus) {
+        "read" -> "✓✓"
+        "delivered" -> "✓✓"
+        else -> "✓"
+    }
+    Text(
+        text = if (message.outgoing) "$time  $status" else time,
+        color = if (message.deliveryStatus == "read") Mint else TextMuted,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 3.dp),
+    )
 }
 
 @Composable
