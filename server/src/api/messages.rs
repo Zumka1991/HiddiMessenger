@@ -1,0 +1,554 @@
+use std::time::Duration;
+
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{auth::authenticate, error::Error, state::AppState, validation::normalize_nickname};
+
+pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route("/v1/messages", post(send_message).get(inbox))
+        .route("/v1/messages/wait", get(wait_for_message))
+        .route("/v1/messages/deletions", get(pending_message_deletions))
+        .route(
+            "/v1/messages/deletions/{deletion_id}",
+            post(ack_message_deletion),
+        )
+        .route(
+            "/v1/messages/{message_id}",
+            post(ack_message).get(message_status).delete(delete_message),
+        )
+        .route(
+            "/v1/messages/read/{nickname}",
+            post(mark_peer_messages_read),
+        )
+        .route(
+            "/v1/conversations/deletions",
+            get(pending_conversation_deletions),
+        )
+        .route(
+            "/v1/conversations/{nickname}",
+            axum::routing::delete(delete_conversation),
+        )
+}
+
+#[derive(Deserialize)]
+struct SendMessageRequest {
+    recipient_nickname: String,
+    ciphertext: String,
+}
+
+#[derive(Serialize)]
+struct MessageResponse {
+    message_id: Uuid,
+    sender_nickname: String,
+    sender_device_number: u32,
+    ciphertext: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct MessageStatusResponse {
+    delivered: bool,
+    read: bool,
+}
+
+#[derive(Serialize)]
+struct ConversationDeletionResponse {
+    peer_nickname: String,
+}
+
+#[derive(Deserialize, Default)]
+struct DeleteMessageQuery {
+    #[serde(default)]
+    for_everyone: bool,
+}
+
+#[derive(Serialize)]
+struct MessageDeletionResponse {
+    deletion_id: Uuid,
+    message_id: Uuid,
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), Error> {
+    let sender = authenticate(&state, &headers)?;
+    state.rate_limiter.check(
+        format!("send:{}", sender.account_id),
+        120,
+        Duration::from_secs(60),
+    )?;
+    let recipient_nickname = normalize_nickname(&request.recipient_nickname)
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid recipient nickname"))?;
+    if request.ciphertext.len() < 4
+        || request.ciphertext.len() > 2_800_000
+        || URL_SAFE_NO_PAD.decode(&request.ciphertext).is_err()
+    {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "ciphertext must be URL-safe base64 and at most 2 MiB",
+        ));
+    }
+    let message_id = Uuid::new_v4();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let recipient_id: String = db
+        .query_row(
+            "SELECT id FROM accounts WHERE nickname = ?1",
+            params![recipient_nickname],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                Error(StatusCode::NOT_FOUND, "recipient not found")
+            }
+            _ => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not find recipient",
+            ),
+        })?;
+    let blocked: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM blocks
+                WHERE blocker_account_id = ?1 AND blocked_account_id = ?2
+             )",
+            params![recipient_id, sender.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not check recipient block list",
+            )
+        })?;
+    if blocked {
+        return Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({"message_id": message_id})),
+        ));
+    }
+    db.execute(
+        "INSERT INTO messages
+         (id, sender_account_id, sender_device_id, recipient_account_id, ciphertext)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            message_id.to_string(),
+            sender.account_id,
+            sender.device_id,
+            recipient_id,
+            request.ciphertext
+        ],
+    )
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store message"))?;
+    drop(db);
+    state.message_notify.notify_waiters();
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"message_id": message_id})),
+    ))
+}
+
+/// Registers only routing metadata for a new MLS group. No title, MLS state,
+/// epoch, public key, or message content is supplied to the server.
+
+async fn wait_for_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    if has_pending_message(&state, &recipient.account_id)? {
+        return Ok(Json(serde_json::json!({"available": true})));
+    }
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        state.message_notify.notified(),
+    )
+    .await;
+    Ok(Json(
+        serde_json::json!({"available": has_pending_message(&state, &recipient.account_id)?}),
+    ))
+}
+
+fn has_pending_message(state: &AppState, account_id: &str) -> Result<bool, Error> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM messages
+            WHERE recipient_account_id = ?1 AND delivered_at IS NULL
+            UNION ALL
+            SELECT 1 FROM message_deletions
+            WHERE recipient_account_id = ?1
+         )",
+        params![account_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not check inbox"))
+}
+
+async fn inbox(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MessageResponse>>, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT messages.id, accounts.nickname,
+                    COALESCE((
+                      SELECT device_number FROM devices
+                      WHERE devices.id = messages.sender_device_id
+                    ), 1),
+                    messages.ciphertext, messages.created_at
+         FROM messages JOIN accounts ON accounts.id = messages.sender_account_id
+         WHERE messages.recipient_account_id = ?1 AND messages.delivered_at IS NULL
+         ORDER BY messages.created_at ASC LIMIT 100",
+        )
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load inbox"))?;
+    let messages = statement
+        .query_map(params![recipient.account_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(MessageResponse {
+                message_id: Uuid::parse_str(&id).expect("database contains valid UUIDs"),
+                sender_nickname: row.get(1)?,
+                sender_device_number: row.get(2)?,
+                ciphertext: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load inbox"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load inbox"))?;
+    Ok(Json(messages))
+}
+
+async fn ack_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(message_id): axum::extract::Path<Uuid>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let acknowledged = db
+        .execute(
+            "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![message_id.to_string(), account.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not acknowledge message",
+            )
+        })?;
+    if acknowledged == 0 {
+        return Err(Error(StatusCode::NOT_FOUND, "message not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Confirms read state only for the sender.  No plaintext or recipient presence is exposed.
+async fn message_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(message_id): axum::extract::Path<Uuid>,
+) -> Result<Json<MessageStatusResponse>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.query_row(
+        "SELECT delivered_at IS NOT NULL, read_at IS NOT NULL FROM messages WHERE id = ?1 AND sender_account_id = ?2",
+        params![message_id.to_string(), account.account_id],
+        |row| Ok(MessageStatusResponse { delivered: row.get(0)?, read: row.get(1)? }),
+    )
+    .map(Json)
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "message not found"),
+        _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load message status"),
+    })
+}
+
+/// Called only when the recipient has opened a dialogue.  It deliberately records no message text.
+async fn mark_peer_messages_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<StatusCode, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    let sender_nickname = normalize_nickname(&nickname)
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid sender nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    db.execute(
+        "UPDATE messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+         WHERE recipient_account_id = ?1 AND delivered_at IS NOT NULL
+           AND sender_account_id = (SELECT id FROM accounts WHERE nickname = ?2)",
+        params![recipient.account_id, sender_nickname],
+    )
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not acknowledge read state",
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(message_id): axum::extract::Path<Uuid>,
+    Query(query): Query<DeleteMessageQuery>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let participants: Option<(String, String)> = db
+        .query_row(
+            "SELECT sender_account_id, recipient_account_id FROM messages WHERE id = ?1",
+            params![message_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load message"))?;
+    let Some((sender_id, recipient_id)) = participants else {
+        return Err(Error(StatusCode::NOT_FOUND, "message not found"));
+    };
+    if account.account_id != sender_id && account.account_id != recipient_id {
+        return Err(Error(StatusCode::NOT_FOUND, "message not found"));
+    }
+    if query.for_everyone && account.account_id != sender_id {
+        return Err(Error(
+            StatusCode::FORBIDDEN,
+            "only the sender may delete for everyone",
+        ));
+    }
+    let transaction = db
+        .unchecked_transaction()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    if query.for_everyone {
+        transaction
+            .execute(
+                "INSERT INTO message_deletions
+                    (id, recipient_account_id, message_id)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(recipient_account_id, message_id) DO NOTHING",
+                params![
+                    Uuid::new_v4().to_string(),
+                    recipient_id,
+                    message_id.to_string()
+                ],
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not mark remote message deletion",
+                )
+            })?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM messages WHERE id = ?1",
+            params![message_id.to_string()],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not delete message",
+            )
+        })?;
+    transaction.commit().map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not delete message",
+        )
+    })?;
+    drop(db);
+    state.message_notify.notify_waiters();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pending_message_deletions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MessageDeletionResponse>>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT id, message_id FROM message_deletions
+             WHERE recipient_account_id = ?1
+             ORDER BY created_at ASC LIMIT 100",
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load message deletions",
+            )
+        })?;
+    let deletions = statement
+        .query_map(params![account.account_id], |row| {
+            let deletion_id: String = row.get(0)?;
+            let message_id: String = row.get(1)?;
+            Ok(MessageDeletionResponse {
+                deletion_id: Uuid::parse_str(&deletion_id)
+                    .expect("database contains valid deletion UUIDs"),
+                message_id: Uuid::parse_str(&message_id)
+                    .expect("database contains valid message UUIDs"),
+            })
+        })
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load message deletions",
+            )
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load message deletions",
+            )
+        })?;
+    Ok(Json(deletions))
+}
+
+async fn ack_message_deletion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(deletion_id): axum::extract::Path<Uuid>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let deleted = db
+        .execute(
+            "DELETE FROM message_deletions
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![deletion_id.to_string(), account.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not acknowledge message deletion",
+            )
+        })?;
+    if deleted == 0 {
+        return Err(Error(StatusCode::NOT_FOUND, "message deletion not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes opaque server copies for both accounts and leaves a one-shot marker for the peer app.
+async fn delete_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let peer_nickname =
+        normalize_nickname(&nickname).ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let peer_id: String = db
+        .query_row(
+            "SELECT id FROM accounts WHERE nickname = ?1",
+            params![peer_nickname],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "user not found"),
+            _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not find user"),
+        })?;
+    db.execute("DELETE FROM messages WHERE (sender_account_id = ?1 AND recipient_account_id = ?2) OR (sender_account_id = ?2 AND recipient_account_id = ?1)", params![account.account_id, peer_id])
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete messages"))?;
+    db.execute("DELETE FROM attachments WHERE (sender_account_id = ?1 AND recipient_account_id = ?2) OR (sender_account_id = ?2 AND recipient_account_id = ?1)", params![account.account_id, peer_id])
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete attachments"))?;
+    db.execute("INSERT INTO conversation_deletions (recipient_account_id, peer_account_id) VALUES (?1, ?2)", params![peer_id, account.account_id])
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not mark remote deletion"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pending_conversation_deletions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ConversationDeletionResponse>>, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db.prepare("SELECT conversation_deletions.id, accounts.nickname FROM conversation_deletions JOIN accounts ON accounts.id = conversation_deletions.peer_account_id WHERE recipient_account_id = ?1")
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load deletions"))?;
+    let rows = statement
+        .query_map(params![account.account_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ConversationDeletionResponse {
+                    peer_nickname: row.get(1)?,
+                },
+            ))
+        })
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load deletions",
+            )
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load deletions",
+            )
+        })?;
+    drop(statement);
+    for (id, _) in &rows {
+        db.execute(
+            "DELETE FROM conversation_deletions WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not acknowledge deletion",
+            )
+        })?;
+    }
+    Ok(Json(rows.into_iter().map(|(_, item)| item).collect()))
+}
