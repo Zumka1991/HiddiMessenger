@@ -588,18 +588,20 @@ private fun ChatListPane(
     selected: HiddiProfile?,
     onSelect: (HiddiProfile) -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
     val conversations = messages.groupBy { it.peer }
         .map { (peer, entries) -> peer to entries.maxBy { it.createdAt } }
+        .filter { (peer, last) -> query.isBlank() || peer.contains(query.trim().removePrefix("@"), ignoreCase = true) || last.text.contains(query, ignoreCase = true) }
         .sortedByDescending { it.second.createdAt }
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 26.dp, end = 20.dp, top = 26.dp, bottom = 16.dp)) {
-        Text("Чаты", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-        Surface(color = Color(0xFF173C37), shape = CircleShape, modifier = Modifier.size(34.dp).clickable { }) {
-            Box(contentAlignment = Alignment.Center) { Text("+", color = Mint, fontSize = 24.sp) }
-        }
-    }
-    Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
-        Text("⌕   Поиск", color = TextMuted, modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp))
-    }
+    Text("Диалоги", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 26.dp, end = 20.dp, top = 26.dp, bottom = 16.dp))
+    OutlinedTextField(
+        value = query,
+        onValueChange = { query = it },
+        placeholder = { Text("Поиск") },
+        leadingIcon = { Text("⌕", color = TextMuted, fontSize = 18.sp) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+    )
     if (conversations.isEmpty()) {
         Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(20.dp))
     } else {
@@ -779,7 +781,7 @@ private fun ChatPane(
                     profile.displayName.ifBlank { "@${profile.nickname}" },
                     fontWeight = FontWeight.Bold,
                 )
-                Text("В сети · @${profile.nickname}", color = Mint, fontSize = 12.sp)
+                Text("В сети", color = Mint, fontSize = 12.sp)
             }
             Text("⌕", color = Mint, fontSize = 24.sp, modifier = Modifier.padding(horizontal = 10.dp))
             Text("⋮", color = TextMuted, fontSize = 24.sp)
@@ -789,8 +791,10 @@ private fun ChatPane(
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 34.dp, vertical = 28.dp),
         ) {
             item {
-                Surface(color = Color(0xFF202934), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text("Сегодня", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Surface(color = Color(0xFF202934), shape = RoundedCornerShape(14.dp)) {
+                        Text("Сегодня", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp))
+                    }
                 }
             }
             if (messages.isEmpty()) {
@@ -811,7 +815,7 @@ private fun ChatPane(
                     Surface(
                         color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
                         shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
-                        modifier = Modifier.widthIn(max = 520.dp),
+                        modifier = Modifier.widthIn(min = if (message.outgoing) 118.dp else 142.dp, max = 520.dp),
                     ) {
                         Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), horizontalAlignment = Alignment.End) {
                             Text(message.text)
