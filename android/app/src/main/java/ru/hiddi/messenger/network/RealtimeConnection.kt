@@ -26,7 +26,9 @@ class RealtimeConnection {
     val events = Channel<Event>(Channel.UNLIMITED)
 
     private val client = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
+        // Detect half-open mobile/VPN sockets quickly. Healthy message delivery
+        // is still event-driven; this ping is only a dead-connection watchdog.
+        .pingInterval(5, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
     private var socket: WebSocket? = null

@@ -1256,17 +1256,35 @@ fun ChatScreen(
                     }
                     val text = draft.trim()
                     if (text.isEmpty()) return@ConversationScreen
+                    val pending =
+                        ChatHistoryItem(
+                            peer = target,
+                            text = text,
+                            outgoing = true,
+                            time = Instant.now().toString(),
+                            deliveryStatus = "sending",
+                        )
+                    history = history + pending
+                    draft = ""
+                    status = "Отправляем…"
                     scope.launch {
                         try {
                             val messageId = api.send(profile, target, text)
-                            val item = ChatHistoryItem(target, text, true, Instant.now().toString(), messageId = messageId)
+                            val item =
+                                pending.copy(
+                                    messageId = messageId,
+                                    deliveryStatus = "sent",
+                                )
                             historyStore.append(item)
-                            history = history + item
+                            history = history.map { current ->
+                                if (current === pending) item else current
+                            }
                             peers = historyStore.peers()
                             historyRevision++
-                            draft = ""
                             status = "Доставлено на сервер"
                         } catch (error: Exception) {
+                            history = history.filterNot { it === pending }
+                            if (draft.isBlank()) draft = text
                             status = error.message ?: "Не удалось отправить"
                         }
                     }

@@ -658,7 +658,9 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     LaunchedEffect(session) {
         while (true) {
             synchronizeInbox()
-            delay(15_000)
+            // WebSocket is the instant path. This bounded fallback covers a
+            // half-open socket after VPN/network changes without a long lag.
+            delay(3_000)
         }
     }
     LaunchedEffect(session) {
