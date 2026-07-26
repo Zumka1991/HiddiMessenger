@@ -80,6 +80,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1931,8 +1932,7 @@ private fun ChatPane(
     var sending by remember { mutableStateOf(false) }
     var attachmentBusy by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
-    var voiceRecordingId by remember(profile.nickname) { mutableStateOf(0) }
-    var cancelledVoiceRecordingId by remember(profile.nickname) { mutableStateOf(0) }
+    var pendingVoice by remember(profile.nickname) { mutableStateOf<RecordedDesktopVoice?>(null) }
     var recordingSeconds by remember { mutableStateOf(0L) }
     var voiceLevel by remember { mutableStateOf(0f) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1949,6 +1949,7 @@ private fun ChatPane(
     var handledForceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
     val actionScope = rememberCoroutineScope()
     val voiceRecorder = remember(profile.nickname) { InMemoryDesktopVoiceRecorder() }
+    val latestPendingVoice by rememberUpdatedState(pendingVoice)
     val inputFocusRequester = remember(profile.nickname) { FocusRequester() }
     val messageListState = rememberLazyListState()
     val isAtNewestMessage by remember {
@@ -1978,7 +1979,7 @@ private fun ChatPane(
         )
     }
     fun submit() {
-        if (draft.isBlank() || sending || attachmentBusy || voiceRecording || isBlocked) return
+        if (draft.isBlank() || sending || attachmentBusy || voiceRecording || pendingVoice != null || isBlocked) return
         val text = draft
         onTypingChange(false)
         sending = true
@@ -1994,7 +1995,7 @@ private fun ChatPane(
         }
     }
     fun selectAndSendImage() {
-        if (sending || attachmentBusy || voiceRecording || isBlocked) return
+        if (sending || attachmentBusy || voiceRecording || pendingVoice != null || isBlocked) return
         val file = chooseChatImage() ?: return
         attachmentBusy = true
         error = null
@@ -2005,9 +2006,8 @@ private fun ChatPane(
             if (failure == null) forceScrollRevision++
         }
     }
-    fun stopAndSendVoice() {
+    fun stopVoiceRecording() {
         if (!voiceRecording || attachmentBusy) return
-        val recordingId = voiceRecordingId
         voiceRecording = false
         attachmentBusy = true
         error = null
@@ -2015,18 +2015,9 @@ private fun ChatPane(
             runCatching {
                 withContext(Dispatchers.IO) { voiceRecorder.stop() }
             }.onSuccess { recorded ->
-                if (recordingId <= cancelledVoiceRecordingId) {
-                    recorded.pcm.fill(0)
-                    attachmentBusy = false
-                    refocusRevision++
-                    return@onSuccess
-                }
-                onSendVoice(recorded.pcm, recorded.durationMs) { failure ->
-                    attachmentBusy = false
-                    error = failure
-                    refocusRevision++
-                    if (failure == null) forceScrollRevision++
-                }
+                pendingVoice?.pcm?.fill(0)
+                pendingVoice = recorded
+                attachmentBusy = false
             }.onFailure {
                 voiceRecorder.cancel()
                 attachmentBusy = false
@@ -2035,12 +2026,29 @@ private fun ChatPane(
             }
         }
     }
+
+    fun sendPendingVoice() {
+        val recorded = pendingVoice ?: return
+        if (sending || attachmentBusy || isBlocked) return
+        attachmentBusy = true
+        error = null
+        onSendVoice(recorded.pcm, recorded.durationMs) { failure ->
+            attachmentBusy = false
+            error = failure
+            pendingVoice = null
+            refocusRevision++
+            if (failure == null) forceScrollRevision++
+        }
+    }
+
     fun cancelVoice() {
-        if (!voiceRecording) return
-        cancelledVoiceRecordingId = maxOf(cancelledVoiceRecordingId, voiceRecordingId)
-        voiceRecording = false
+        if (voiceRecording) {
+            voiceRecording = false
+            voiceRecorder.cancel()
+        }
+        pendingVoice?.pcm?.fill(0)
+        pendingVoice = null
         voiceLevel = 0f
-        voiceRecorder.cancel()
         error = null
         refocusRevision++
     }
@@ -2054,8 +2062,8 @@ private fun ChatPane(
     LaunchedEffect(profile.nickname) {
         if (messages.isNotEmpty()) messageListState.scrollToItem(messages.size)
     }
-    LaunchedEffect(profile.nickname, refocusRevision, sending) {
-        if (!sending && !attachmentBusy && !voiceRecording && !isBlocked) {
+    LaunchedEffect(profile.nickname, refocusRevision, sending, pendingVoice) {
+        if (!sending && !attachmentBusy && !voiceRecording && pendingVoice == null && !isBlocked) {
             inputFocusRequester.requestFocus()
         }
     }
@@ -2072,6 +2080,7 @@ private fun ChatPane(
         onDispose {
             onTypingChange(false)
             voiceRecorder.cancel()
+            latestPendingVoice?.pcm?.fill(0)
         }
     }
     LaunchedEffect(voiceRecording) {
@@ -2082,7 +2091,7 @@ private fun ChatPane(
             voiceLevel = voiceRecorder.level
             recordingSeconds = (System.currentTimeMillis() - startedAt) / 1_000
             if (recordingSeconds >= InMemoryDesktopVoiceRecorder.MAX_DURATION_MS / 1_000) {
-                stopAndSendVoice()
+                stopVoiceRecording()
             }
         }
         voiceLevel = 0f
@@ -2286,7 +2295,7 @@ private fun ChatPane(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
             ) {
                 IconButton(
-                    enabled = !sending && !attachmentBusy && !voiceRecording && !isBlocked,
+                    enabled = !sending && !attachmentBusy && !voiceRecording && pendingVoice == null && !isBlocked,
                     onClick = ::selectAndSendImage,
                 ) {
                     Icon(
@@ -2296,17 +2305,16 @@ private fun ChatPane(
                     )
                 }
                 IconButton(
-                    enabled = !sending && !attachmentBusy && !isBlocked,
+                    enabled = !sending && !attachmentBusy && pendingVoice == null && !isBlocked,
                     onClick = {
                         if (voiceRecording) {
-                            stopAndSendVoice()
+                            stopVoiceRecording()
                         } else {
                             error = null
                             runCatching { voiceRecorder.start() }
                                 .onSuccess {
                                     draft = ""
                                     onTypingChange(false)
-                                    voiceRecordingId += 1
                                     voiceRecording = true
                                 }
                                 .onFailure {
@@ -2320,7 +2328,7 @@ private fun ChatPane(
                         if (voiceRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
                         contentDescription =
                             if (voiceRecording) {
-                                "Остановить и отправить"
+                                "Остановить запись"
                             } else {
                                 "Записать голосовое"
                             },
@@ -2329,38 +2337,81 @@ private fun ChatPane(
                 }
                 Spacer(Modifier.width(6.dp))
                 Column(Modifier.weight(1f)) {
-                    if (voiceRecording) {
+                    if (voiceRecording || pendingVoice != null) {
                         Surface(
-                            color = Color(0xFF241C24),
+                            color = if (voiceRecording) Color(0xFF241C24) else Color(0xFF17242A),
                             shape = RoundedCornerShape(18.dp),
-                            border = BorderStroke(1.dp, Color(0xFFFF7C8B).copy(alpha = 0.55f)),
+                            border =
+                                BorderStroke(
+                                    1.dp,
+                                    if (voiceRecording) {
+                                        Color(0xFFFF7C8B).copy(alpha = 0.55f)
+                                    } else {
+                                        Mint.copy(alpha = 0.45f)
+                                    },
+                                ),
                             modifier = Modifier.fillMaxWidth().height(52.dp),
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 18.dp),
                             ) {
-                                Box(
-                                    Modifier.size(9.dp).clip(CircleShape)
-                                        .background(Color(0xFFFF5B69)),
-                                )
+                                if (voiceRecording) {
+                                    Box(
+                                        Modifier.size(9.dp).clip(CircleShape)
+                                            .background(Color(0xFFFF5B69)),
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Rounded.Mic,
+                                        contentDescription = null,
+                                        tint = Mint,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
                                 Spacer(Modifier.width(10.dp))
+                                val voiceDurationSeconds =
+                                    if (voiceRecording) {
+                                        recordingSeconds
+                                    } else {
+                                        (pendingVoice?.durationMs ?: 0L) / 1_000
+                                    }
                                 Text(
-                                    "Запись · %d:%02d".format(
-                                        recordingSeconds / 60,
-                                        recordingSeconds % 60,
+                                    "%s · %d:%02d".format(
+                                        if (voiceRecording) "Запись" else "Готово",
+                                        voiceDurationSeconds / 60,
+                                        voiceDurationSeconds % 60,
                                     ),
-                                    color = Color(0xFFFFC5CA),
+                                    color = if (voiceRecording) Color(0xFFFFC5CA) else Mint,
                                 )
                                 Spacer(Modifier.weight(1f))
                                 DesktopVoiceWaveform(
-                                    seed = 0,
-                                    color = Color(0xFFFF9DA4),
-                                    level = voiceLevel,
+                                    seed = pendingVoice?.pcm?.contentHashCode() ?: 0,
+                                    color = if (voiceRecording) Color(0xFFFF9DA4) else Mint,
+                                    level = if (voiceRecording) voiceLevel else null,
                                     modifier = Modifier.width(130.dp).height(28.dp),
                                 )
                                 TextButton(onClick = ::cancelVoice) { Text("Удалить", color = Color(0xFFFF9DA4)) }
-                                Text("■ отправить", color = TextMuted, fontSize = 11.sp)
+                                if (!voiceRecording) {
+                                    FilledIconButton(
+                                        enabled = !attachmentBusy,
+                                        onClick = ::sendPendingVoice,
+                                        colors =
+                                            IconButtonDefaults.filledIconButtonColors(
+                                                containerColor = Mint,
+                                                contentColor = Ink,
+                                            ),
+                                        modifier = Modifier.size(38.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.AutoMirrored.Rounded.Send,
+                                            contentDescription = "Отправить голосовое",
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                } else {
+                                    Text("■ остановить", color = TextMuted, fontSize = 11.sp)
+                                }
                             }
                         }
                     } else {
@@ -2373,7 +2424,7 @@ private fun ChatPane(
                                     attachmentBusy -> "Шифруем и отправляем вложение…"
                                     else -> "Сообщение"
                                 },
-                            enabled = !sending && !attachmentBusy && !isBlocked,
+                            enabled = !sending && !attachmentBusy && pendingVoice == null && !isBlocked,
                             singleLine = false,
                             maxLines = 5,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 124.dp)
@@ -2396,6 +2447,7 @@ private fun ChatPane(
                     Text(
                         when {
                             voiceRecording -> "Голос шифруется до загрузки на сервер"
+                            pendingVoice != null -> "Войс готов — отправьте или удалите"
                             attachmentBusy -> "На сервер отправляется только шифротекст"
                             else -> "Enter — отправить · Ctrl+Enter — новая строка"
                         },
@@ -2408,8 +2460,10 @@ private fun ChatPane(
                 FilledIconButton(
                     enabled =
                         draft.isNotBlank() && !sending && !attachmentBusy &&
-                            !voiceRecording && !isBlocked,
-                    onClick = ::submit,
+                            !voiceRecording && pendingVoice == null && !isBlocked,
+                    onClick = {
+                        if (pendingVoice != null) sendPendingVoice() else submit()
+                    },
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = Mint,
                         contentColor = Ink,

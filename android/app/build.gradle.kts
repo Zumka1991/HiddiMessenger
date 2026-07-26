@@ -47,8 +47,8 @@ android {
         applicationId = "ru.hiddi.messenger"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-alpha.1"
+        versionCode = 2
+        versionName = "0.1.0-alpha.2"
         ndk {
             // Debug builds are also installed on the Android Studio x86_64
             // emulator; release distribution will use ABI splits/App Bundle.
