@@ -860,7 +860,7 @@ private fun ChatPane(
                     Surface(
                         color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
                         shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
-                        modifier = Modifier.widthIn(min = if (message.outgoing) 118.dp else 142.dp, max = 520.dp),
+                        modifier = Modifier.widthIn(max = 520.dp),
                     ) {
                         Column(
                             modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
