@@ -436,41 +436,43 @@ private fun MessengerScreen(session: HiddiSession) {
                 .getOrDefault(emptyList())
     }
 
-    Row(Modifier.fillMaxSize().background(Ink)) {
-        DesktopNavigation(section, online) { section = it }
-        Divider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.width(1.dp).fillMaxHeight())
-        Column(Modifier.width(350.dp).fillMaxHeight().background(Panel)) {
-            AccountHeader(session, online)
-            when (section) {
-                DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
-                DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
-                    selected = profile
-                    section = DesktopSection.Chats
+    Surface(color = Ink, contentColor = Color(0xFFEAF3F7), modifier = Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxSize()) {
+            DesktopNavigation(section, online) { section = it }
+            Divider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.width(1.dp).fillMaxHeight())
+            Column(Modifier.width(350.dp).fillMaxHeight().background(Panel)) {
+                AccountHeader(session, online)
+                when (section) {
+                    DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
+                    DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
+                        selected = profile
+                        section = DesktopSection.Chats
+                    }
+                    DesktopSection.Settings -> DesktopSettingsPane(session, online)
                 }
-                DesktopSection.Settings -> DesktopSettingsPane(session, online)
             }
-        }
-        Divider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.width(1.dp).fillMaxHeight())
-        if (section == DesktopSection.Settings) {
-            DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
-        } else {
-            selected?.let { profile ->
-                ChatPane(
-                    profile = profile,
-                    messages = messages.filter { it.peer == profile.nickname },
-                    onSend = { text, report ->
-                        scope.launch {
-                            runCatching {
-                                withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
-                            }.onSuccess {
-                                messages += ChatEntry(profile.nickname, text, outgoing = true)
-                                report(null)
-                            }.onFailure { report(it.message ?: "Не удалось отправить") }
-                        }
-                    },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                )
-            } ?: EmptyChat(Modifier.weight(1f).fillMaxHeight())
+            Divider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.width(1.dp).fillMaxHeight())
+            if (section == DesktopSection.Settings) {
+                DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
+            } else {
+                selected?.let { profile ->
+                    ChatPane(
+                        profile = profile,
+                        messages = messages.filter { it.peer == profile.nickname },
+                        onSend = { text, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
+                                }.onSuccess {
+                                    messages += ChatEntry(profile.nickname, text, outgoing = true)
+                                    report(null)
+                                }.onFailure { report(it.message ?: "Не удалось отправить") }
+                            }
+                        },
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                    )
+                } ?: EmptyChat(Modifier.weight(1f).fillMaxHeight())
+            }
         }
     }
 }
