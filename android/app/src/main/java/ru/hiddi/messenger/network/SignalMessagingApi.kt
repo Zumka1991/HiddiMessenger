@@ -487,20 +487,35 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             val state = resolveRegistrationId(profile, repository.load())
             val store = AndroidSignalProtocolStore(state)
             val local = SignalProtocolAddress(profile.nickname, DEVICE_ID)
-            val deliveries = JSONArray()
-            fetchBundles(profile, normalized).forEach { (deviceNumber, bundle) ->
-                val remote = SignalProtocolAddress(normalized, deviceNumber)
-                if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(bundle)
-                val cipher = SessionCipher(store, local, remote).encrypt(message.encodeToByteArray())
-                val envelope = byteArrayOf(cipher.type.toByte()) + cipher.serialize()
-                deliveries.put(JSONObject().put("device_number", deviceNumber).put("ciphertext", envelope.b64()))
-                envelope.fill(0)
-            }
+            val deliveries = encryptForDevices(profile, normalized, message, store, local)
             repository.save(store.snapshot())
-            JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
+            val messageId = JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
                 .put("recipient_nickname", normalized).put("device_ciphertexts", deliveries).toString(), profile.accessToken))
                 .getString("message_id")
+            // Other own devices receive an E2EE-only journal entry, never plaintext metadata.
+            if (normalized != profile.nickname) {
+                val sync = JSONObject().put("type", "hiddi.sync.v1").put("peer", normalized).put("text", message).toString()
+                val selfDeliveries = encryptForDevices(profile, profile.nickname, sync, store, local)
+                repository.save(store.snapshot())
+                request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
+                    .put("recipient_nickname", profile.nickname).put("device_ciphertexts", selfDeliveries).toString(), profile.accessToken)
+            }
+            messageId
         }
+    }
+
+    private fun encryptForDevices(profile: AccountProfile, peer: String, plaintext: String, store: AndroidSignalProtocolStore, local: SignalProtocolAddress): JSONArray {
+        val deliveries = JSONArray()
+        fetchBundles(profile, peer).forEach { (deviceNumber, bundle) ->
+            if (peer == profile.nickname && deviceNumber == DEVICE_ID) return@forEach
+            val remote = SignalProtocolAddress(peer, deviceNumber)
+            if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(bundle)
+            val cipher = SessionCipher(store, local, remote).encrypt(plaintext.encodeToByteArray())
+            val envelope = byteArrayOf(cipher.type.toByte()) + cipher.serialize()
+            deliveries.put(JSONObject().put("device_number", deviceNumber).put("ciphertext", envelope.b64()))
+            envelope.fill(0)
+        }
+        return deliveries
     }
 
     suspend fun messageStatus(profile: AccountProfile, messageId: String): DeliveryStatus = withContext(Dispatchers.IO) {
@@ -620,11 +635,14 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                     else -> error("Неизвестный тип сообщения")
                 }
                 repository.save(store.snapshot())
+                val text = plain.decodeToString()
+                val sync = runCatching { JSONObject(text) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
                 output += DecryptedMessage(
                     messageId = item.getString("message_id"),
-                    senderNickname = sender,
-                    text = plain.decodeToString(),
+                    senderNickname = sync?.optString("peer")?.ifBlank { sender } ?: sender,
+                    text = sync?.optString("text") ?: text,
                     createdAt = item.getString("created_at"),
+                    outgoing = sync != null,
                 )
                 plain.fill(0)
             }
@@ -695,6 +713,7 @@ data class DecryptedMessage(
     val senderNickname: String,
     val text: String,
     val createdAt: String,
+    val outgoing: Boolean = false,
 )
 data class DeviceLinkCode(val code: String, val expiresAt: Long)
 data class LinkedDevice(

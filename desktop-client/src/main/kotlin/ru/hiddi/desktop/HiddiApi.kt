@@ -297,13 +297,16 @@ class HiddiSession internal constructor(
             }
             try {
                 val plaintext = plain.decodeToString()
-                val attachment = DesktopAttachmentStore.parseEnvelope(plaintext)
+                val sync = runCatching { JSONObject(plaintext) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
+                val visibleText = sync?.optString("text") ?: plaintext
+                val peer = sync?.optString("peer")?.ifBlank { sender } ?: sender
+                val attachment = DesktopAttachmentStore.parseEnvelope(visibleText)
                 attachment?.let { runCatching { cacheAttachment(it) } }
                 val entry =
                     ChatEntry(
-                        peer = sender,
-                        text = attachment?.displayText() ?: plaintext,
-                        outgoing = false,
+                        peer = peer,
+                        text = attachment?.displayText() ?: visibleText,
+                        outgoing = sync != null,
                         messageId = messageId,
                         deliveryStatus = "delivered",
                         attachment = attachment,
@@ -552,6 +555,25 @@ class HiddiSession internal constructor(
                     .put("recipient_nickname", peer)
                     .put("device_ciphertexts", deliveries),
             ) as JSONObject
+        if (peer != nickname) {
+            val ownBundles = authenticatedRequest("GET", "$server/v1/users/$nickname/prekey-bundles", null) as JSONArray
+            val ownDeliveries = JSONArray()
+            val syncPayload = JSONObject().put("type", "hiddi.sync.v1").put("peer", peer).put("text", plaintext).toString()
+            for (index in 0 until ownBundles.length()) {
+                val value = ownBundles.getJSONObject(index)
+                val remote = SignalProtocolAddress(nickname, value.optInt("device_number", 1))
+                if (remote.deviceId == deviceNumber) continue
+                if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(bundle(value))
+                val encrypted = SessionCipher(store, local, remote).encrypt(syncPayload.encodeToByteArray())
+                val envelope = byteArrayOf(encrypted.type.toByte()) + encrypted.serialize()
+                ownDeliveries.put(JSONObject().put("device_number", remote.deviceId).put("ciphertext", envelope.base64Url()))
+                envelope.fill(0)
+            }
+            if (ownDeliveries.length() > 0) {
+                authenticatedRequest("POST", "$server/v1/messages", JSONObject().put("recipient_nickname", nickname).put("device_ciphertexts", ownDeliveries))
+                persist()
+            }
+        }
         val entry =
             ChatEntry(
                 peer = peer,

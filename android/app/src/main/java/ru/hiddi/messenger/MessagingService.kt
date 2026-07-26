@@ -208,7 +208,7 @@ class MessagingService : Service() {
                         EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
                         else -> message.text
                     },
-                    outgoing = false,
+                    outgoing = message.outgoing,
                     time = message.createdAt,
                     unread = true,
                     attachment = descriptor,
@@ -222,7 +222,7 @@ class MessagingService : Service() {
                         .onFailure { Log.w(TAG, "Attachment download will be retried") }
                 }
             }
-            if (!MainActivity.isVisible) showMessageNotification(message.senderNickname)
+            if (!message.outgoing && !MainActivity.isVisible) showMessageNotification(message.senderNickname)
             messagesChanged = true
         }
         if (messagesChanged) {
