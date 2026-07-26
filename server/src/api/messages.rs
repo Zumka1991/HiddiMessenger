@@ -463,6 +463,21 @@ async fn ack_message(
         if legacy == 0 {
             return Err(Error(StatusCode::NOT_FOUND, "message not found"));
         }
+    } else {
+        // A multi-device message is delivered as soon as any recipient device
+        // acknowledges its own opaque envelope. Keep the account-level status
+        // in sync for older clients and existing rows.
+        db.execute(
+            "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![message_id.to_string(), account.account_id],
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not update message delivery status",
+            )
+        })?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -479,14 +494,30 @@ async fn message_status(
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     db.query_row(
-        "SELECT delivered_at IS NOT NULL, read_at IS NOT NULL FROM messages WHERE id = ?1 AND sender_account_id = ?2",
+        "SELECT (
+             messages.delivered_at IS NOT NULL OR EXISTS(
+                 SELECT 1 FROM message_deliveries
+                 WHERE message_deliveries.message_id = messages.id
+                   AND message_deliveries.delivered_at IS NOT NULL
+             )
+         ), messages.read_at IS NOT NULL
+         FROM messages
+         WHERE messages.id = ?1 AND messages.sender_account_id = ?2",
         params![message_id.to_string(), account.account_id],
-        |row| Ok(MessageStatusResponse { delivered: row.get(0)?, read: row.get(1)? }),
+        |row| {
+            Ok(MessageStatusResponse {
+                delivered: row.get(0)?,
+                read: row.get(1)?,
+            })
+        },
     )
     .map(Json)
     .map_err(|error| match error {
         rusqlite::Error::QueryReturnedNoRows => Error(StatusCode::NOT_FOUND, "message not found"),
-        _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load message status"),
+        _ => Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not load message status",
+        ),
     })
 }
 
@@ -504,8 +535,17 @@ async fn mark_peer_messages_read(
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     db.execute(
-        "UPDATE messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
-         WHERE recipient_account_id = ?1 AND delivered_at IS NOT NULL
+        "UPDATE messages
+         SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP),
+             read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+         WHERE recipient_account_id = ?1
+           AND (
+               delivered_at IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM message_deliveries
+                   WHERE message_deliveries.message_id = messages.id
+                     AND message_deliveries.delivered_at IS NOT NULL
+               )
+           )
            AND sender_account_id = (SELECT id FROM accounts WHERE nickname = ?2)",
         params![recipient.account_id, sender_nickname],
     )

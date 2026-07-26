@@ -453,6 +453,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_device_delivery_and_read_status_use_device_acknowledgements() {
+        let app = test_app();
+        let alice = register_account(&app, "alice").await;
+        let bob = register_account(&app, "bob").await;
+
+        let (status, link) = request(
+            &app,
+            "POST",
+            "/v1/devices/link-code",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let link_code = serde_json::from_str::<serde_json::Value>(&link).unwrap()["link_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (status, linked) = request(
+            &app,
+            "POST",
+            "/v1/devices/link",
+            None,
+            serde_json::json!({
+                "link_code": link_code,
+                "identity_public_key": URL_SAFE_NO_PAD.encode([8_u8; 33]),
+                "registration_id": 78,
+                "device_name": "Bob second device",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let second_bob_token =
+            serde_json::from_str::<serde_json::Value>(&linked).unwrap()["access_token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+
+        let (status, sent) = request(
+            &app,
+            "POST",
+            "/v1/messages",
+            Some(&alice),
+            serde_json::json!({
+                "recipient_nickname": "bob",
+                "device_ciphertexts": [
+                    {"device_number": 1, "ciphertext": "YWJj"},
+                    {"device_number": 2, "ciphertext": "ZGVm"}
+                ],
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let message_id = serde_json::from_str::<serde_json::Value>(&sent).unwrap()["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/v1/messages/{message_id}"),
+            Some(&second_bob_token),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, delivery) = request(
+            &app,
+            "GET",
+            &format!("/v1/messages/{message_id}"),
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let delivery = serde_json::from_str::<serde_json::Value>(&delivery).unwrap();
+        assert_eq!(delivery["delivered"], true);
+        assert_eq!(delivery["read"], false);
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/v1/messages/read/alice",
+            Some(&second_bob_token),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, delivery) = request(
+            &app,
+            "GET",
+            &format!("/v1/messages/{message_id}"),
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&delivery).unwrap()["read"],
+            true,
+        );
+    }
+
+    #[tokio::test]
     async fn blocked_sender_is_silently_dropped_until_unblocked() {
         let app = test_app();
         let alice = register_account(&app, "alice").await;
