@@ -42,6 +42,7 @@ Debug всегда использует `http://127.0.0.1:3000`, а release по
 
 ```bash
 ./gradlew :app:assembleRelease \
+  -PhiddiAbi=arm64-v8a \
   -PhiddiKeystorePath=/absolute/path/to/release.jks \
   -PhiddiKeystorePasswordFile=/absolute/path/to/release-password.txt
 ```
@@ -50,4 +51,5 @@ Debug всегда использует `http://127.0.0.1:3000`, а release по
 заменить параметром `-PhiddiKeyAlias=...`. Файл пароля должен содержать только
 пароль keystore. Другой production URL можно передать через
 `-PhiddiServerUrl=https://...`. Пароль, keystore и собранные APK не коммитьте
-в Git.
+в Git. Без `-PhiddiAbi` собирается универсальный APK для телефона и эмулятора;
+для обычного современного Android-телефона используйте `arm64-v8a`.

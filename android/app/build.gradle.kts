@@ -23,6 +23,12 @@ val releaseKeystorePassword = releasePasswordFile
 val releaseKeyAlias = providers.gradleProperty("hiddiKeyAlias")
     .orElse("hiddi-release")
     .get()
+val requestedAbi = providers.gradleProperty("hiddiAbi").orNull
+requestedAbi?.let {
+    require(it == "arm64-v8a" || it == "x86_64") {
+        "hiddiAbi must be arm64-v8a or x86_64"
+    }
+}
 
 if (releaseRequested) {
     require(hiddiProductionServerUrl.startsWith("https://")) {
@@ -46,7 +52,7 @@ android {
         ndk {
             // Debug builds are also installed on the Android Studio x86_64
             // emulator; release distribution will use ABI splits/App Bundle.
-            abiFilters += setOf("arm64-v8a", "x86_64")
+            abiFilters += requestedAbi?.let(::setOf) ?: setOf("arm64-v8a", "x86_64")
         }
     }
 
