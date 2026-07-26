@@ -44,9 +44,9 @@ android {
         versionCode = 1
         versionName = "0.1.0-alpha.1"
         ndk {
-            // Development APKs target physical modern Android devices. Release
-            // distribution will use ABI splits/App Bundle instead of a universal APK.
-            abiFilters += "arm64-v8a"
+            // Debug builds are also installed on the Android Studio x86_64
+            // emulator; release distribution will use ABI splits/App Bundle.
+            abiFilters += setOf("arm64-v8a", "x86_64")
         }
     }
 

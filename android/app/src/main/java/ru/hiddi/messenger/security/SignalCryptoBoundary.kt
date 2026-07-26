@@ -23,20 +23,36 @@ class SignalCryptoBoundary(
         val identity = IdentityKeyPair.generate()
         val registrationId = SecureRandom().nextInt(MAX_REGISTRATION_ID) + 1
         val signedKeyPair = ECKeyPair.generate()
-        val signedSignature = identity.privateKey.calculateSignature(signedKeyPair.publicKey.serialize())
+        val signedPublicKey = signedKeyPair.publicKey.serialize()
+        val signedSignature = identity.privateKey.calculateSignature(signedPublicKey)
         val signedRecord = SignedPreKeyRecord(SIGNED_PREKEY_ID, System.currentTimeMillis(), signedKeyPair, signedSignature)
 
         val kyberKeyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
-        val kyberSignature = identity.privateKey.calculateSignature(kyberKeyPair.publicKey.serialize())
+        // KyberPreKeyRecord takes ownership of the native key-pair handle. Read the
+        // public bytes before constructing the record; accessing it afterwards can
+        // yield a null native handle on Android.
+        val kyberPublicKey = kyberKeyPair.publicKey.serialize()
+        val kyberSignature = identity.privateKey.calculateSignature(kyberPublicKey)
         val kyberRecord = KyberPreKeyRecord(KYBER_SIGNED_PREKEY_ID, System.currentTimeMillis(), kyberKeyPair, kyberSignature)
 
         val classical = (0 until ONE_TIME_PREKEY_COUNT).map { offset ->
-            PreKeyRecord(FIRST_CLASSICAL_ONE_TIME_PREKEY_ID + offset, ECKeyPair.generate())
+            val keyPair = ECKeyPair.generate()
+            val publicKey = keyPair.publicKey.serialize()
+            ClassicalPreKeyMaterial(
+                PreKeyRecord(FIRST_CLASSICAL_ONE_TIME_PREKEY_ID + offset, keyPair),
+                publicKey,
+                null,
+            )
         }
         val kyber = (0 until ONE_TIME_PREKEY_COUNT).map { offset ->
             val keyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
-            val signature = identity.privateKey.calculateSignature(keyPair.publicKey.serialize())
-            KyberPreKeyRecord(FIRST_KYBER_ONE_TIME_PREKEY_ID + offset, System.currentTimeMillis(), keyPair, signature)
+            val publicKey = keyPair.publicKey.serialize()
+            val signature = identity.privateKey.calculateSignature(publicKey)
+            KyberPreKeyMaterial(
+                KyberPreKeyRecord(FIRST_KYBER_ONE_TIME_PREKEY_ID + offset, System.currentTimeMillis(), keyPair, signature),
+                publicKey,
+                signature,
+            )
         }
 
         secretStore.write(
@@ -45,24 +61,36 @@ class SignalCryptoBoundary(
                 identity.serialize(),
                 signedRecord.serialize(),
                 kyberRecord.serialize(),
-                classical.map(PreKeyRecord::serialize),
-                kyber.map(KyberPreKeyRecord::serialize),
+                classical.map { it.record.serialize() },
+                kyber.map { it.record.serialize() },
             ).encode(),
         )
 
         return RegistrationBundle(
             registrationId = registrationId,
             identityPublicKey = identity.publicKey.serialize(),
-            signedPreKey = PublicPreKey(SIGNED_PREKEY_ID, signedKeyPair.publicKey.serialize(), signedSignature),
-            kyberSignedPreKey = PublicPreKey(KYBER_SIGNED_PREKEY_ID, kyberKeyPair.publicKey.serialize(), kyberSignature),
-            oneTimePreKeys = classical.map { record ->
-                PublicPreKey(record.id, record.keyPair.publicKey.serialize(), null)
+            signedPreKey = PublicPreKey(SIGNED_PREKEY_ID, signedPublicKey, signedSignature),
+            kyberSignedPreKey = PublicPreKey(KYBER_SIGNED_PREKEY_ID, kyberPublicKey, kyberSignature),
+            oneTimePreKeys = classical.map { material ->
+                PublicPreKey(material.record.id, material.publicKey, material.signature)
             },
-            kyberOneTimePreKeys = kyber.map { record ->
-                PublicPreKey(record.id, record.keyPair.publicKey.serialize(), record.signature)
+            kyberOneTimePreKeys = kyber.map { material ->
+                PublicPreKey(material.record.id, material.publicKey, material.signature)
             },
         )
     }
+
+    private data class ClassicalPreKeyMaterial(
+        val record: PreKeyRecord,
+        val publicKey: ByteArray,
+        val signature: ByteArray?,
+    )
+
+    private data class KyberPreKeyMaterial(
+        val record: KyberPreKeyRecord,
+        val publicKey: ByteArray,
+        val signature: ByteArray?,
+    )
 
     private companion object {
         const val SIGNED_PREKEY_ID = 1
