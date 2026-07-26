@@ -29,3 +29,9 @@ sealed interface AppScreen {
     data object Unlock : AppScreen
     data object Messenger : AppScreen
 }
+
+enum class DesktopSection {
+    Chats,
+    Contacts,
+    Settings,
+}

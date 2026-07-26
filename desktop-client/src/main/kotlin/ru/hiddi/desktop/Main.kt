@@ -413,6 +413,7 @@ private fun ErrorText(message: String) {
 @Composable
 private fun MessengerScreen(session: HiddiSession) {
     var online by remember { mutableStateOf(false) }
+    var section by remember { mutableStateOf(DesktopSection.Chats) }
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
@@ -436,48 +437,134 @@ private fun MessengerScreen(session: HiddiSession) {
     }
 
     Row(Modifier.fillMaxSize().background(Ink)) {
-        Column(Modifier.width(340.dp).fillMaxHeight().background(Panel)) {
+        DesktopNavigation(section, online) { section = it }
+        Divider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.width(1.dp).fillMaxHeight())
+        Column(Modifier.width(350.dp).fillMaxHeight().background(Panel)) {
             AccountHeader(session, online)
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = { Text("Поиск по никнейму") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-            )
-            Text(
-                if (query.length < 2) "Введите хотя бы 2 символа" else "ЛЮДИ",
-                color = TextMuted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
-            )
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(results, key = HiddiProfile::nickname) { profile ->
-                    UserRow(profile, selected?.nickname == profile.nickname) {
-                        selected = profile
-                    }
+            when (section) {
+                DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
+                DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
+                    selected = profile
+                    section = DesktopSection.Chats
                 }
+                DesktopSection.Settings -> DesktopSettingsPane(session, online)
             }
         }
         Divider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.width(1.dp).fillMaxHeight())
-        selected?.let { profile ->
-            ChatPane(
-                profile = profile,
-                messages = messages.filter { it.peer == profile.nickname },
-                onSend = { text, report ->
-                    scope.launch {
-                        runCatching {
-                            withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
-                        }.onSuccess {
-                            messages += ChatEntry(profile.nickname, text, outgoing = true)
-                            report(null)
-                        }.onFailure { report(it.message ?: "Не удалось отправить") }
-                    }
-                },
-                modifier = Modifier.weight(1f).fillMaxHeight(),
-            )
-        } ?: EmptyChat(Modifier.weight(1f).fillMaxHeight())
+        if (section == DesktopSection.Settings) {
+            DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
+        } else {
+            selected?.let { profile ->
+                ChatPane(
+                    profile = profile,
+                    messages = messages.filter { it.peer == profile.nickname },
+                    onSend = { text, report ->
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
+                            }.onSuccess {
+                                messages += ChatEntry(profile.nickname, text, outgoing = true)
+                                report(null)
+                            }.onFailure { report(it.message ?: "Не удалось отправить") }
+                        }
+                    },
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                )
+            } ?: EmptyChat(Modifier.weight(1f).fillMaxHeight())
+        }
+    }
+}
+
+@Composable
+private fun DesktopNavigation(selected: DesktopSection, online: Boolean, onSelect: (DesktopSection) -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.width(92.dp).fillMaxHeight().background(Color(0xFF0E151D)).padding(vertical = 18.dp, horizontal = 10.dp),
+    ) {
+        AppMark()
+        Spacer(Modifier.height(12.dp))
+        DesktopNavButton("Чаты", "●", selected == DesktopSection.Chats) { onSelect(DesktopSection.Chats) }
+        DesktopNavButton("Контакты", "◎", selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
+        Spacer(Modifier.weight(1f))
+        DesktopNavButton("Настройки", "⚙", selected == DesktopSection.Settings) { onSelect(DesktopSection.Settings) }
+        Box(Modifier.size(8.dp).clip(CircleShape).background(if (online) Mint else Color(0xFF66717C)))
+    }
+}
+
+@Composable
+private fun DesktopNavButton(label: String, symbol: String, selected: Boolean, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+            .background(if (selected) Color(0xFF173C37) else Color.Transparent)
+            .clickable(onClick = onClick).padding(vertical = 10.dp),
+    ) {
+        Text(symbol, color = if (selected) Mint else TextMuted, fontSize = 20.sp)
+        Text(label, color = if (selected) Mint else TextMuted, fontSize = 10.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun ChatListPane(
+    messages: List<ChatEntry>,
+    selected: HiddiProfile?,
+    onSelect: (HiddiProfile) -> Unit,
+) {
+    val peers = messages.map { it.peer }.distinct()
+    Text("Чаты", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp))
+    if (peers.isEmpty()) {
+        Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(horizontal = 18.dp))
+    } else {
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(peers, key = { it }) { peer ->
+                val profile = HiddiProfile(peer, "", "")
+                UserRow(profile, selected?.nickname == peer) { onSelect(profile) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContactsPane(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    results: List<HiddiProfile>,
+    selected: HiddiProfile?,
+    onOpen: (HiddiProfile) -> Unit,
+) {
+    Text("Контакты", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp))
+    OutlinedTextField(query, onQueryChange, placeholder = { Text("Поиск по @nickname") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+    Text(if (query.length < 2) "Введите хотя бы 2 символа" else "НАЙДЕННЫЕ ЛЮДИ", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp, 16.dp, 18.dp, 8.dp))
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(results, key = HiddiProfile::nickname) { profile -> UserRow(profile, selected?.nickname == profile.nickname) { onOpen(profile) } }
+    }
+}
+
+@Composable
+private fun DesktopSettingsPane(session: HiddiSession, online: Boolean) {
+    Text("Настройки", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp))
+    Surface(color = PanelRaised, shape = RoundedCornerShape(18.dp), modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("${if (online) "В сети" else "Нет соединения"}", color = if (online) Mint else Color(0xFFFF8D91), fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text("@${session.nickname} · устройство ${session.deviceNumber}", color = TextMuted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun DesktopSettingsDetail(session: HiddiSession, modifier: Modifier = Modifier) {
+    Column(modifier.background(Ink).padding(42.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text("Профиль и безопасность", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        Text("@${session.nickname}", color = Mint, fontSize = 18.sp)
+        Surface(color = PanelRaised, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Это устройство", fontWeight = FontWeight.Bold)
+                Text("Linux · устройство ${session.deviceNumber}", color = TextMuted)
+                Text("Signal-ключи защищены локальным паролем и не покидают компьютер.", color = TextMuted, fontSize = 13.sp)
+            }
+        }
     }
 }
 
