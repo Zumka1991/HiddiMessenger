@@ -69,11 +69,22 @@ internal class DesktopGroupManager(
         require(invited != session.nickname) { "Нельзя пригласить самого себя" }
         val encoded = URLEncoder.encode(invited, Charsets.UTF_8)
         val packageResponse =
-            session.groupRequest(
-                "GET",
-                "${session.server}/v1/users/$encoded/mls-key-package",
-                null,
-            ) as JSONObject
+            try {
+                session.groupRequest(
+                    "GET",
+                    "${session.server}/v1/users/$encoded/mls-key-package",
+                    null,
+                ) as JSONObject
+            } catch (error: IllegalStateException) {
+                if (error.message?.contains("mls key package not found", ignoreCase = true) == true) {
+                    throw IllegalStateException(
+                        "@$invited пока не готов к защищённым группам. " +
+                            "Подключите его устройство и откройте на нём обновлённый Hiddi.",
+                        error,
+                    )
+                }
+                throw error
+            }
         val groupId = requireNotNull(
             NativeMlsBridge.createLocalGroup(session.deviceId),
         ) { "OpenMLS не создал локальную группу" }
