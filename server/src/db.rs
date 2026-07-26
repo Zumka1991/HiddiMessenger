@@ -59,6 +59,16 @@ pub(crate) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             ciphertext BLOB NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
+         -- One encrypted envelope per recipient device.  The parent message
+         -- deliberately contains no plaintext and no device-specific state.
+         CREATE TABLE IF NOT EXISTS message_deliveries (
+            message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            recipient_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            ciphertext BLOB NOT NULL,
+            delivered_at TEXT,
+            read_at TEXT,
+            PRIMARY KEY(message_id, recipient_device_id)
+         );
          CREATE TABLE IF NOT EXISTS groups (
             id TEXT PRIMARY KEY NOT NULL,
             owner_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -164,6 +174,11 @@ pub(crate) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_mls_key_packages_device
          ON mls_key_packages(device_id, created_at)",
+        [],
+    )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_deliveries_pending
+         ON message_deliveries(recipient_device_id, delivered_at)",
         [],
     )?;
     let has_registration_id = db

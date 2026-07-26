@@ -47,6 +47,15 @@ pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
 #[derive(Deserialize)]
 struct SendMessageRequest {
     recipient_nickname: String,
+    #[serde(default)]
+    ciphertext: String,
+    #[serde(default)]
+    device_ciphertexts: Vec<DeviceCiphertext>,
+}
+
+#[derive(Deserialize)]
+struct DeviceCiphertext {
+    device_number: u32,
     ciphertext: String,
 }
 
@@ -96,10 +105,14 @@ async fn send_message(
     )?;
     let recipient_nickname = normalize_nickname(&request.recipient_nickname)
         .ok_or(Error(StatusCode::BAD_REQUEST, "invalid recipient nickname"))?;
-    if request.ciphertext.len() < 4
-        || request.ciphertext.len() > 2_800_000
-        || URL_SAFE_NO_PAD.decode(&request.ciphertext).is_err()
-    {
+    let legacy_valid = request.ciphertext.len() >= 4
+        && request.ciphertext.len() <= 2_800_000
+        && URL_SAFE_NO_PAD.decode(&request.ciphertext).is_ok();
+    let deliveries_valid = !request.device_ciphertexts.is_empty()
+        && request.device_ciphertexts.iter().all(|entry| entry.device_number > 0
+            && entry.ciphertext.len() >= 4 && entry.ciphertext.len() <= 2_800_000
+            && URL_SAFE_NO_PAD.decode(&entry.ciphertext).is_ok());
+    if !legacy_valid && !deliveries_valid {
         return Err(Error(
             StatusCode::BAD_REQUEST,
             "ciphertext must be URL-safe base64 and at most 2 MiB",
@@ -155,10 +168,24 @@ async fn send_message(
             sender.account_id,
             sender.device_id,
             recipient_id,
-            request.ciphertext
+            if deliveries_valid { "multi-device-v1".to_string() } else { request.ciphertext.clone() }
         ],
     )
     .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store message"))?;
+    if deliveries_valid {
+        for delivery in &request.device_ciphertexts {
+            let device_id: String = db.query_row(
+                "SELECT id FROM devices WHERE account_id = ?1 AND device_number = ?2",
+                params![recipient_id, delivery.device_number],
+                |row| row.get(0),
+            ).map_err(|_| Error(StatusCode::BAD_REQUEST, "recipient device not found"))?;
+            db.execute(
+                "INSERT INTO message_deliveries (message_id, recipient_device_id, ciphertext)
+                 VALUES (?1, ?2, ?3)",
+                params![message_id.to_string(), device_id, delivery.ciphertext],
+            ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store device delivery"))?;
+        }
+    }
     drop(db);
     state.message_notify.notify_waiters();
     state.realtime.publish(&recipient_id, "message");
@@ -223,14 +250,18 @@ async fn inbox(
                       SELECT device_number FROM devices
                       WHERE devices.id = messages.sender_device_id
                     ), 1),
-                    messages.ciphertext, messages.created_at
+                    COALESCE(message_deliveries.ciphertext, messages.ciphertext), messages.created_at
          FROM messages JOIN accounts ON accounts.id = messages.sender_account_id
-         WHERE messages.recipient_account_id = ?1 AND messages.delivered_at IS NULL
+         LEFT JOIN message_deliveries ON message_deliveries.message_id = messages.id
+             AND message_deliveries.recipient_device_id = ?2
+         WHERE (messages.recipient_account_id = ?1 AND messages.delivered_at IS NULL
+                AND messages.ciphertext != 'multi-device-v1')
+            OR (message_deliveries.recipient_device_id = ?2 AND message_deliveries.delivered_at IS NULL)
          ORDER BY messages.created_at ASC LIMIT 100",
         )
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load inbox"))?;
     let messages = statement
-        .query_map(params![recipient.account_id], |row| {
+        .query_map(params![recipient.account_id, recipient.device_id], |row| {
             let id: String = row.get(0)?;
             Ok(MessageResponse {
                 message_id: Uuid::parse_str(&id).expect("database contains valid UUIDs"),
@@ -258,9 +289,9 @@ async fn ack_message(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let acknowledged = db
         .execute(
-            "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
-             WHERE id = ?1 AND recipient_account_id = ?2",
-            params![message_id.to_string(), account.account_id],
+            "UPDATE message_deliveries SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+             WHERE message_id = ?1 AND recipient_device_id = ?2",
+            params![message_id.to_string(), account.device_id],
         )
         .map_err(|_| {
             Error(
@@ -269,7 +300,12 @@ async fn ack_message(
             )
         })?;
     if acknowledged == 0 {
-        return Err(Error(StatusCode::NOT_FOUND, "message not found"));
+        let legacy = db.execute(
+            "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![message_id.to_string(), account.account_id],
+        ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not acknowledge message"))?;
+        if legacy == 0 { return Err(Error(StatusCode::NOT_FOUND, "message not found")); }
     }
     Ok(StatusCode::NO_CONTENT)
 }
