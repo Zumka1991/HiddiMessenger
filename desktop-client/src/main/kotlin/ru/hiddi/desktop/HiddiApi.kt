@@ -372,52 +372,71 @@ class HiddiSession internal constructor(
 
     @Synchronized
     fun syncInbox(): List<ChatEntry> {
+        synchronizeMessageDeletions()
         synchronizeConversationDeletions()
-        val inbox = authenticatedRequest("GET", "$server/v1/messages", null) as JSONArray
         val received = mutableListOf<ChatEntry>()
-        for (index in 0 until inbox.length()) {
-            val item = inbox.getJSONObject(index)
-            val messageId = item.getString("message_id")
-            if (history().any { it.messageId == messageId }) {
-                authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
-                continue
+        val knownMessageIds = history().mapNotNull(ChatEntry::messageId).toMutableSet()
+        var batchCount = 0
+        do {
+            val inbox = authenticatedRequest("GET", "$server/v1/messages", null) as JSONArray
+            for (index in 0 until inbox.length()) {
+                val item = inbox.getJSONObject(index)
+                val messageId = item.getString("message_id")
+                if (!knownMessageIds.add(messageId)) {
+                    authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+                    continue
+                }
+                val raw = item.getString("ciphertext").base64UrlDecode()
+                require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
+                val sender = item.getString("sender_nickname")
+                val remote = SignalProtocolAddress(sender, item.optInt("sender_device_number", 1))
+                val local = SignalProtocolAddress(nickname, deviceNumber)
+                val plain = when (raw.first().toInt()) {
+                    CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
+                    CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
+                    else -> error("Неизвестный тип сообщения")
+                }
+                try {
+                    val plaintext = plain.decodeToString()
+                    val sync = runCatching { JSONObject(plaintext) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
+                    val visibleText = sync?.optString("text") ?: plaintext
+                    val peer = sync?.optString("peer")?.ifBlank { sender } ?: sender
+                    val attachment = DesktopAttachmentStore.parseEnvelope(visibleText)
+                    attachment?.let { runCatching { cacheAttachment(it) } }
+                    val entry =
+                        ChatEntry(
+                            peer = peer,
+                            text = attachment?.displayText() ?: visibleText,
+                            outgoing = sync != null,
+                            messageId = messageId,
+                            deliveryStatus = "delivered",
+                            attachment = attachment,
+                        )
+                    appendHistory(entry)
+                    persist()
+                    authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+                    received += entry
+                } finally {
+                    plain.fill(0)
+                    raw.fill(0)
+                }
             }
-            val raw = item.getString("ciphertext").base64UrlDecode()
-            require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
-            val sender = item.getString("sender_nickname")
-            val remote = SignalProtocolAddress(sender, item.optInt("sender_device_number", 1))
-            val local = SignalProtocolAddress(nickname, deviceNumber)
-            val plain = when (raw.first().toInt()) {
-                CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
-                CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
-                else -> error("Неизвестный тип сообщения")
-            }
-            try {
-                val plaintext = plain.decodeToString()
-                val sync = runCatching { JSONObject(plaintext) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
-                val visibleText = sync?.optString("text") ?: plaintext
-                val peer = sync?.optString("peer")?.ifBlank { sender } ?: sender
-                val attachment = DesktopAttachmentStore.parseEnvelope(visibleText)
-                attachment?.let { runCatching { cacheAttachment(it) } }
-                val entry =
-                    ChatEntry(
-                        peer = peer,
-                        text = attachment?.displayText() ?: visibleText,
-                        outgoing = sync != null,
-                        messageId = messageId,
-                        deliveryStatus = "delivered",
-                        attachment = attachment,
-                    )
-                appendHistory(entry)
-                persist()
-                authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
-                received += entry
-            } finally {
-                plain.fill(0)
-                raw.fill(0)
-            }
-        }
+            batchCount++
+            if (inbox.length() < SERVER_INBOX_PAGE_SIZE) break
+        } while (batchCount < MAX_INBOX_BATCHES)
         return received
+    }
+
+    @Synchronized
+    fun deleteMessage(messageId: String, forEveryone: Boolean) {
+        if (forEveryone) {
+            authenticatedRequest(
+                "DELETE",
+                "$server/v1/messages/${URLEncoder.encode(messageId, Charsets.UTF_8)}?for_everyone=true",
+                null,
+            )
+        }
+        if (removeMessageHistory(messageId)) persist()
     }
 
     @Synchronized
@@ -783,6 +802,11 @@ class HiddiSession internal constructor(
 
     private fun historyJson(): JSONArray = state.optJSONArray("chat_history") ?: JSONArray().also { state.put("chat_history", it) }
 
+    private companion object {
+        const val SERVER_INBOX_PAGE_SIZE = 100
+        const val MAX_INBOX_BATCHES = 20
+    }
+
     private fun synchronizeConversationDeletions() {
         val deletions =
             authenticatedRequest("GET", "$server/v1/conversations/deletions", null) as JSONArray
@@ -797,6 +821,38 @@ class HiddiSession internal constructor(
             )
         }
         if (changed) persist()
+    }
+
+    private fun synchronizeMessageDeletions() {
+        val deletions =
+            authenticatedRequest("GET", "$server/v1/messages/deletions", null) as JSONArray
+        var changed = false
+        for (index in 0 until deletions.length()) {
+            val deletion = deletions.getJSONObject(index)
+            changed = removeMessageHistory(deletion.getString("message_id")) || changed
+            authenticatedRequest(
+                "POST",
+                "$server/v1/messages/deletions/${deletion.getString("deletion_id")}",
+                null,
+            )
+        }
+        if (changed) persist()
+    }
+
+    private fun removeMessageHistory(messageId: String): Boolean {
+        val history = historyJson()
+        for (index in history.length() - 1 downTo 0) {
+            val item = history.getJSONObject(index)
+            if (item.optString("message_id") == messageId) {
+                item.optJSONObject("attachment")
+                    ?.let { runCatching { it.toAttachmentDescriptor() }.getOrNull() }
+                    ?.descriptors()
+                    ?.forEach { attachmentStore.delete(it.attachmentId) }
+                history.remove(index)
+                return true
+            }
+        }
+        return false
     }
 
     private fun removeConversationHistory(peer: String): Boolean {

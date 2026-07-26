@@ -203,35 +203,43 @@ class MessagingService : Service() {
             api.acknowledgeConversationDeletion(profile, deletion.deletionId)
             messagesChanged = true
         }
-        api.inbox(profile).forEach { message ->
-            val descriptor = runCatching {
-                EncryptedAttachmentStore.parseEnvelope(message.text)
-            }.getOrNull()
-            history.append(
-                ChatHistoryItem(
-                    peer = message.senderNickname,
-                    text = when (descriptor?.kind) {
-                        EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
-                        EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
-                        else -> message.text
-                    },
-                    outgoing = message.outgoing,
-                    time = message.createdAt,
-                    unread = true,
-                    attachment = descriptor,
-                    messageId = message.messageId,
-                ),
-            )
-            api.acknowledgeMessage(profile, message.messageId)
-            descriptor?.let {
-                listOfNotNull(it.preview, it).forEach { part ->
-                    runCatching { downloadAttachment(profile, api, attachments, part.attachmentId) }
-                        .onFailure { Log.w(TAG, "Attachment download will be retried") }
+        var inboxBatch: List<ru.hiddi.messenger.network.DecryptedMessage>
+        var inboxBatchCount = 0
+        do {
+            inboxBatch = api.inbox(profile)
+            inboxBatch.forEach { message ->
+                val descriptor = runCatching {
+                    EncryptedAttachmentStore.parseEnvelope(message.text)
+                }.getOrNull()
+                history.append(
+                    ChatHistoryItem(
+                        peer = message.senderNickname,
+                        text = when (descriptor?.kind) {
+                            EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+                            EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+                            else -> message.text
+                        },
+                        outgoing = message.outgoing,
+                        time = message.createdAt,
+                        unread = true,
+                        attachment = descriptor,
+                        messageId = message.messageId,
+                    ),
+                )
+                api.acknowledgeMessage(profile, message.messageId)
+                descriptor?.let {
+                    listOfNotNull(it.preview, it).forEach { part ->
+                        runCatching { downloadAttachment(profile, api, attachments, part.attachmentId) }
+                            .onFailure { Log.w(TAG, "Attachment download will be retried") }
+                    }
                 }
+                if (!message.outgoing && !MainActivity.isVisible) {
+                    showMessageNotification(message.senderNickname)
+                }
+                messagesChanged = true
             }
-            if (!message.outgoing && !MainActivity.isVisible) showMessageNotification(message.senderNickname)
-            messagesChanged = true
-        }
+            inboxBatchCount++
+        } while (inboxBatch.size >= SERVER_INBOX_PAGE_SIZE && inboxBatchCount < MAX_INBOX_BATCHES)
         if (messagesChanged) {
             sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
         }
@@ -387,6 +395,8 @@ class MessagingService : Service() {
         private const val MESSAGE_CHANNEL = "hiddi_messages_v1"
         private const val FOREGROUND_NOTIFICATION_ID = 1001
         private const val TAG = "HiddiMessaging"
+        private const val SERVER_INBOX_PAGE_SIZE = 100
+        private const val MAX_INBOX_BATCHES = 20
         private val nextNotificationId = AtomicInteger(2000)
     }
 }

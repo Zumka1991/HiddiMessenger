@@ -346,6 +346,33 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["sender_nickname"],
             "alice"
         );
+        let message_id =
+            serde_json::from_str::<serde_json::Value>(&inbox).unwrap()[0]["message_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let (ack_status, _) = request(
+            &app,
+            "POST",
+            &format!("/v1/messages/{message_id}"),
+            Some(&bob_token),
+            String::new(),
+        )
+        .await;
+        assert_eq!(ack_status, StatusCode::NO_CONTENT);
+        let (history_status, history) = request(
+            &app,
+            "GET",
+            "/v1/messages/history?limit=1",
+            Some(&bob_token),
+            String::new(),
+        )
+        .await;
+        assert_eq!(history_status, StatusCode::OK);
+        let history = serde_json::from_str::<serde_json::Value>(&history).unwrap();
+        assert_eq!(history["messages"][0]["message_id"], message_id);
+        assert_eq!(history["messages"][0]["sender_nickname"], "alice");
+        assert_eq!(history["has_more"], false);
     }
 
     #[tokio::test]

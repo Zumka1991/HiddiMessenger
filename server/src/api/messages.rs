@@ -16,6 +16,7 @@ use crate::{auth::authenticate, error::Error, state::AppState, validation::norma
 pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/v1/messages", post(send_message).get(inbox))
+        .route("/v1/messages/history", get(message_history))
         .route("/v1/messages/wait", get(wait_for_message))
         .route("/v1/messages/deletions", get(pending_message_deletions))
         .route(
@@ -68,6 +69,19 @@ struct MessageResponse {
     created_at: String,
 }
 
+#[derive(Deserialize, Default)]
+struct HistoryQuery {
+    limit: Option<usize>,
+    before: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HistoryResponse {
+    messages: Vec<MessageResponse>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
 #[derive(Serialize)]
 struct MessageStatusResponse {
     delivered: bool,
@@ -109,9 +123,12 @@ async fn send_message(
         && request.ciphertext.len() <= 2_800_000
         && URL_SAFE_NO_PAD.decode(&request.ciphertext).is_ok();
     let deliveries_valid = !request.device_ciphertexts.is_empty()
-        && request.device_ciphertexts.iter().all(|entry| entry.device_number > 0
-            && entry.ciphertext.len() >= 4 && entry.ciphertext.len() <= 2_800_000
-            && URL_SAFE_NO_PAD.decode(&entry.ciphertext).is_ok());
+        && request.device_ciphertexts.iter().all(|entry| {
+            entry.device_number > 0
+                && entry.ciphertext.len() >= 4
+                && entry.ciphertext.len() <= 2_800_000
+                && URL_SAFE_NO_PAD.decode(&entry.ciphertext).is_ok()
+        });
     if !legacy_valid && !deliveries_valid {
         return Err(Error(
             StatusCode::BAD_REQUEST,
@@ -168,22 +185,34 @@ async fn send_message(
             sender.account_id,
             sender.device_id,
             recipient_id,
-            if deliveries_valid { "multi-device-v1".to_string() } else { request.ciphertext.clone() }
+            if deliveries_valid {
+                "multi-device-v1".to_string()
+            } else {
+                request.ciphertext.clone()
+            }
         ],
     )
     .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store message"))?;
     if deliveries_valid {
         for delivery in &request.device_ciphertexts {
-            let device_id: String = db.query_row(
-                "SELECT id FROM devices WHERE account_id = ?1 AND device_number = ?2",
-                params![recipient_id, delivery.device_number],
-                |row| row.get(0),
-            ).map_err(|_| Error(StatusCode::BAD_REQUEST, "recipient device not found"))?;
+            let device_id: String = db
+                .query_row(
+                    "SELECT id FROM devices WHERE account_id = ?1 AND device_number = ?2",
+                    params![recipient_id, delivery.device_number],
+                    |row| row.get(0),
+                )
+                .map_err(|_| Error(StatusCode::BAD_REQUEST, "recipient device not found"))?;
             db.execute(
                 "INSERT INTO message_deliveries (message_id, recipient_device_id, ciphertext)
                  VALUES (?1, ?2, ?3)",
                 params![message_id.to_string(), device_id, delivery.ciphertext],
-            ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store device delivery"))?;
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not store device delivery",
+                )
+            })?;
         }
     }
     drop(db);
@@ -277,6 +306,125 @@ async fn inbox(
     Ok(Json(messages))
 }
 
+/// Returns an opaque, device-scoped ciphertext history page. The server cannot
+/// inspect message contents; clients decrypt only previously unseen envelopes.
+async fn message_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryResponse>, Error> {
+    let recipient = authenticate(&state, &headers)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let before = query
+        .before
+        .as_deref()
+        .map(decode_history_cursor)
+        .transpose()?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let sql = format!(
+        "SELECT messages.id, accounts.nickname,
+                COALESCE(sender_devices.device_number, 1),
+                COALESCE(message_deliveries.ciphertext, messages.ciphertext),
+                messages.created_at
+         FROM messages
+         JOIN accounts ON accounts.id = messages.sender_account_id
+         LEFT JOIN devices AS sender_devices ON sender_devices.id = messages.sender_device_id
+         LEFT JOIN message_deliveries ON message_deliveries.message_id = messages.id
+             AND message_deliveries.recipient_device_id = ?2
+         WHERE (message_deliveries.recipient_device_id = ?2
+                OR (messages.recipient_account_id = ?1
+                    AND messages.ciphertext != 'multi-device-v1'))
+           {}
+         ORDER BY messages.created_at DESC, messages.id DESC
+         LIMIT ?{}",
+        if before.is_some() {
+            "AND (messages.created_at < ?3 OR (messages.created_at = ?3 AND messages.id < ?4))"
+        } else {
+            ""
+        },
+        if before.is_some() { 5 } else { 3 },
+    );
+    let mut statement = db.prepare(&sql).map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not load message history",
+        )
+    })?;
+    let requested = (limit + 1) as i64;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let id: String = row.get(0)?;
+        Ok(MessageResponse {
+            message_id: Uuid::parse_str(&id).expect("database contains valid UUIDs"),
+            sender_nickname: row.get(1)?,
+            sender_device_number: row.get(2)?,
+            ciphertext: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    };
+    let mut messages = if let Some((created_at, id)) = before {
+        statement.query_map(
+            params![
+                recipient.account_id,
+                recipient.device_id,
+                created_at,
+                id,
+                requested
+            ],
+            map_row,
+        )
+    } else {
+        statement.query_map(
+            params![recipient.account_id, recipient.device_id, requested],
+            map_row,
+        )
+    }
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not load message history",
+        )
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(|_| {
+        Error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not load message history",
+        )
+    })?;
+    let has_more = messages.len() > limit;
+    messages.truncate(limit);
+    let next_cursor = messages
+        .last()
+        .map(|message| encode_history_cursor(&message.created_at, message.message_id));
+    messages.reverse();
+    Ok(Json(HistoryResponse {
+        messages,
+        next_cursor,
+        has_more,
+    }))
+}
+
+fn encode_history_cursor(created_at: &str, id: Uuid) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{created_at}\0{id}"))
+}
+
+fn decode_history_cursor(value: &str) -> Result<(String, String), Error> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid history cursor"))?;
+    let (created_at, id) = decoded
+        .split_once('\0')
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid history cursor"))?;
+    let id = Uuid::parse_str(id)
+        .map_err(|_| Error(StatusCode::BAD_REQUEST, "invalid history cursor"))?;
+    Ok((created_at.to_owned(), id.to_string()))
+}
+
 async fn ack_message(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -300,12 +448,21 @@ async fn ack_message(
             )
         })?;
     if acknowledged == 0 {
-        let legacy = db.execute(
-            "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+        let legacy = db
+            .execute(
+                "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
              WHERE id = ?1 AND recipient_account_id = ?2",
-            params![message_id.to_string(), account.account_id],
-        ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not acknowledge message"))?;
-        if legacy == 0 { return Err(Error(StatusCode::NOT_FOUND, "message not found")); }
+                params![message_id.to_string(), account.account_id],
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not acknowledge message",
+                )
+            })?;
+        if legacy == 0 {
+            return Err(Error(StatusCode::NOT_FOUND, "message not found"));
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -533,7 +533,9 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     var peerTyping by remember { mutableStateOf(false) }
     var typingRevision by remember { mutableStateOf(0) }
     var invisibleMode by remember(session) { mutableStateOf(session.invisibleMode()) }
-    val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
+    val messages = remember(session) {
+        mutableStateListOf<ChatEntry>().also { it += session.history().boundedHistoryWindow() }
+    }
     val peerProfiles = remember(session) { mutableStateMapOf<String, HiddiProfile>() }
     val peerAvatars = remember(session) { mutableStateMapOf<String, ByteArray>() }
     val scope = rememberCoroutineScope()
@@ -548,7 +550,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
             }
         }.getOrNull() ?: return
         messages.clear()
-        messages.addAll(snapshot)
+        messages.addAll(snapshot.boundedHistoryWindow())
     }
 
     DisposableEffect(session) {
@@ -834,6 +836,20 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                                 session.clearConversation(profile.nickname, forBoth)
                             }
                             messages.removeAll { it.peer == profile.nickname }
+                        },
+                        onDeleteMessage = { messageId, forEveryone, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        session.deleteMessage(messageId, forEveryone)
+                                    }
+                                }.onSuccess {
+                                    messages.removeAll { it.messageId == messageId }
+                                    report(null)
+                                }.onFailure {
+                                    report(it.message ?: "Не удалось удалить сообщение")
+                                }
+                            }
                         },
                         onSetBlocked = { blocked ->
                             withContext(Dispatchers.IO) {
@@ -1924,6 +1940,7 @@ private fun ChatPane(
     onLoadSafetyNumber: suspend () -> SafetyNumberInfo,
     onTrustSafetyNumber: suspend (String) -> Unit,
     onClearConversation: suspend (Boolean) -> Unit,
+    onDeleteMessage: (String, Boolean, (String?) -> Unit) -> Unit,
     onSetBlocked: suspend (Boolean) -> Unit,
     onSetContact: suspend (Boolean) -> Unit,
     modifier: Modifier = Modifier,
@@ -1937,6 +1954,7 @@ private fun ChatPane(
     var voiceLevel by remember { mutableStateOf(0f) }
     var error by remember { mutableStateOf<String?>(null) }
     var menuExpanded by remember { mutableStateOf(false) }
+    var messageMenuId by remember(profile.nickname) { mutableStateOf<String?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
     var clearForBoth by remember { mutableStateOf(false) }
     var showBlockDialog by remember { mutableStateOf(false) }
@@ -2259,29 +2277,68 @@ private fun ChatPane(
                             if (message.outgoing) Arrangement.End else Arrangement.Start,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Surface(
-                            color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
-                            shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
-                            modifier = Modifier.widthIn(max = 520.dp),
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
-                                horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                        Box {
+                            Surface(
+                                color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
+                                shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
+                                modifier =
+                                    Modifier.widthIn(max = 520.dp)
+                                        .clickable(enabled = message.messageId != null) {
+                                            messageMenuId = message.messageId
+                                        },
                             ) {
-                                when (message.attachment?.kind) {
-                                    DesktopAttachmentStore.IMAGE_KIND ->
-                                        DesktopAttachmentImage(
-                                            descriptor = message.attachment,
-                                            onLoadAttachment = onLoadAttachment,
-                                        )
-                                    DesktopAttachmentStore.VOICE_KIND ->
-                                        DesktopVoiceAttachment(
-                                            descriptor = message.attachment,
-                                            onLoadAttachment = onLoadAttachment,
-                                        )
-                                    else -> Text(message.text)
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                                    horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                                ) {
+                                    when (message.attachment?.kind) {
+                                        DesktopAttachmentStore.IMAGE_KIND ->
+                                            DesktopAttachmentImage(
+                                                descriptor = message.attachment,
+                                                onLoadAttachment = onLoadAttachment,
+                                            )
+                                        DesktopAttachmentStore.VOICE_KIND ->
+                                            DesktopVoiceAttachment(
+                                                descriptor = message.attachment,
+                                                onLoadAttachment = onLoadAttachment,
+                                            )
+                                        else -> Text(message.text)
+                                    }
+                                    MessageMeta(message)
                                 }
-                                MessageMeta(message)
+                            }
+                            DropdownMenu(
+                                expanded = message.messageId != null && messageMenuId == message.messageId,
+                                onDismissRequest = { messageMenuId = null },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Удалить у себя") },
+                                    leadingIcon = {
+                                        Icon(Icons.Rounded.DeleteSweep, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        val id = message.messageId ?: return@DropdownMenuItem
+                                        messageMenuId = null
+                                        onDeleteMessage(id, false) { failure -> error = failure }
+                                    },
+                                )
+                                if (message.outgoing) {
+                                    DropdownMenuItem(
+                                        text = { Text("Удалить у всех", color = Color(0xFFFF9DA4)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Rounded.DeleteSweep,
+                                                contentDescription = null,
+                                                tint = Color(0xFFFF7C8B),
+                                            )
+                                        },
+                                        onClick = {
+                                            val id = message.messageId ?: return@DropdownMenuItem
+                                            messageMenuId = null
+                                            onDeleteMessage(id, true) { failure -> error = failure }
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -2903,6 +2960,14 @@ private fun defaultDeviceName(): String {
     val host = System.getenv("HOSTNAME")?.takeIf(String::isNotBlank) ?: "Linux"
     return "Linux · ${host.take(48)}"
 }
+
+private const val DESKTOP_HISTORY_WINDOW_PER_PEER = 150
+
+private fun List<ChatEntry>.boundedHistoryWindow(): List<ChatEntry> =
+    groupBy(ChatEntry::peer)
+        .values
+        .flatMap { it.takeLast(DESKTOP_HISTORY_WINDOW_PER_PEER) }
+        .sortedBy(ChatEntry::createdAt)
 
 @Preview
 @Composable
