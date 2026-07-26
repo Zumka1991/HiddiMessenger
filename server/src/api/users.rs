@@ -217,21 +217,24 @@ async fn update_profile(
             "could not update profile",
         )
     })?;
-    db.query_row(
-        "SELECT nickname, display_name, bio, avatar_version
+    let profile = db
+        .query_row(
+            "SELECT nickname, display_name, bio, avatar_version
          FROM accounts WHERE id = ?1",
-        params![account.account_id],
-        |row| {
-            Ok(UserProfileResponse {
-                nickname: row.get(0)?,
-                display_name: row.get(1)?,
-                bio: row.get(2)?,
-                avatar_version: row.get(3)?,
-            })
-        },
-    )
-    .map(Json)
-    .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load profile"))
+            params![account.account_id],
+            |row| {
+                Ok(UserProfileResponse {
+                    nickname: row.get(0)?,
+                    display_name: row.get(1)?,
+                    bio: row.get(2)?,
+                    avatar_version: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not load profile"))?;
+    drop(db);
+    notify_profile_peers(&state, &account.account_id)?;
+    Ok(Json(profile))
 }
 
 async fn upload_avatar(
@@ -251,6 +254,8 @@ async fn upload_avatar(
         params![image, version, account.account_id],
     )
     .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not update avatar"))?;
+    drop(db);
+    notify_profile_peers(&state, &account.account_id)?;
     Ok((StatusCode::CREATED, Json(AvatarVersionResponse { version })))
 }
 
@@ -268,7 +273,55 @@ async fn delete_avatar(
         params![account.account_id],
     )
     .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete avatar"))?;
+    drop(db);
+    notify_profile_peers(&state, &account.account_id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Profile events are sent only to accounts that have already exchanged a
+/// personal message with the changed account. This avoids broadcasting profile
+/// activity to unrelated users.
+fn notify_profile_peers(state: &AppState, account_id: &str) -> Result<(), Error> {
+    let peers = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+        let mut statement = db
+            .prepare(
+                "SELECT DISTINCT CASE
+                    WHEN messages.sender_account_id = ?1 THEN messages.recipient_account_id
+                    ELSE messages.sender_account_id
+                 END AS peer_id
+                 FROM messages
+                 WHERE messages.sender_account_id = ?1 OR messages.recipient_account_id = ?1",
+            )
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not load profile peers",
+                )
+            })?;
+        statement
+            .query_map(params![account_id], |row| row.get::<_, String>(0))
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not load profile peers",
+                )
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| {
+                Error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not load profile peers",
+                )
+            })?
+    };
+    for peer in peers {
+        state.realtime.publish(&peer, "profile");
+    }
+    Ok(())
 }
 
 async fn user_avatar(

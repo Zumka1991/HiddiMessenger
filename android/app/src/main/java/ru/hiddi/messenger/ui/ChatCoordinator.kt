@@ -211,6 +211,14 @@ fun ChatScreen(
         historyRevision++
     }
 
+    suspend fun refreshKnownProfiles() {
+        (peers + contacts).distinct().forEach { peer ->
+            runCatching { api.userProfile(profile, peer) }.getOrNull()?.let { loaded ->
+                knownProfiles = knownProfiles + (peer to loaded)
+            }
+        }
+    }
+
     fun loadOlderHistory() {
         val peer = recipient ?: return
         if (!hasOlderHistory || loadingOlderHistory) return
@@ -673,16 +681,17 @@ fun ChatScreen(
     }
 
     LaunchedEffect(peers, contacts) {
-        (peers + contacts).distinct().filterNot(knownProfiles::containsKey).forEach { peer ->
-            runCatching { api.userProfile(profile, peer) }.getOrNull()?.let { loaded ->
-                knownProfiles = knownProfiles + (peer to loaded)
-            }
-        }
+        refreshKnownProfiles()
     }
 
     LaunchedEffect(knownProfiles.mapValues { it.value.avatarVersion }) {
         knownProfiles.values.forEach { user ->
-            val version = user.avatarVersion ?: return@forEach
+            val version = user.avatarVersion
+            if (version == null) {
+                knownAvatars = knownAvatars - user.nickname
+                knownAvatarVersions = knownAvatarVersions - user.nickname
+                return@forEach
+            }
             if (knownAvatarVersions[user.nickname] != version) {
                 runCatching { api.avatar(profile, user.nickname) }.getOrNull()?.let { image ->
                     knownAvatars = knownAvatars + (user.nickname to image)
@@ -720,6 +729,9 @@ fun ChatScreen(
                         refreshGroups()
                         groupStatus = "Получено новое MLS-событие"
                     }
+                    MessagingService.ACTION_PROFILES_UPDATED -> {
+                        scope.launch { refreshKnownProfiles() }
+                    }
                 }
             }
         }
@@ -730,6 +742,7 @@ fun ChatScreen(
                 addAction(MessagingService.ACTION_MESSAGES_UPDATED)
                 addAction(MessagingService.ACTION_CONNECTION_CHANGED)
                 addAction(MessagingService.ACTION_GROUPS_UPDATED)
+                addAction(MessagingService.ACTION_PROFILES_UPDATED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
