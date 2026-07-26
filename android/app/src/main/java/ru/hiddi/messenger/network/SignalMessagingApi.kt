@@ -639,14 +639,45 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                     }
                     repository.save(store.snapshot())
                     val text = plain.decodeToString()
-                    val sync = runCatching { JSONObject(text) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
-                    output += DecryptedMessage(
-                        messageId = item.getString("message_id"),
-                        senderNickname = sync?.optString("peer")?.ifBlank { sender } ?: sender,
-                        text = sync?.optString("text") ?: text,
-                        createdAt = item.getString("created_at"),
-                        outgoing = sync != null,
-                    )
+                    val sync = runCatching { JSONObject(text) }.getOrNull()
+                    when (sync?.optString("type")) {
+                        "hiddi.sync.batch.v1" -> {
+                            val entries = sync.getJSONArray("entries")
+                            for (entryIndex in 0 until entries.length()) {
+                                val entry = entries.getJSONObject(entryIndex)
+                                output += DecryptedMessage(
+                                    messageId = item.getString("message_id"),
+                                    sourceMessageId =
+                                        entry.optString("source_message_id")
+                                            .takeIf(String::isNotBlank)
+                                            ?: "${item.getString("message_id")}:sync:$entryIndex",
+                                    senderNickname = entry.getString("peer"),
+                                    text = entry.getString("text"),
+                                    createdAt = entry.getString("created_at"),
+                                    outgoing = entry.getBoolean("outgoing"),
+                                    deliveryStatus =
+                                        entry.optString("delivery_status", "delivered"),
+                                    historicalSync = true,
+                                )
+                            }
+                        }
+                        "hiddi.sync.v1" ->
+                            output += DecryptedMessage(
+                                messageId = item.getString("message_id"),
+                                senderNickname =
+                                    sync.optString("peer").ifBlank { sender },
+                                text = sync.optString("text"),
+                                createdAt = item.getString("created_at"),
+                                outgoing = true,
+                            )
+                        else ->
+                            output += DecryptedMessage(
+                                messageId = item.getString("message_id"),
+                                senderNickname = sender,
+                                text = text,
+                                createdAt = item.getString("created_at"),
+                            )
+                    }
                     plain.fill(0)
                 } catch (_: Exception) {
                     // One invalid envelope must not permanently block every newer message.
@@ -730,11 +761,16 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
 }
 
 data class DecryptedMessage(
+    /** Transport envelope id used only for server acknowledgement. */
     val messageId: String,
+    /** Original chat message id carried inside an E2EE device-sync snapshot. */
+    val sourceMessageId: String? = null,
     val senderNickname: String,
     val text: String,
     val createdAt: String,
     val outgoing: Boolean = false,
+    val deliveryStatus: String = "delivered",
+    val historicalSync: Boolean = false,
 )
 data class DeviceLinkCode(val code: String, val expiresAt: Long)
 data class LinkedDevice(

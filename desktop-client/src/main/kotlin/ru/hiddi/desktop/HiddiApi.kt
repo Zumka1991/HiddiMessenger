@@ -18,6 +18,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.security.MessageDigest
+import java.time.Instant
 
 class HiddiApi(
     private val vault: Vault,
@@ -369,6 +370,79 @@ class HiddiSession internal constructor(
                 }.getOrNull()
             }
         } ?: emptyList()
+
+    /**
+     * Sends an encrypted initial history snapshot only to own devices which
+     * have not received one from this desktop yet. The server receives regular
+     * opaque Signal envelopes and cannot inspect the snapshot.
+     */
+    @Synchronized
+    fun synchronizeHistoryToOwnDevices(): Int {
+        val local = SignalProtocolAddress(nickname, deviceNumber)
+        val ownBundles =
+            authenticatedRequest(
+                "GET",
+                "$server/v1/users/$nickname/prekey-bundles",
+                null,
+            ) as JSONArray
+        val synchronizedDevices =
+            state.optJSONArray("history_sync_devices_v1")
+                ?.let { values ->
+                    (0 until values.length()).map(values::getInt).toMutableSet()
+                }
+                ?: mutableSetOf()
+        var synchronizedCount = 0
+        for (index in 0 until ownBundles.length()) {
+            val value = ownBundles.getJSONObject(index)
+            val targetDeviceNumber = value.optInt("device_number", 1)
+            if (targetDeviceNumber == deviceNumber || targetDeviceNumber in synchronizedDevices) {
+                continue
+            }
+            val remote = SignalProtocolAddress(nickname, targetDeviceNumber)
+            if (!store.containsSession(remote)) {
+                SessionBuilder(store, remote, local).process(bundle(value))
+            }
+            history()
+                .map(::historySyncJson)
+                .chunked(HISTORY_SYNC_BATCH_SIZE)
+                .forEach { entries ->
+                    val payload =
+                        JSONObject()
+                            .put("type", "hiddi.sync.batch.v1")
+                            .put("entries", JSONArray(entries))
+                            .toString()
+                    val encrypted =
+                        SessionCipher(store, local, remote).encrypt(payload.encodeToByteArray())
+                    val envelope = byteArrayOf(encrypted.type.toByte()) + encrypted.serialize()
+                    try {
+                        authenticatedRequest(
+                            "POST",
+                            "$server/v1/messages",
+                            JSONObject()
+                                .put("recipient_nickname", nickname)
+                                .put(
+                                    "device_ciphertexts",
+                                    JSONArray().put(
+                                        JSONObject()
+                                            .put("device_number", targetDeviceNumber)
+                                            .put("ciphertext", envelope.base64Url()),
+                                    ),
+                                ),
+                        )
+                    } finally {
+                        envelope.fill(0)
+                    }
+                }
+            synchronizedDevices += targetDeviceNumber
+            synchronizedCount++
+        }
+        state.put(
+            "history_sync_devices_v1",
+            JSONArray(synchronizedDevices.sorted()),
+        )
+        persist()
+        return synchronizedCount
+    }
 
     @Synchronized
     fun syncInbox(): List<ChatEntry> {
@@ -802,9 +876,21 @@ class HiddiSession internal constructor(
 
     private fun historyJson(): JSONArray = state.optJSONArray("chat_history") ?: JSONArray().also { state.put("chat_history", it) }
 
+    private fun historySyncJson(entry: ChatEntry): JSONObject =
+        JSONObject()
+            .put("peer", entry.peer)
+            .put("text", entry.attachment?.let(DesktopAttachmentStore::envelope) ?: entry.text)
+            .put("outgoing", entry.outgoing)
+            .put("created_at", Instant.ofEpochMilli(entry.createdAt).toString())
+            .put("delivery_status", entry.deliveryStatus)
+            .apply {
+                entry.messageId?.let { put("source_message_id", it) }
+            }
+
     private companion object {
         const val SERVER_INBOX_PAGE_SIZE = 100
         const val MAX_INBOX_BATCHES = 20
+        const val HISTORY_SYNC_BATCH_SIZE = 10
     }
 
     private fun synchronizeConversationDeletions() {

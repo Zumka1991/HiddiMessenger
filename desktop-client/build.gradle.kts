@@ -31,6 +31,10 @@ kotlin { jvmToolchain(21) }
 compose.desktop {
     application {
         mainClass = "ru.hiddi.desktop.MainKt"
+        // Argon2 converts the local vault passphrase to bytes. Keep that
+        // conversion identical for Gradle runs and packaged desktop launchers,
+        // including minimal Hyprland sessions without an inherited locale.
+        jvmArgs += listOf("-Dfile.encoding=UTF-8")
         nativeDistributions {
             modules("java.net.http")
             targetFormats(TargetFormat.Deb)

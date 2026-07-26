@@ -221,9 +221,10 @@ class MessagingService : Service() {
                         },
                         outgoing = message.outgoing,
                         time = message.createdAt,
-                        unread = true,
+                        unread = !message.historicalSync,
                         attachment = descriptor,
-                        messageId = message.messageId,
+                        messageId = message.sourceMessageId ?: message.messageId,
+                        deliveryStatus = message.deliveryStatus,
                     ),
                 )
                 api.acknowledgeMessage(profile, message.messageId)
@@ -233,7 +234,7 @@ class MessagingService : Service() {
                             .onFailure { Log.w(TAG, "Attachment download will be retried") }
                     }
                 }
-                if (!message.outgoing && !MainActivity.isVisible) {
+                if (!message.historicalSync && !message.outgoing && !MainActivity.isVisible) {
                     showMessageNotification(message.senderNickname)
                 }
                 messagesChanged = true

@@ -561,6 +561,13 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
         }
     }
     LaunchedEffect(session) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                session.synchronizeHistoryToOwnDevices()
+            }
+        }
+    }
+    LaunchedEffect(session) {
         blockedUsers =
             runCatching { withContext(Dispatchers.IO) { session.blockedUsers() } }
                 .getOrDefault(emptySet())
