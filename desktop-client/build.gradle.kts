@@ -31,6 +31,7 @@ compose.desktop {
     application {
         mainClass = "ru.hiddi.desktop.MainKt"
         nativeDistributions {
+            modules("java.net.http")
             targetFormats(TargetFormat.Deb)
             packageName = "Hiddi"
             packageVersion = "0.1.0"
