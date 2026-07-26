@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -27,11 +28,21 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Contacts
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -438,7 +450,7 @@ private fun MessengerScreen(session: HiddiSession) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
-    var listWidth by remember { mutableStateOf(410.dp) }
+    var listWidth by remember { mutableStateOf(380.dp) }
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -554,14 +566,14 @@ private fun DesktopNavigation(selected: DesktopSection, online: Boolean, nicknam
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.width(118.dp).fillMaxHeight().background(Color(0xFF0D141B)).padding(vertical = 22.dp, horizontal = 14.dp),
+        modifier = Modifier.width(92.dp).fillMaxHeight().background(Color(0xFF0D141B)).padding(vertical = 20.dp, horizontal = 10.dp),
     ) {
         AppMark()
         Spacer(Modifier.height(22.dp))
-        DesktopNavButton("Чаты", "●", selected == DesktopSection.Chats) { onSelect(DesktopSection.Chats) }
-        DesktopNavButton("Контакты", "◌", selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
+        DesktopNavButton("Чаты", Icons.Rounded.ChatBubble, selected == DesktopSection.Chats) { onSelect(DesktopSection.Chats) }
+        DesktopNavButton("Контакты", Icons.Rounded.Contacts, selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
         Spacer(Modifier.weight(1f))
-        DesktopNavButton("Настройки", "⚙", selected == DesktopSection.Settings) { onSelect(DesktopSection.Settings) }
+        DesktopNavButton("Настройки", Icons.Rounded.Settings, selected == DesktopSection.Settings) { onSelect(DesktopSection.Settings) }
         Box(Modifier.size(42.dp).clip(CircleShape).background(Color(0xFF223C43)), contentAlignment = Alignment.Center) {
             Text(nickname.firstOrNull()?.uppercase() ?: "H", color = Mint, fontWeight = FontWeight.Bold)
         }
@@ -570,14 +582,15 @@ private fun DesktopNavigation(selected: DesktopSection, online: Boolean, nicknam
 }
 
 @Composable
-private fun DesktopNavButton(label: String, symbol: String, selected: Boolean, onClick: () -> Unit) {
+private fun DesktopNavButton(label: String, icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
             .background(if (selected) Color(0xFF173C37) else Color.Transparent)
             .clickable(onClick = onClick).padding(vertical = 12.dp),
     ) {
-        Text(symbol, color = if (selected) Mint else TextMuted, fontSize = 20.sp)
+        Icon(icon, contentDescription = null, tint = if (selected) Mint else TextMuted, modifier = Modifier.size(23.dp))
+        Spacer(Modifier.height(5.dp))
         Text(label, color = if (selected) Mint else TextMuted, fontSize = 11.sp, maxLines = 1)
     }
 }
@@ -598,7 +611,7 @@ private fun ChatListPane(
         value = query,
         onValueChange = { query = it },
         placeholder = { Text("Поиск") },
-        leadingIcon = { Text("⌕", color = TextMuted, fontSize = 18.sp) },
+        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = TextMuted) },
         singleLine = true,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
     )
@@ -783,12 +796,13 @@ private fun ChatPane(
                 )
                 Text("В сети", color = Mint, fontSize = 12.sp)
             }
-            Text("⌕", color = Mint, fontSize = 24.sp, modifier = Modifier.padding(horizontal = 10.dp))
-            Text("⋮", color = TextMuted, fontSize = 24.sp)
+            IconButton(onClick = {}) { Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Mint) }
+            IconButton(onClick = {}) { Icon(Icons.Rounded.MoreVert, contentDescription = "Меню", tint = TextMuted) }
         }
         LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 34.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 24.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             item {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -831,8 +845,7 @@ private fun ChatPane(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
             ) {
-                Surface(color = Color(0xFF18212B), shape = RoundedCornerShape(20.dp), modifier = Modifier.weight(1f)) {
-                    Column(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                Column(Modifier.weight(1f)) {
                         OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -840,6 +853,13 @@ private fun ChatPane(
                 enabled = !sending,
                 minLines = 1,
                 maxLines = 5,
+                shape = RoundedCornerShape(16.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color(0xFF18212B),
+                    unfocusedContainerColor = Color(0xFF18212B),
+                    focusedBorderColor = Mint.copy(alpha = 0.75f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.12f),
+                ),
                 modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) return@onPreviewKeyEvent false
                     if (event.isCtrlPressed) {
@@ -850,8 +870,7 @@ private fun ChatPane(
                     true
                 },
                         )
-                        Text("Enter — отправить · Ctrl+Enter — новая строка", color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 5.dp))
-                    }
+                        Text("Enter — отправить · Ctrl+Enter — новая строка", color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(start = 4.dp, top = 5.dp))
                 }
                 Spacer(Modifier.width(10.dp))
                 Button(
@@ -859,7 +878,9 @@ private fun ChatPane(
                     onClick = ::submit,
                     shape = CircleShape,
                     modifier = Modifier.size(46.dp),
-                ) { Text(if (sending) "…" else "➤", fontSize = 18.sp) }
+                ) {
+                    if (sending) Text("…") else Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Отправить")
+                }
             }
         }
     }

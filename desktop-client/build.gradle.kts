@@ -15,6 +15,7 @@ repositories {
 dependencies {
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    implementation(compose.materialIconsExtended)
     implementation("org.signal:libsignal-client:0.98.0")
     implementation("de.mkammerer:argon2-jvm:2.12")
     implementation("org.json:json:20240303")
