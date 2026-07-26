@@ -2,6 +2,9 @@ package ru.hiddi.messenger
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -146,54 +149,45 @@ fun RegistrationScreen(
     var recoveryKeyInput by remember { mutableStateOf("") }
     var generatedRecoveryKey by remember { mutableStateOf<String?>(null) }
     var pendingProfile by remember { mutableStateOf<AccountProfile?>(null) }
-    val linkQrCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
-        val payload = bitmap?.let(::readDeviceLinkQr)
-        if (payload == null) {
-            message = "Не удалось прочитать QR-код привязки"
-        } else {
-            isRegistering = true
-            scope.launch {
-                try {
-                    val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
-                        .linkDevice(payload.serverUrl, payload.code)
-                    val profile = AccountProfile(
-                        payload.serverUrl,
-                        linkedNickname,
-                        device.accessToken,
-                        device.deviceId,
-                        device.deviceNumber,
-                    )
-                    AccountStore(context).save(profile)
-                    onRegistered(profile)
-                } catch (error: Exception) {
-                    message = error.message ?: "Не удалось подключить аккаунт"
-                } finally { isRegistering = false }
+
+    fun linkDevice(payload: ru.hiddi.messenger.security.DeviceLinkPayload) {
+        isRegistering = true
+        scope.launch {
+            try {
+                val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
+                    .linkDevice(payload.serverUrl, payload.code)
+                val profile = AccountProfile(
+                    payload.serverUrl,
+                    linkedNickname,
+                    device.accessToken,
+                    device.deviceId,
+                    device.deviceNumber,
+                )
+                AccountStore(context).save(profile)
+                onRegistered(profile)
+            } catch (error: Exception) {
+                message = error.message ?: "Не удалось подключить аккаунт"
+            } finally {
+                isRegistering = false
             }
         }
+    }
+
+    val linkQrScanner = remember(context) {
+        GmsBarcodeScanning.getClient(
+            context,
+            GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .enableAutoZoom()
+                .build(),
+        )
     }
     val linkQrImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val payload = uri?.let { readDeviceLinkQr(context.contentResolver, it) }
         if (payload == null) {
             message = "Не удалось прочитать QR-код привязки"
         } else {
-            isRegistering = true
-            scope.launch {
-                try {
-                    val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
-                        .linkDevice(payload.serverUrl, payload.code)
-                    val profile = AccountProfile(
-                        payload.serverUrl,
-                        linkedNickname,
-                        device.accessToken,
-                        device.deviceId,
-                        device.deviceNumber,
-                    )
-                    AccountStore(context).save(profile)
-                    onRegistered(profile)
-                } catch (error: Exception) {
-                    message = error.message ?: "Не удалось подключить аккаунт"
-                } finally { isRegistering = false }
-            }
+            linkDevice(payload)
         }
     }
 
@@ -256,7 +250,24 @@ fun RegistrationScreen(
             }
             Spacer(Modifier.height(18.dp))
             OutlinedButton(
-                onClick = { linkQrCamera.launch(null) },
+                onClick = {
+                    message = "Наведите камеру на QR-код Desktop"
+                    linkQrScanner.startScan()
+                        .addOnSuccessListener { barcode ->
+                            val payload = barcode.rawValue?.let(::readDeviceLinkQr)
+                            if (payload == null) {
+                                message = "Это не QR-код привязки Hiddi"
+                            } else {
+                                linkDevice(payload)
+                            }
+                        }
+                        .addOnCanceledListener {
+                            message = null
+                        }
+                        .addOnFailureListener { error ->
+                            message = error.message ?: "Не удалось открыть QR-сканер"
+                        }
+                },
                 enabled = !isRegistering && pendingProfile == null,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
             ) {

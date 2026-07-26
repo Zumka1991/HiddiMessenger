@@ -57,6 +57,10 @@ fun readDeviceLinkQr(bitmap: Bitmap): DeviceLinkPayload? {
     val pixels = IntArray(bitmap.width * bitmap.height)
     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
     val text = runCatching { MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(RGBLuminanceSource(bitmap.width, bitmap.height, pixels)))).text }.getOrNull() ?: return null
+    return readDeviceLinkQr(text)
+}
+
+fun readDeviceLinkQr(text: String): DeviceLinkPayload? {
     if (!text.startsWith(DEVICE_LINK_PREFIX)) return null
     val decoded = runCatching { String(Base64.decode(text.removePrefix(DEVICE_LINK_PREFIX), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP), Charsets.UTF_8) }.getOrNull() ?: return null
     val separator = decoded.indexOf('\n')

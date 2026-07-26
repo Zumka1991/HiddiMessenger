@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ru.hiddi.messenger.security.CalculatorLockStore
+import java.math.BigDecimal
 
 @Composable
 fun CalculatorLockScreen(store: CalculatorLockStore, onUnlocked: () -> Unit) {
@@ -33,7 +34,15 @@ fun CalculatorLockScreen(store: CalculatorLockStore, onUnlocked: () -> Unit) {
         when (key) {
             "C" -> { input = ""; display = "0" }
             "⌫" -> { input = input.dropLast(1); display = input.ifBlank { "0" } }
-            "=" -> if (input.isNotEmpty() && store.verify(input.toCharArray())) onUnlocked() else { input = ""; display = "Ошибка" }
+            "=" -> {
+                if (input.isNotEmpty() && input.all(Char::isDigit) && store.verify(input.toCharArray())) {
+                    onUnlocked()
+                } else {
+                    val result = evaluateCalculatorExpression(input)
+                    input = result.takeUnless { it == "0" }.orEmpty()
+                    display = result
+                }
+            }
             else -> if (input.length < 12) { input += key; display = input }
         }
     }
@@ -50,4 +59,17 @@ fun CalculatorLockScreen(store: CalculatorLockStore, onUnlocked: () -> Unit) {
             }
         }
     }
+}
+
+internal fun evaluateCalculatorExpression(value: String): String {
+    val expression = value.replace('−', '-')
+    if (!expression.matches(Regex("""\d+(?:\.\d+)?(?:[+-]\d+(?:\.\d+)?)*"""))) return "0"
+    val tokens = Regex("""([+-]?)(\d+(?:\.\d+)?)""").findAll(expression).toList()
+    if (tokens.isEmpty()) return "0"
+    val result =
+        tokens.fold(BigDecimal.ZERO) { total, token ->
+            val number = token.groupValues[2].toBigDecimal()
+            if (token.groupValues[1] == "-") total - number else total + number
+        }
+    return result.stripTrailingZeros().toPlainString()
 }
