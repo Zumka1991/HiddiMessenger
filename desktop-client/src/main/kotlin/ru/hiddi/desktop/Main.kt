@@ -35,6 +35,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -71,6 +72,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -96,6 +98,26 @@ private val Panel = Color(0xFF121A23)
 private val PanelRaised = Color(0xFF19242F)
 private val Mint = Color(0xFF58E0B8)
 private val TextMuted = Color(0xFF91A0AE)
+private val HiddiTypography = Typography().let { base ->
+    val family = FontFamily.SansSerif
+    base.copy(
+        displayLarge = base.displayLarge.copy(fontFamily = family),
+        displayMedium = base.displayMedium.copy(fontFamily = family),
+        displaySmall = base.displaySmall.copy(fontFamily = family),
+        headlineLarge = base.headlineLarge.copy(fontFamily = family),
+        headlineMedium = base.headlineMedium.copy(fontFamily = family),
+        headlineSmall = base.headlineSmall.copy(fontFamily = family),
+        titleLarge = base.titleLarge.copy(fontFamily = family),
+        titleMedium = base.titleMedium.copy(fontFamily = family),
+        titleSmall = base.titleSmall.copy(fontFamily = family),
+        bodyLarge = base.bodyLarge.copy(fontFamily = family),
+        bodyMedium = base.bodyMedium.copy(fontFamily = family),
+        bodySmall = base.bodySmall.copy(fontFamily = family),
+        labelLarge = base.labelLarge.copy(fontFamily = family),
+        labelMedium = base.labelMedium.copy(fontFamily = family),
+        labelSmall = base.labelSmall.copy(fontFamily = family),
+    )
+}
 private const val PRODUCTION_SERVER = "https://hiddi.myaifriend.su"
 
 fun main() = application {
@@ -164,7 +186,9 @@ private fun HiddiTheme(content: @Composable () -> Unit) {
                 onPrimary = Ink,
                 onBackground = Color(0xFFEAF3F7),
                 onSurface = Color(0xFFEAF3F7),
+                onSurfaceVariant = TextMuted,
             ),
+        typography = HiddiTypography,
         content = content,
     )
 }
@@ -450,7 +474,7 @@ private fun MessengerScreen(session: HiddiSession) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
-    var listWidth by remember { mutableStateOf(380.dp) }
+    var listWidth by remember { mutableStateOf(320.dp) }
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -522,7 +546,7 @@ private fun MessengerScreen(session: HiddiSession) {
                     DesktopSection.Settings -> DesktopSettingsPane(session, online)
                 }
             }
-            ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(260.dp, 560.dp) }
+            ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(280.dp, 480.dp) }
             if (section == DesktopSection.Settings) {
                 DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
             } else {
@@ -606,13 +630,20 @@ private fun ChatListPane(
         .map { (peer, entries) -> peer to entries.maxBy { it.createdAt } }
         .filter { (peer, last) -> query.isBlank() || peer.contains(query.trim().removePrefix("@"), ignoreCase = true) || last.text.contains(query, ignoreCase = true) }
         .sortedByDescending { it.second.createdAt }
-    Text("Диалоги", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 26.dp, end = 20.dp, top = 26.dp, bottom = 16.dp))
+    Text("Чаты", fontSize = 27.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 24.dp, end = 20.dp, top = 24.dp, bottom = 14.dp))
     OutlinedTextField(
         value = query,
         onValueChange = { query = it },
         placeholder = { Text("Поиск") },
         leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = TextMuted) },
         singleLine = true,
+        shape = RoundedCornerShape(14.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = PanelRaised,
+            unfocusedContainerColor = PanelRaised,
+            focusedBorderColor = Mint.copy(alpha = 0.45f),
+            unfocusedBorderColor = Color.Transparent,
+        ),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
     )
     if (conversations.isEmpty()) {
@@ -630,7 +661,7 @@ private fun ChatListPane(
 @Composable
 private fun ConversationRow(profile: HiddiProfile, last: ChatEntry, selected: Boolean, onClick: () -> Unit) {
     Surface(
-        color = if (selected) Color(0xFF1D3C3B) else Color.Transparent,
+        color = if (selected) Color(0xFF1A3333) else Color.Transparent,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(onClick = onClick),
     ) {
