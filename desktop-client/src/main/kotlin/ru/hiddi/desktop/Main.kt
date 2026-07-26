@@ -523,10 +523,14 @@ private fun MessengerScreen(session: HiddiSession) {
     }
     LaunchedEffect(session) {
         while (true) {
-            messages.forEachIndexed { index, entry ->
+            messages.toList().forEach { entry ->
                 entry.messageId?.takeIf { entry.outgoing }?.let { messageId ->
                     val status = runCatching { withContext(Dispatchers.IO) { session.updateDeliveryStatus(messageId) } }.getOrNull()
-                    if (status != null && status != entry.deliveryStatus) messages[index] = entry.copy(deliveryStatus = status)
+                    val currentIndex = messages.indexOfFirst { it.messageId == messageId }
+                    val current = messages.getOrNull(currentIndex)
+                    if (status != null && current != null && status != current.deliveryStatus) {
+                        messages[currentIndex] = current.copy(deliveryStatus = status)
+                    }
                 }
             }
             delay(1_500)
