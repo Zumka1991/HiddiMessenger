@@ -585,16 +585,45 @@ private fun ChatListPane(
     selected: HiddiProfile?,
     onSelect: (HiddiProfile) -> Unit,
 ) {
-    val peers = messages.map { it.peer }.distinct()
-    Text("Чаты", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp))
-    if (peers.isEmpty()) {
-        Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(horizontal = 18.dp))
+    val conversations = messages.groupBy { it.peer }
+        .map { (peer, entries) -> peer to entries.maxBy { it.createdAt } }
+        .sortedByDescending { it.second.createdAt }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 20.dp, bottom = 12.dp)) {
+        Text("Чаты", fontSize = 25.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Surface(color = Color(0xFF173C37), shape = CircleShape, modifier = Modifier.size(34.dp).clickable { }) {
+            Box(contentAlignment = Alignment.Center) { Text("+", color = Mint, fontSize = 24.sp) }
+        }
+    }
+    Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text("⌕  Поиск диалогов", color = TextMuted, modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp))
+    }
+    if (conversations.isEmpty()) {
+        Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(20.dp))
     } else {
-        LazyColumn(Modifier.fillMaxSize()) {
-            items(peers, key = { it }) { peer ->
+        LazyColumn(Modifier.fillMaxSize().padding(top = 8.dp)) {
+            items(conversations, key = { it.first }) { (peer, last) ->
                 val profile = HiddiProfile(peer, "", "")
-                UserRow(profile, selected?.nickname == peer) { onSelect(profile) }
+                ConversationRow(profile, last, selected?.nickname == peer) { onSelect(profile) }
             }
+        }
+    }
+}
+
+@Composable
+private fun ConversationRow(profile: HiddiProfile, last: ChatEntry, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) Color(0xFF1B3938) else Color.Transparent,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp).clickable(onClick = onClick),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(12.dp)) {
+            Avatar(profile)
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text("@${profile.nickname}", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text((if (last.outgoing) "Вы: " else "") + last.text.replace('\n', ' '), color = TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(formatMessageTime(last.createdAt), color = TextMuted, fontSize = 11.sp)
         }
     }
 }
@@ -738,17 +767,19 @@ private fun ChatPane(
     Column(modifier.background(Ink)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().background(Panel).padding(16.dp),
+            modifier = Modifier.fillMaxWidth().background(Panel).padding(horizontal = 22.dp, vertical = 15.dp),
         ) {
             Avatar(profile)
             Spacer(Modifier.width(12.dp))
-            Column {
+            Column(Modifier.weight(1f)) {
                 Text(
                     profile.displayName.ifBlank { "@${profile.nickname}" },
                     fontWeight = FontWeight.Bold,
                 )
                 Text("@${profile.nickname}", color = TextMuted, fontSize = 12.sp)
             }
+            Text("⌕", color = Mint, fontSize = 24.sp, modifier = Modifier.padding(horizontal = 10.dp))
+            Text("⋮", color = TextMuted, fontSize = 24.sp)
         }
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -770,8 +801,8 @@ private fun ChatPane(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Surface(
-                        color = if (message.outgoing) Color(0xFF174B42) else PanelRaised,
-                        shape = RoundedCornerShape(18.dp),
+                        color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
+                        shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
                     ) {
                         Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), horizontalAlignment = Alignment.End) {
                             Text(message.text)
@@ -782,18 +813,21 @@ private fun ChatPane(
             }
         }
         error?.let { ErrorText(it) }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().background(Panel).padding(14.dp),
-        ) {
-            OutlinedTextField(
+        Surface(color = Panel, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+            ) {
+                Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(18.dp), modifier = Modifier.weight(1f)) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                        OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
                 placeholder = { Text("Сообщение") },
                 enabled = !sending,
                 minLines = 1,
                 maxLines = 5,
-                modifier = Modifier.weight(1f).onPreviewKeyEvent { event ->
+                modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) return@onPreviewKeyEvent false
                     if (event.isCtrlPressed) {
                         draft += "\n"
@@ -802,13 +836,17 @@ private fun ChatPane(
                     }
                     true
                 },
-            )
-            Spacer(Modifier.width(10.dp))
-            Button(
-                enabled = draft.isNotBlank() && !sending,
-                onClick = ::submit,
-            ) {
-                Text(if (sending) "…" else "Отправить")
+                        )
+                        Text("Enter — отправить · Ctrl+Enter — новая строка", color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 5.dp))
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Button(
+                    enabled = draft.isNotBlank() && !sending,
+                    onClick = ::submit,
+                    shape = CircleShape,
+                    modifier = Modifier.size(46.dp),
+                ) { Text(if (sending) "…" else "➤", fontSize = 18.sp) }
             }
         }
     }
@@ -816,9 +854,7 @@ private fun ChatPane(
 
 @Composable
 private fun MessageMeta(message: ChatEntry) {
-    val time = remember(message.createdAt) {
-        DateTimeFormatter.ofPattern("HH:mm").format(Instant.ofEpochMilli(message.createdAt).atZone(ZoneId.systemDefault()))
-    }
+    val time = remember(message.createdAt) { formatMessageTime(message.createdAt) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 3.dp)) {
         Text(time, color = TextMuted, fontSize = 11.sp)
         if (message.outgoing) {
@@ -827,6 +863,9 @@ private fun MessageMeta(message: ChatEntry) {
         }
     }
 }
+
+private fun formatMessageTime(time: Long): String =
+    DateTimeFormatter.ofPattern("HH:mm").format(Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault()))
 
 @Composable
 private fun DeliveryChecks(status: String) {
