@@ -37,3 +37,18 @@ cargo run
 Подробности API: [`docs/api.md`](docs/api.md). Проектные решения и границы
 безопасности: [`docs/architecture.md`](docs/architecture.md). План группового
 MLS-шифрования: [`docs/groups-mls.md`](docs/groups-mls.md).
+
+## Rust/OpenMLS для Android
+
+Нативное MLS-ядро собирается для реальных `arm64-v8a` устройств и
+`x86_64`-эмулятора Android Studio:
+
+```bash
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+./scripts/install-android-mls.sh
+cd android
+./gradlew :app:assembleDebug
+```
+
+Скрипт устанавливает Rust targets и кладёт обе библиотеки в локальный
+`android/app/src/main/jniLibs/`. Сами бинарники намеренно не хранятся в Git.

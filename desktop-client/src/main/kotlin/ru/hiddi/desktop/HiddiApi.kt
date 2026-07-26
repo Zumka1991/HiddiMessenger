@@ -142,6 +142,8 @@ class HiddiSession internal constructor(
     private val client: HttpClient,
 ) : AutoCloseable {
     private val store = DesktopSignalStore(state)
+    private val attachmentStore =
+        DesktopAttachmentStore(vault.storageDirectory.resolve("attachments-v1"))
 
     val nickname: String get() = state.getString("nickname")
     val deviceNumber: Int get() = state.getInt("device_number")
@@ -256,6 +258,15 @@ class HiddiSession internal constructor(
                             createdAt = item.optLong("created_at", System.currentTimeMillis()),
                             messageId = item.optString("message_id").takeIf(String::isNotBlank),
                             deliveryStatus = item.optString("delivery_status", "sent"),
+                            attachment =
+                                item.optJSONObject("attachment")
+                                    ?.let {
+                                        runCatching {
+                                            it.toAttachmentDescriptor().also(
+                                                DesktopAttachmentStore::validateDescriptor,
+                                            )
+                                        }.getOrNull()
+                                    },
                         )
                     }
                 }.getOrNull()
@@ -285,7 +296,18 @@ class HiddiSession internal constructor(
                 else -> error("Неизвестный тип сообщения")
             }
             try {
-                val entry = ChatEntry(sender, plain.decodeToString(), outgoing = false, messageId = messageId, deliveryStatus = "delivered")
+                val plaintext = plain.decodeToString()
+                val attachment = DesktopAttachmentStore.parseEnvelope(plaintext)
+                attachment?.let { runCatching { cacheAttachment(it) } }
+                val entry =
+                    ChatEntry(
+                        peer = sender,
+                        text = attachment?.displayText() ?: plaintext,
+                        outgoing = false,
+                        messageId = messageId,
+                        deliveryStatus = "delivered",
+                        attachment = attachment,
+                    )
                 appendHistory(entry)
                 persist()
                 authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
@@ -339,10 +361,18 @@ class HiddiSession internal constructor(
     @Synchronized
     fun clearConversation(peer: String, forBoth: Boolean) {
         val normalized = normalizePeer(peer)
+        val removed = history().filter { it.peer == normalized }
         if (forBoth) {
             val encoded = URLEncoder.encode(normalized, Charsets.UTF_8)
             authenticatedRequest("DELETE", "$server/v1/conversations/$encoded", null)
+            removed.filter(ChatEntry::outgoing)
+                .flatMap { it.attachment.descriptors() }
+                .forEach { descriptor ->
+                    runCatching { deleteRemoteAttachment(descriptor.attachmentId) }
+                }
         }
+        removed.flatMap { it.attachment.descriptors() }
+            .forEach { descriptor -> runCatching { attachmentStore.delete(descriptor.attachmentId) } }
         removeConversationHistory(normalized)
         persist()
     }
@@ -363,9 +393,135 @@ class HiddiSession internal constructor(
 
     @Synchronized
     fun send(recipient: String, plaintext: String): ChatEntry {
+        require(plaintext.isNotBlank()) { "Сообщение пустое" }
+        return sendPayload(recipient, plaintext, plaintext, null)
+    }
+
+    @Synchronized
+    fun sendImage(recipient: String, file: java.io.File): ChatEntry {
+        val peer = normalizePeer(recipient)
+        val sanitized = sanitizeDesktopImage(file)
+        val uploadedIds = mutableListOf<String>()
+        var full: PreparedAttachment? = null
+        var preview: PreparedAttachment? = null
+        var messageSent = false
+        try {
+            full =
+                try {
+                    attachmentStore.encrypt(
+                        sanitized.full,
+                        DesktopAttachmentStore.IMAGE_KIND,
+                        DesktopAttachmentStore.JPEG_MIME,
+                    )
+                } finally {
+                    sanitized.full.fill(0)
+                }
+            preview =
+                try {
+                    attachmentStore.encrypt(
+                        sanitized.preview,
+                        DesktopAttachmentStore.IMAGE_KIND,
+                        DesktopAttachmentStore.JPEG_MIME,
+                    )
+                } finally {
+                    sanitized.preview.fill(0)
+                }
+            val preparedFull = checkNotNull(full)
+            val preparedPreview = checkNotNull(preview)
+            val previewId = uploadAttachment(peer, preparedPreview.ciphertext)
+            uploadedIds += previewId
+            val fullId = uploadAttachment(peer, preparedFull.ciphertext)
+            uploadedIds += fullId
+            val descriptor =
+                preparedFull.descriptor(fullId).copy(
+                    preview = preparedPreview.descriptor(previewId),
+                )
+            attachmentStore.saveCiphertext(previewId, preparedPreview.ciphertext)
+            attachmentStore.saveCiphertext(fullId, preparedFull.ciphertext)
+            return sendPayload(
+                recipient = peer,
+                plaintext = DesktopAttachmentStore.envelope(descriptor),
+                displayText = descriptor.displayText(),
+                attachment = descriptor,
+            ).also { messageSent = true }
+        } finally {
+            sanitized.full.fill(0)
+            sanitized.preview.fill(0)
+            full?.ciphertext?.fill(0)
+            preview?.ciphertext?.fill(0)
+            if (!messageSent) {
+                uploadedIds.forEach { id ->
+                    runCatching { deleteRemoteAttachment(id) }
+                    runCatching { attachmentStore.delete(id) }
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    fun sendVoice(
+        recipient: String,
+        pcm: ByteArray,
+        durationMs: Long,
+    ): ChatEntry {
+        val peer = normalizePeer(recipient)
+        var attachmentId: String? = null
+        var messageSent = false
+        val prepared =
+            try {
+                attachmentStore.encrypt(
+                    pcm,
+                    DesktopAttachmentStore.VOICE_KIND,
+                    DesktopAttachmentStore.AUDIO_MIME,
+                    durationMs,
+                )
+            } finally {
+                pcm.fill(0)
+            }
+        try {
+            val uploadedId = uploadAttachment(peer, prepared.ciphertext)
+            attachmentId = uploadedId
+            val descriptor = prepared.descriptor(uploadedId)
+            attachmentStore.saveCiphertext(uploadedId, prepared.ciphertext)
+            return sendPayload(
+                recipient = peer,
+                plaintext = DesktopAttachmentStore.envelope(descriptor),
+                displayText = descriptor.displayText(),
+                attachment = descriptor,
+            ).also { messageSent = true }
+        } finally {
+            prepared.ciphertext.fill(0)
+            if (!messageSent) {
+                attachmentId?.let { id ->
+                    runCatching { deleteRemoteAttachment(id) }
+                    runCatching { attachmentStore.delete(id) }
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    fun attachmentBytes(descriptor: AttachmentDescriptor): ByteArray {
+        DesktopAttachmentStore.validateDescriptor(descriptor)
+        if (!attachmentStore.exists(descriptor.attachmentId)) {
+            val ciphertext = downloadAttachment(descriptor.attachmentId)
+            try {
+                attachmentStore.saveCiphertext(descriptor.attachmentId, ciphertext)
+            } finally {
+                ciphertext.fill(0)
+            }
+        }
+        return attachmentStore.decrypt(descriptor)
+    }
+
+    private fun sendPayload(
+        recipient: String,
+        plaintext: String,
+        displayText: String,
+        attachment: AttachmentDescriptor?,
+    ): ChatEntry {
         val peer = recipient.trim().removePrefix("@").lowercase()
         require(peer.matches(Regex("[a-z0-9_]{3,32}"))) { "Некорректный никнейм" }
-        require(plaintext.isNotBlank()) { "Сообщение пустое" }
         require(plaintext.encodeToByteArray().size <= 32_000) { "Сообщение слишком длинное" }
 
         val local = SignalProtocolAddress(nickname, deviceNumber)
@@ -392,7 +548,15 @@ class HiddiSession internal constructor(
                     .put("ciphertext", envelope.base64Url()),
             ) as JSONObject
         envelope.fill(0)
-        val entry = ChatEntry(peer, plaintext, outgoing = true, messageId = result.getString("message_id"), deliveryStatus = "sent")
+        val entry =
+            ChatEntry(
+                peer = peer,
+                text = displayText,
+                outgoing = true,
+                messageId = result.getString("message_id"),
+                deliveryStatus = "sent",
+                attachment = attachment,
+            )
         appendHistory(entry)
         persist()
         return entry
@@ -450,8 +614,48 @@ class HiddiSession internal constructor(
                 .put("outgoing", entry.outgoing)
                 .put("created_at", entry.createdAt)
                 .put("message_id", entry.messageId)
-                .put("delivery_status", entry.deliveryStatus),
+                .put("delivery_status", entry.deliveryStatus)
+                .apply {
+                    entry.attachment?.let { put("attachment", it.toJson()) }
+                },
         )
+    }
+
+    private fun cacheAttachment(descriptor: AttachmentDescriptor) {
+        descriptor.descriptors().forEach {
+            if (!attachmentStore.exists(it.attachmentId)) {
+                val ciphertext = downloadAttachment(it.attachmentId)
+                try {
+                    attachmentStore.saveCiphertext(it.attachmentId, ciphertext)
+                } finally {
+                    ciphertext.fill(0)
+                }
+            }
+        }
+    }
+
+    private fun uploadAttachment(recipient: String, ciphertext: ByteArray): String =
+        (
+            authenticatedRequest(
+                "POST",
+                "$server/v1/attachments",
+                JSONObject()
+                    .put("recipient_nickname", normalizePeer(recipient))
+                    .put("ciphertext", ciphertext.base64Url()),
+            ) as JSONObject
+        ).getString("attachment_id")
+
+    private fun downloadAttachment(attachmentId: String): ByteArray =
+        (
+            authenticatedRequest(
+                "GET",
+                "$server/v1/attachments/$attachmentId",
+                null,
+            ) as JSONObject
+        ).getString("ciphertext").base64UrlDecode()
+
+    private fun deleteRemoteAttachment(attachmentId: String) {
+        authenticatedRequest("DELETE", "$server/v1/attachments/$attachmentId", null)
     }
 
     private fun historyJson(): JSONArray = state.optJSONArray("chat_history") ?: JSONArray().also { state.put("chat_history", it) }
@@ -503,6 +707,16 @@ class HiddiSession internal constructor(
         passphrase.fill('\u0000')
     }
 }
+
+private fun AttachmentDescriptor?.descriptors(): List<AttachmentDescriptor> =
+    this?.let { listOfNotNull(it, it.preview) }.orEmpty()
+
+private fun AttachmentDescriptor.displayText(): String =
+    when (kind) {
+        DesktopAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+        DesktopAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+        else -> "Вложение"
+    }
 
 private fun httpRequest(
     client: HttpClient,

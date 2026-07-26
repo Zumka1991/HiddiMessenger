@@ -288,7 +288,8 @@ fun ChatScreen(
             } catch (error: Exception) {
                 val message = when {
                     error.message?.contains("key package", ignoreCase = true) == true ->
-                        "@$nickname пока недоступен для приглашения. Попросите его открыть обновлённый Hiddi."
+                        "@$nickname пока недоступен для групп: ни одно его устройство " +
+                            "не опубликовало MLS-ключ. На Desktop группы могут ещё не поддерживаться."
                     else -> error.message ?: "Не удалось создать MLS-группу"
                 }
                 groupCreationError = message
@@ -921,7 +922,7 @@ fun ChatScreen(
                         } catch (error: Exception) {
                             groupStatus = when {
                                 error.message?.contains("key package", ignoreCase = true) == true ->
-                                    "@$nickname ещё не подготовил устройство для групп"
+                                    "@$nickname недоступен для групп: его устройства не опубликовали MLS-ключ"
                                 else -> error.message ?: "Не удалось пригласить участника"
                             }
                         } finally {

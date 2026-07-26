@@ -8,12 +8,15 @@ Compose Desktop client for Linux, Windows and macOS. The first packaged target i
 - A computer can be linked to an existing Hiddi account with a one-time, 10-minute code.
 - Every computer creates its own Signal PQXDH identity and Kyber-1024 prekeys locally.
 - Private key state is encrypted at rest with Argon2id and AES-256-GCM.
+- Images and PCM voice messages are encrypted before upload; the local cache stores only
+  ciphertext and attachment keys remain inside the Signal-encrypted chat history.
+- Images are resized and re-encoded before encryption, so EXIF metadata is not sent.
+- Voice is recorded directly into process memory and never touches a plaintext temporary file.
 - The vault password is not sent to the server and is not stored on disk.
 - Remote HTTP is rejected; production connections require HTTPS.
 
-The initial Linux milestone can securely send a direct message to a recipient's primary device.
-Receiving on every linked device requires per-device server fan-out and is intentionally not
-emulated with the legacy account-wide inbox.
+The desktop client supports realtime direct messages, images and voice messages shared with the
+Android client. Attachment blobs on the server are opaque AES-GCM ciphertext.
 
 ## Run from sources
 

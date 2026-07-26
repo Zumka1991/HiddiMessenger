@@ -14,6 +14,7 @@ data class ChatEntry(
     val createdAt: Long = System.currentTimeMillis(),
     val messageId: String? = null,
     val deliveryStatus: String = "sent",
+    val attachment: AttachmentDescriptor? = null,
 )
 
 data class DeviceLinkResult(

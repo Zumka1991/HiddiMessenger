@@ -18,6 +18,9 @@ import javax.crypto.spec.SecretKeySpec
  * The passphrase and derived key are never written to disk.
  */
 class Vault(private val path: Path) {
+    internal val storageDirectory: Path
+        get() = checkNotNull(path.parent) { "Хранилище должно иметь родительский каталог" }
+
     fun exists(): Boolean =
         Files.exists(path).also { present ->
             if (present) hardenStoragePermissions()

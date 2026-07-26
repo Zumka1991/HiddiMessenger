@@ -56,12 +56,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
@@ -69,6 +75,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -104,6 +111,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.application
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -665,6 +673,40 @@ private fun MessengerScreen(session: HiddiSession) {
                                 }.onFailure { report(it.message ?: "Не удалось отправить") }
                             }
                         },
+                        onSendImage = { file, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        session.sendImage(profile.nickname, file)
+                                    }
+                                }.onSuccess {
+                                    messages += it
+                                    report(null)
+                                }.onFailure {
+                                    report(it.message ?: "Не удалось отправить изображение")
+                                }
+                            }
+                        },
+                        onSendVoice = { pcm, durationMs, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        session.sendVoice(profile.nickname, pcm, durationMs)
+                                    }
+                                }.onSuccess {
+                                    messages += it
+                                    report(null)
+                                }.onFailure {
+                                    pcm.fill(0)
+                                    report(it.message ?: "Не удалось отправить голосовое")
+                                }
+                            }
+                        },
+                        onLoadAttachment = { descriptor ->
+                            withContext(Dispatchers.IO) {
+                                session.attachmentBytes(descriptor)
+                            }
+                        },
                         onLoadSafetyNumber = {
                             withContext(Dispatchers.IO) { session.safetyNumber(profile.nickname) }
                         },
@@ -1136,6 +1178,20 @@ private fun chooseAvatarImage(): File? {
     return dialog.file?.let { File(dialog.directory, it) }
 }
 
+private fun chooseChatImage(): File? {
+    val dialog = FileDialog(null as Frame?, "Отправить изображение", FileDialog.LOAD)
+    dialog.setFilenameFilter { _, name ->
+        name.endsWith(".jpg", true) ||
+            name.endsWith(".jpeg", true) ||
+            name.endsWith(".png", true) ||
+            name.endsWith(".webp", true) ||
+            name.endsWith(".gif", true) ||
+            name.endsWith(".bmp", true)
+    }
+    dialog.isVisible = true
+    return dialog.file?.let { File(dialog.directory, it) }
+}
+
 private fun sanitizeAvatar(file: File): ByteArray {
     val source = ImageIO.read(file) ?: error("Не удалось прочитать изображение")
     val side = minOf(source.width, source.height)
@@ -1260,6 +1316,9 @@ private fun ChatPane(
     peerTyping: Boolean,
     onTypingChange: (Boolean) -> Unit,
     onSend: (String, (String?) -> Unit) -> Unit,
+    onSendImage: (File, (String?) -> Unit) -> Unit,
+    onSendVoice: (ByteArray, Long, (String?) -> Unit) -> Unit,
+    onLoadAttachment: suspend (AttachmentDescriptor) -> ByteArray,
     onLoadSafetyNumber: suspend () -> SafetyNumberInfo,
     onTrustSafetyNumber: suspend (String) -> Unit,
     onClearConversation: suspend (Boolean) -> Unit,
@@ -1268,6 +1327,9 @@ private fun ChatPane(
 ) {
     var draft by remember(profile.nickname) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    var attachmentBusy by remember { mutableStateOf(false) }
+    var voiceRecording by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
     var menuExpanded by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -1280,6 +1342,7 @@ private fun ChatPane(
     var forceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
     var handledForceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
     val actionScope = rememberCoroutineScope()
+    val voiceRecorder = remember(profile.nickname) { InMemoryDesktopVoiceRecorder() }
     val inputFocusRequester = remember(profile.nickname) { FocusRequester() }
     val messageListState = rememberLazyListState()
     val isAtNewestMessage by remember {
@@ -1290,7 +1353,7 @@ private fun ChatPane(
         }
     }
     fun submit() {
-        if (draft.isBlank() || sending || isBlocked) return
+        if (draft.isBlank() || sending || attachmentBusy || voiceRecording || isBlocked) return
         val text = draft
         onTypingChange(false)
         sending = true
@@ -1305,6 +1368,41 @@ private fun ChatPane(
             }
         }
     }
+    fun selectAndSendImage() {
+        if (sending || attachmentBusy || voiceRecording || isBlocked) return
+        val file = chooseChatImage() ?: return
+        attachmentBusy = true
+        error = null
+        onSendImage(file) { failure ->
+            attachmentBusy = false
+            error = failure
+            refocusRevision++
+            if (failure == null) forceScrollRevision++
+        }
+    }
+    fun stopAndSendVoice() {
+        if (!voiceRecording || attachmentBusy) return
+        voiceRecording = false
+        attachmentBusy = true
+        error = null
+        actionScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { voiceRecorder.stop() }
+            }.onSuccess { recorded ->
+                onSendVoice(recorded.pcm, recorded.durationMs) { failure ->
+                    attachmentBusy = false
+                    error = failure
+                    refocusRevision++
+                    if (failure == null) forceScrollRevision++
+                }
+            }.onFailure {
+                voiceRecorder.cancel()
+                attachmentBusy = false
+                error = it.message ?: "Не удалось завершить запись"
+                refocusRevision++
+            }
+        }
+    }
     LaunchedEffect(profile.nickname, messages.size, forceScrollRevision) {
         val forced = forceScrollRevision != handledForceScrollRevision
         if (messages.isNotEmpty() && (forced || isAtNewestMessage)) {
@@ -1316,7 +1414,9 @@ private fun ChatPane(
         if (messages.isNotEmpty()) messageListState.scrollToItem(messages.size)
     }
     LaunchedEffect(profile.nickname, refocusRevision, sending) {
-        if (!sending && !isBlocked) inputFocusRequester.requestFocus()
+        if (!sending && !attachmentBusy && !voiceRecording && !isBlocked) {
+            inputFocusRequester.requestFocus()
+        }
     }
     LaunchedEffect(profile.nickname, draft, isBlocked) {
         if (draft.isNotBlank() && !isBlocked) {
@@ -1328,7 +1428,20 @@ private fun ChatPane(
         }
     }
     DisposableEffect(profile.nickname) {
-        onDispose { onTypingChange(false) }
+        onDispose {
+            onTypingChange(false)
+            voiceRecorder.cancel()
+        }
+    }
+    LaunchedEffect(voiceRecording) {
+        recordingSeconds = 0
+        while (voiceRecording) {
+            delay(1_000)
+            recordingSeconds++
+            if (recordingSeconds >= InMemoryDesktopVoiceRecorder.MAX_DURATION_MS / 1_000) {
+                stopAndSendVoice()
+            }
+        }
     }
     Column(modifier.background(Color(0xFF090F15))) {
         Row(
@@ -1493,7 +1606,19 @@ private fun ChatPane(
                                 modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
                                 horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
                             ) {
-                                Text(message.text)
+                                when (message.attachment?.kind) {
+                                    DesktopAttachmentStore.IMAGE_KIND ->
+                                        DesktopAttachmentImage(
+                                            descriptor = message.attachment,
+                                            onLoadAttachment = onLoadAttachment,
+                                        )
+                                    DesktopAttachmentStore.VOICE_KIND ->
+                                        DesktopVoiceAttachment(
+                                            descriptor = message.attachment,
+                                            onLoadAttachment = onLoadAttachment,
+                                        )
+                                    else -> Text(message.text)
+                                }
                                 MessageMeta(message)
                             }
                         }
@@ -1504,33 +1629,115 @@ private fun ChatPane(
         error?.let { ErrorText(it) }
         Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
             Row(
-                verticalAlignment = Alignment.Top,
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
             ) {
-                Column(Modifier.weight(1f)) {
-                    CorporateTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        placeholder = if (isBlocked) "Пользователь заблокирован" else "Сообщение",
-                        enabled = !sending && !isBlocked,
-                        singleLine = false,
-                        maxLines = 5,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 124.dp)
-                            .focusRequester(inputFocusRequester)
-                            .onPreviewKeyEvent { event ->
-                                if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) {
-                                    return@onPreviewKeyEvent false
-                                }
-                                if (event.isCtrlPressed) {
-                                    draft += "\n"
-                                } else {
-                                    submit()
-                                }
-                                true
-                            },
+                IconButton(
+                    enabled = !sending && !attachmentBusy && !voiceRecording && !isBlocked,
+                    onClick = ::selectAndSendImage,
+                ) {
+                    Icon(
+                        Icons.Rounded.Image,
+                        contentDescription = "Отправить изображение",
+                        tint = Mint,
                     )
+                }
+                IconButton(
+                    enabled = !sending && !attachmentBusy && !isBlocked,
+                    onClick = {
+                        if (voiceRecording) {
+                            stopAndSendVoice()
+                        } else {
+                            error = null
+                            runCatching { voiceRecorder.start() }
+                                .onSuccess {
+                                    draft = ""
+                                    onTypingChange(false)
+                                    voiceRecording = true
+                                }
+                                .onFailure {
+                                    voiceRecorder.cancel()
+                                    error = it.message ?: "Не удалось открыть микрофон"
+                                }
+                        }
+                    },
+                ) {
+                    Icon(
+                        if (voiceRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
+                        contentDescription =
+                            if (voiceRecording) {
+                                "Остановить и отправить"
+                            } else {
+                                "Записать голосовое"
+                            },
+                        tint = if (voiceRecording) Color(0xFFFF7C8B) else Mint,
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                Column(Modifier.weight(1f)) {
+                    if (voiceRecording) {
+                        Surface(
+                            color = Color(0xFF241C24),
+                            shape = RoundedCornerShape(18.dp),
+                            border = BorderStroke(1.dp, Color(0xFFFF7C8B).copy(alpha = 0.55f)),
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 18.dp),
+                            ) {
+                                Box(
+                                    Modifier.size(9.dp).clip(CircleShape)
+                                        .background(Color(0xFFFF5B69)),
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "Запись · %d:%02d".format(
+                                        recordingSeconds / 60,
+                                        recordingSeconds % 60,
+                                    ),
+                                    color = Color(0xFFFFC5CA),
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text("Нажмите ■ для отправки", color = TextMuted, fontSize = 11.sp)
+                            }
+                        }
+                    } else {
+                        CorporateTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            placeholder =
+                                when {
+                                    isBlocked -> "Пользователь заблокирован"
+                                    attachmentBusy -> "Шифруем и отправляем вложение…"
+                                    else -> "Сообщение"
+                                },
+                            enabled = !sending && !attachmentBusy && !isBlocked,
+                            singleLine = false,
+                            maxLines = 5,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 124.dp)
+                                .focusRequester(inputFocusRequester)
+                                .onPreviewKeyEvent { event ->
+                                    if (event.type != KeyEventType.KeyDown ||
+                                        event.key != Key.Enter
+                                    ) {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    if (event.isCtrlPressed) {
+                                        draft += "\n"
+                                    } else {
+                                        submit()
+                                    }
+                                    true
+                                },
+                        )
+                    }
                     Text(
-                        "Enter — отправить · Ctrl+Enter — новая строка",
+                        when {
+                            voiceRecording -> "Голос шифруется до загрузки на сервер"
+                            attachmentBusy -> "На сервер отправляется только шифротекст"
+                            else -> "Enter — отправить · Ctrl+Enter — новая строка"
+                        },
                         color = TextMuted,
                         fontSize = 10.sp,
                         modifier = Modifier.padding(start = 4.dp, top = 5.dp),
@@ -1538,7 +1745,9 @@ private fun ChatPane(
                 }
                 Spacer(Modifier.width(12.dp))
                 FilledIconButton(
-                    enabled = draft.isNotBlank() && !sending && !isBlocked,
+                    enabled =
+                        draft.isNotBlank() && !sending && !attachmentBusy &&
+                            !voiceRecording && !isBlocked,
                     onClick = ::submit,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = Mint,
@@ -1548,7 +1757,7 @@ private fun ChatPane(
                     ),
                     modifier = Modifier.padding(top = 1.dp).size(50.dp),
                 ) {
-                    if (sending) {
+                    if (sending || attachmentBusy) {
                         CircularProgressIndicator(
                             color = TextMuted,
                             strokeWidth = 2.dp,
@@ -1725,6 +1934,177 @@ private fun ChatPane(
                 ) { Text("Отмена") }
             },
         )
+    }
+}
+
+@Composable
+private fun DesktopAttachmentImage(
+    descriptor: AttachmentDescriptor,
+    onLoadAttachment: suspend (AttachmentDescriptor) -> ByteArray,
+) {
+    var showFullImage by remember(descriptor.attachmentId) { mutableStateOf(false) }
+    val preview = rememberDesktopAttachmentBitmap(descriptor.preview ?: descriptor, onLoadAttachment)
+    Box(
+        modifier =
+            Modifier.width(300.dp).height(190.dp).clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF101923))
+                .clickable(enabled = preview != null) { showFullImage = true },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (preview == null) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(
+                    color = Mint,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("Расшифровываем фото…", color = TextMuted, fontSize = 12.sp)
+            }
+        } else {
+            Image(
+                bitmap = preview,
+                contentDescription = "Открыть изображение",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Surface(
+                color = Color.Black.copy(alpha = 0.48f),
+                shape = CircleShape,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+            ) {
+                Icon(
+                    Icons.Rounded.Lock,
+                    contentDescription = "Сквозное шифрование",
+                    tint = Mint,
+                    modifier = Modifier.padding(6.dp).size(14.dp),
+                )
+            }
+        }
+    }
+    if (showFullImage) {
+        Dialog(onDismissRequest = { showFullImage = false }) {
+            val full = rememberDesktopAttachmentBitmap(descriptor, onLoadAttachment)
+            Box(
+                Modifier.fillMaxSize().background(Color(0xFF05090D)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (full == null) {
+                    CircularProgressIndicator(color = Mint)
+                } else {
+                    Image(
+                        bitmap = full,
+                        contentDescription = "Зашифрованное изображение",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                    )
+                }
+                FilledIconButton(
+                    onClick = { showFullImage = false },
+                    colors =
+                        IconButtonDefaults.filledIconButtonColors(
+                            containerColor = Color.Black.copy(alpha = 0.55f),
+                            contentColor = Color.White,
+                        ),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Закрыть")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberDesktopAttachmentBitmap(
+    descriptor: AttachmentDescriptor,
+    onLoadAttachment: suspend (AttachmentDescriptor) -> ByteArray,
+) =
+    produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = descriptor.attachmentId,
+    ) {
+        value =
+            runCatching {
+                val bytes = onLoadAttachment(descriptor)
+                try {
+                    SkiaImage.makeFromEncoded(bytes).toComposeImageBitmap()
+                } finally {
+                    bytes.fill(0)
+                }
+            }.getOrNull()
+    }.value
+
+@Composable
+private fun DesktopVoiceAttachment(
+    descriptor: AttachmentDescriptor,
+    onLoadAttachment: suspend (AttachmentDescriptor) -> ByteArray,
+) {
+    val scope = rememberCoroutineScope()
+    var playing by remember(descriptor.attachmentId) { mutableStateOf(false) }
+    var playbackError by remember(descriptor.attachmentId) { mutableStateOf(false) }
+    val seconds = ((descriptor.durationMs ?: 0L) / 1_000).coerceAtLeast(0)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.widthIn(min = 210.dp).padding(vertical = 2.dp),
+    ) {
+        FilledIconButton(
+            enabled = !playing,
+            onClick = {
+                playing = true
+                playbackError = false
+                scope.launch {
+                    runCatching {
+                        val pcm = onLoadAttachment(descriptor)
+                        try {
+                            withContext(Dispatchers.IO) { playDesktopVoicePcm(pcm) }
+                        } finally {
+                            pcm.fill(0)
+                        }
+                    }.onFailure { playbackError = true }
+                    playing = false
+                }
+            },
+            colors =
+                IconButtonDefaults.filledIconButtonColors(
+                    containerColor = Mint,
+                    contentColor = Ink,
+                    disabledContainerColor = Mint.copy(alpha = 0.55f),
+                ),
+            modifier = Modifier.size(42.dp),
+        ) {
+            if (playing) {
+                CircularProgressIndicator(
+                    color = Ink,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+            } else {
+                Icon(Icons.Rounded.PlayArrow, contentDescription = "Воспроизвести")
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(
+                if (playbackError) "Не удалось воспроизвести" else "Голосовое",
+                fontWeight = FontWeight.SemiBold,
+                color = if (playbackError) Color(0xFFFF9DA4) else Color.Unspecified,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "%d:%02d".format(seconds / 60, seconds % 60),
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                )
+                Spacer(Modifier.width(5.dp))
+                Icon(
+                    Icons.Rounded.Lock,
+                    contentDescription = "Сквозное шифрование",
+                    tint = Mint,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
     }
 }
 
