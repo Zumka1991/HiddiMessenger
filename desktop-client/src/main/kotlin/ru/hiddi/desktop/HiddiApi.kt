@@ -145,6 +145,7 @@ class HiddiSession internal constructor(
     val nickname: String get() = state.getString("nickname")
     val deviceNumber: Int get() = state.getInt("device_number")
     val server: String get() = state.getString("server")
+    internal val accessToken: String get() = state.getString("access_token")
 
     fun isOnline(): Boolean {
         val response =

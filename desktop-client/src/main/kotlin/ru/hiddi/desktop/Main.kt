@@ -441,9 +441,19 @@ private fun MessengerScreen(session: HiddiSession) {
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val realtime = remember(session) { DesktopRealtime(session.server, session.accessToken) }
+
+    suspend fun synchronizeInbox() {
+        val incoming = runCatching { withContext(Dispatchers.IO) { session.syncInbox() } }.getOrDefault(emptyList())
+        incoming.forEach { entry -> if (messages.none { it.messageId == entry.messageId }) messages += entry }
+    }
 
     DisposableEffect(session) {
-        onDispose { session.close() }
+        realtime.connect()
+        onDispose {
+            realtime.close()
+            session.close()
+        }
     }
     LaunchedEffect(session) {
         while (true) {
@@ -457,17 +467,32 @@ private fun MessengerScreen(session: HiddiSession) {
             runCatching { withContext(Dispatchers.IO) { session.search(query) } }
                 .getOrDefault(emptyList())
     }
+    LaunchedEffect(realtime) {
+        for (event in realtime.events) {
+            when (event) {
+                DesktopRealtime.Event.SyncRequired -> synchronizeInbox()
+                DesktopRealtime.Event.Disconnected -> {
+                    delay(500)
+                    realtime.connect()
+                }
+            }
+        }
+    }
     LaunchedEffect(session) {
         while (true) {
-            val incoming = runCatching { withContext(Dispatchers.IO) { session.syncInbox() } }.getOrDefault(emptyList())
-            incoming.forEach { entry -> if (messages.none { it.messageId == entry.messageId }) messages += entry }
+            synchronizeInbox()
+            delay(15_000)
+        }
+    }
+    LaunchedEffect(session) {
+        while (true) {
             messages.forEachIndexed { index, entry ->
                 entry.messageId?.takeIf { entry.outgoing }?.let { messageId ->
                     val status = runCatching { withContext(Dispatchers.IO) { session.updateDeliveryStatus(messageId) } }.getOrNull()
                     if (status != null && status != entry.deliveryStatus) messages[index] = entry.copy(deliveryStatus = status)
                 }
             }
-            delay(2_500)
+            delay(1_500)
         }
     }
 
