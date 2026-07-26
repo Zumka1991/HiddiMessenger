@@ -16,6 +16,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import kotlin.math.abs
 
 data class RecordedVoice(val pcm: ByteArray, val durationMs: Long)
 
@@ -25,6 +26,11 @@ class InMemoryVoiceRecorder {
     private var recordingJob: Job? = null
     private var output: ByteArrayOutputStream? = null
     private var startedAt = 0L
+
+    /** Instantaneous microphone level for the recording UI. It never leaves the device. */
+    @Volatile
+    var level: Float = 0f
+        private set
 
     val isRecording: Boolean
         get() = audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
@@ -50,6 +56,7 @@ class InMemoryVoiceRecorder {
         audioRecord = recorder
         output = memory
         startedAt = SystemClock.elapsedRealtime()
+        level = 0f
         recorder.startRecording()
         recordingJob = scope.launch(Dispatchers.IO) {
             val buffer = ByteArray(minimum)
@@ -57,7 +64,10 @@ class InMemoryVoiceRecorder {
                 SystemClock.elapsedRealtime() - startedAt < MAX_DURATION_MS
             ) {
                 val count = recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
-                if (count > 0) memory.write(buffer, 0, count)
+                if (count > 0) {
+                    memory.write(buffer, 0, count)
+                    level = pcmLevel(buffer, count)
+                }
             }
         }
     }
@@ -71,6 +81,7 @@ class InMemoryVoiceRecorder {
         recorder.release()
         audioRecord = null
         recordingJob = null
+        level = 0f
         return RecordedVoice(
             pcm = checkNotNull(output).toByteArray().also { require(it.isNotEmpty()) { "Voice recording is empty" } },
             durationMs = duration,
@@ -85,11 +96,24 @@ class InMemoryVoiceRecorder {
         recordingJob = null
         output?.reset()
         output = null
+        level = 0f
     }
 
     companion object {
         const val SAMPLE_RATE = 16_000
         const val MAX_DURATION_MS = 120_000L
+    }
+
+    private fun pcmLevel(buffer: ByteArray, count: Int): Float {
+        var peak = 0
+        var index = 0
+        while (index + 1 < count) {
+            val sample = (buffer[index].toInt() and 0xFF) or (buffer[index + 1].toInt() shl 8)
+            peak = maxOf(peak, abs(sample.toShort().toInt()))
+            index += 2
+        }
+        // A small floor keeps the meter legible in a quiet room.
+        return (peak / 32_767f).coerceIn(0.04f, 1f)
     }
 }
 

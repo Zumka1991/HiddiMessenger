@@ -229,11 +229,18 @@ class MessagingService : Service() {
             sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
         }
 
-        val changedGroups = groupCoordinator.synchronize(profile)
-        if (changedGroups.isNotEmpty()) {
-            sendBroadcast(Intent(ACTION_GROUPS_UPDATED).setPackage(packageName))
-            if (!MainActivity.isVisible) showGroupNotification()
-        }
+        // MLS state may need a separate recovery after an interrupted epoch update.
+        // Do not let that prevent direct messages and the realtime socket from working.
+        runCatching { groupCoordinator.synchronize(profile) }
+            .onSuccess { changedGroups ->
+                if (changedGroups.isNotEmpty()) {
+                    sendBroadcast(Intent(ACTION_GROUPS_UPDATED).setPackage(packageName))
+                    if (!MainActivity.isVisible) showGroupNotification()
+                }
+            }
+            .onFailure { error ->
+                Log.w(TAG, "MLS group sync deferred: ${error.javaClass.simpleName}")
+            }
     }
 
     private suspend fun downloadPendingAttachments(

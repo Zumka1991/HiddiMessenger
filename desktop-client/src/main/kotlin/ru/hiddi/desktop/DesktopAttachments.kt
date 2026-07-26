@@ -25,6 +25,7 @@ import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
 import javax.sound.sampled.TargetDataLine
+import kotlin.math.abs
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -364,6 +365,11 @@ class InMemoryDesktopVoiceRecorder {
     private var output: ByteArrayOutputStream? = null
     private var startedAt = 0L
 
+    /** Instantaneous microphone level used only by the local recording indicator. */
+    @Volatile
+    var level: Float = 0f
+        private set
+
     val isRecording: Boolean get() = recording
 
     @Synchronized
@@ -377,6 +383,7 @@ class InMemoryDesktopVoiceRecorder {
         line = target
         output = memory
         startedAt = System.currentTimeMillis()
+        level = 0f
         recording = true
         target.start()
         worker =
@@ -384,7 +391,10 @@ class InMemoryDesktopVoiceRecorder {
                 val buffer = ByteArray(4_096)
                 while (recording && memory.size() < MAX_PCM_BYTES) {
                     val count = target.read(buffer, 0, minOf(buffer.size, MAX_PCM_BYTES - memory.size()))
-                    if (count > 0) memory.write(buffer, 0, count)
+                    if (count > 0) {
+                        memory.write(buffer, 0, count)
+                        level = pcmLevel(buffer, count)
+                    }
                 }
             }
     }
@@ -419,12 +429,14 @@ class InMemoryDesktopVoiceRecorder {
         worker?.join(2_000)
         output?.reset()
         cleanup()
+        level = 0f
     }
 
     private fun cleanup() {
         line = null
         worker = null
         output = null
+        level = 0f
     }
 
     private fun duration(byteCount: Int): Long =
@@ -433,6 +445,17 @@ class InMemoryDesktopVoiceRecorder {
             (System.currentTimeMillis() - startedAt).coerceAtLeast(0),
             MAX_DURATION_MS,
         )
+
+    private fun pcmLevel(buffer: ByteArray, count: Int): Float {
+        var peak = 0
+        var index = 0
+        while (index + 1 < count) {
+            val sample = (buffer[index].toInt() and 0xFF) or (buffer[index + 1].toInt() shl 8)
+            peak = maxOf(peak, abs(sample.toShort().toInt()))
+            index += 2
+        }
+        return (peak / 32_767f).coerceIn(0.04f, 1f)
+    }
 
     companion object {
         const val SAMPLE_RATE = 16_000

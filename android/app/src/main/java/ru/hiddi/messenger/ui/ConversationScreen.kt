@@ -120,6 +120,7 @@ fun ConversationScreen(
     attachmentStore: EncryptedAttachmentStore,
     attachmentInProgress: Boolean,
     voiceRecording: Boolean,
+    voiceLevel: Float,
     identityChanged: Boolean,
     isBlocked: Boolean,
     peerOnline: Boolean,
@@ -130,6 +131,7 @@ fun ConversationScreen(
     onImageSelected: (Uri) -> Unit,
     onStartVoice: () -> Unit,
     onStopVoice: () -> Unit,
+    onCancelVoice: () -> Unit,
     onVoicePermissionDenied: () -> Unit,
     onClearHistory: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -386,6 +388,21 @@ fun ConversationScreen(
             color = MaterialTheme.colorScheme.surface,
         ) {
             Row(Modifier.padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (voiceRecording) {
+                    IconButton(onClick = onCancelVoice) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Отменить голосовое", tint = MaterialTheme.colorScheme.error)
+                    }
+                    Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                        Text("Запись · нажмите ■, чтобы отправить", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                        VoiceWaveform(0, MaterialTheme.colorScheme.error, Modifier.fillMaxWidth().height(24.dp), voiceLevel)
+                    }
+                    Box(
+                        modifier = Modifier.size(46.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error)
+                            .clickable(onClick = onStopVoice),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Rounded.Stop, "Остановить и отправить", tint = Color.White) }
+                    return@Surface
+                }
                 IconButton(
                     onClick = { imagePicker.launch("image/*") },
                     enabled = !isBlocked && !attachmentInProgress && !voiceRecording,

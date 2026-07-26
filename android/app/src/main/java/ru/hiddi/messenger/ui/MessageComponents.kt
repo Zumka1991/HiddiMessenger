@@ -75,6 +75,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
@@ -310,6 +311,11 @@ private fun VoiceAttachment(
         Spacer(Modifier.size(12.dp))
         Column {
             Text("Голосовое", fontWeight = FontWeight.Medium)
+            VoiceWaveform(
+                seed = descriptor.attachmentId.hashCode(),
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 5.dp).fillMaxWidth().height(24.dp),
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "%d:%02d".format(seconds / 60, seconds % 60),
@@ -319,6 +325,33 @@ private fun VoiceAttachment(
                 Spacer(Modifier.size(5.dp))
                 Icon(Icons.Rounded.Lock, contentDescription = "Зашифровано", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(12.dp))
             }
+        }
+    }
+}
+
+/** A compact waveform: local microphone level while recording, deterministic bars after send. */
+@androidx.compose.runtime.Composable
+fun VoiceWaveform(
+    seed: Int,
+    color: Color,
+    modifier: Modifier = Modifier,
+    level: Float? = null,
+) {
+    Canvas(modifier) {
+        val bars = 28
+        val gap = size.width / (bars * 2f - 1f)
+        repeat(bars) { index ->
+            val noise = (((seed * 31 + index * 17) ushr 3) and 15) / 15f
+            val live = level?.let { ((index % 5 + 1) / 5f * it).coerceAtLeast(0.12f) }
+            val factor = live ?: (0.22f + noise * 0.72f)
+            val height = (size.height * factor).coerceAtLeast(3.dp.toPx())
+            drawLine(
+                color = color.copy(alpha = if (level == null) 0.72f else 1f),
+                start = androidx.compose.ui.geometry.Offset(index * gap * 2 + gap / 2, (size.height - height) / 2),
+                end = androidx.compose.ui.geometry.Offset(index * gap * 2 + gap / 2, (size.height + height) / 2),
+                strokeWidth = gap.coerceAtMost(4.dp.toPx()),
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

@@ -1331,6 +1331,7 @@ private fun ChatPane(
     var attachmentBusy by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableStateOf(0L) }
+    var voiceLevel by remember { mutableStateOf(0f) }
     var error by remember { mutableStateOf<String?>(null) }
     var menuExpanded by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -1404,6 +1405,14 @@ private fun ChatPane(
             }
         }
     }
+    fun cancelVoice() {
+        if (!voiceRecording) return
+        voiceRecorder.cancel()
+        voiceRecording = false
+        voiceLevel = 0f
+        error = null
+        refocusRevision++
+    }
     LaunchedEffect(profile.nickname, messages.size, forceScrollRevision) {
         val forced = forceScrollRevision != handledForceScrollRevision
         if (messages.isNotEmpty() && (forced || isAtNewestMessage)) {
@@ -1436,13 +1445,16 @@ private fun ChatPane(
     }
     LaunchedEffect(voiceRecording) {
         recordingSeconds = 0
+        val startedAt = System.currentTimeMillis()
         while (voiceRecording) {
-            delay(1_000)
-            recordingSeconds++
+            delay(45)
+            voiceLevel = voiceRecorder.level
+            recordingSeconds = (System.currentTimeMillis() - startedAt) / 1_000
             if (recordingSeconds >= InMemoryDesktopVoiceRecorder.MAX_DURATION_MS / 1_000) {
                 stopAndSendVoice()
             }
         }
+        voiceLevel = 0f
     }
     Column(modifier.background(Color(0xFF090F15))) {
         Row(
@@ -1700,7 +1712,14 @@ private fun ChatPane(
                                     color = Color(0xFFFFC5CA),
                                 )
                                 Spacer(Modifier.weight(1f))
-                                Text("Нажмите ■ для отправки", color = TextMuted, fontSize = 11.sp)
+                                DesktopVoiceWaveform(
+                                    seed = 0,
+                                    color = Color(0xFFFF9DA4),
+                                    level = voiceLevel,
+                                    modifier = Modifier.width(130.dp).height(28.dp),
+                                )
+                                TextButton(onClick = ::cancelVoice) { Text("Отмена", color = Color(0xFFFF9DA4)) }
+                                Text("■ отправить", color = TextMuted, fontSize = 11.sp)
                             }
                         }
                     } else {
@@ -2096,6 +2115,11 @@ private fun DesktopVoiceAttachment(
                 fontWeight = FontWeight.SemiBold,
                 color = if (playbackError) Color(0xFFFF9DA4) else Color.Unspecified,
             )
+            DesktopVoiceWaveform(
+                seed = descriptor.attachmentId.hashCode(),
+                color = Mint,
+                modifier = Modifier.width(128.dp).height(22.dp).padding(vertical = 3.dp),
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "%d:%02d".format(seconds / 60, seconds % 60),
@@ -2110,6 +2134,32 @@ private fun DesktopVoiceAttachment(
                     modifier = Modifier.size(12.dp),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun DesktopVoiceWaveform(
+    seed: Int,
+    color: Color,
+    modifier: Modifier = Modifier,
+    level: Float? = null,
+) {
+    Canvas(modifier) {
+        val bars = 26
+        val gap = size.width / (bars * 2f - 1f)
+        repeat(bars) { index ->
+            val noise = (((seed * 31 + index * 17) ushr 3) and 15) / 15f
+            val factor = level?.let { ((index % 5 + 1) / 5f * it).coerceAtLeast(0.12f) }
+                ?: (0.22f + noise * 0.72f)
+            val barHeight = (size.height * factor).coerceAtLeast(3.dp.toPx())
+            drawLine(
+                color = color.copy(alpha = if (level == null) 0.72f else 1f),
+                start = Offset(index * gap * 2 + gap / 2, (size.height - barHeight) / 2),
+                end = Offset(index * gap * 2 + gap / 2, (size.height + barHeight) / 2),
+                strokeWidth = gap.coerceAtMost(4.dp.toPx()),
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -79,6 +80,7 @@ fun GroupConversationScreen(
     contacts: List<String>,
     attachmentStore: EncryptedAttachmentStore,
     voiceRecording: Boolean,
+    voiceLevel: Float,
     onDraftChange: (String) -> Unit,
     onBack: () -> Unit,
     onInviteMember: (String) -> Unit,
@@ -90,6 +92,7 @@ fun GroupConversationScreen(
     onImageSelected: (Uri) -> Unit,
     onStartVoice: () -> Unit,
     onStopVoice: () -> Unit,
+    onCancelVoice: () -> Unit,
     onVoicePermissionDenied: () -> Unit,
     onSend: () -> Unit,
 ) {
@@ -276,6 +279,19 @@ fun GroupConversationScreen(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (voiceRecording) {
+                IconButton(onClick = onCancelVoice) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "Отменить голосовое", tint = MaterialTheme.colorScheme.error)
+                }
+                Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                    Text("Запись · нажмите ■, чтобы отправить", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                    VoiceWaveform(0, MaterialTheme.colorScheme.error, Modifier.fillMaxWidth().height(24.dp), voiceLevel)
+                }
+                IconButton(onClick = onStopVoice) {
+                    Icon(Icons.Rounded.Stop, contentDescription = "Остановить и отправить", tint = MaterialTheme.colorScheme.error)
+                }
+                return@Row
+            }
             IconButton(
                 onClick = { imagePicker.launch("image/*") },
                 enabled = !sending && !voiceRecording,

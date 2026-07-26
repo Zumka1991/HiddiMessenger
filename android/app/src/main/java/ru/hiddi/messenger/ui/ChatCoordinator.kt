@@ -132,6 +132,7 @@ fun ChatScreen(
     var status by remember { mutableStateOf("Защищено · E2EE") }
     var attachmentInProgress by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
+    var voiceLevel by remember { mutableStateOf(0f) }
     val api = remember { SignalMessagingApi(ru.hiddi.messenger.security.SignalStateRepository(context)) }
     val groupCoordinator = remember { GroupMlsCoordinator(context, api) }
     val historyStore = remember { EncryptedChatHistory(context) }
@@ -526,6 +527,14 @@ fun ChatScreen(
         }
     }
 
+    fun cancelVoiceRecording() {
+        if (!voiceRecording) return
+        voiceRecorder.cancel()
+        voiceRecording = false
+        voiceLevel = 0f
+        status = "Голосовое отменено"
+    }
+
     fun sendGroupImage(groupId: ByteArray, uri: Uri) {
         if (groupBusy) return
         groupBusy = true
@@ -642,8 +651,21 @@ fun ChatScreen(
         }
     }
 
+    fun cancelGroupVoiceRecording() {
+        cancelVoiceRecording()
+        groupStatus = "Голосовое отменено"
+    }
+
     DisposableEffect(voiceRecorder) {
         onDispose { voiceRecorder.cancel() }
+    }
+
+    LaunchedEffect(voiceRecording) {
+        while (voiceRecording) {
+            voiceLevel = voiceRecorder.level
+            kotlinx.coroutines.delay(45)
+        }
+        voiceLevel = 0f
     }
 
     LaunchedEffect(requestedPeer) {
@@ -898,6 +920,7 @@ fun ChatScreen(
                 contacts = contacts,
                 attachmentStore = attachmentStore,
                 voiceRecording = voiceRecording,
+                voiceLevel = voiceLevel,
                 onDraftChange = { groupDraft = it },
                 onBack = {
                     selectedGroupId = null
@@ -1049,6 +1072,7 @@ fun ChatScreen(
                 onStopVoice = {
                     stopAndSendGroupVoice(selectedGroup.groupId)
                 },
+                onCancelVoice = ::cancelGroupVoiceRecording,
                 onVoicePermissionDenied = {
                     groupStatus = "Без доступа к микрофону нельзя записать войс"
                 },
@@ -1119,6 +1143,7 @@ fun ChatScreen(
                 attachmentStore = attachmentStore,
                 attachmentInProgress = attachmentInProgress,
                 voiceRecording = voiceRecording,
+                voiceLevel = voiceLevel,
                 identityChanged = identityChanged,
                 isBlocked = recipient in blockedUsers,
                 peerOnline = peerOnline,
@@ -1129,6 +1154,7 @@ fun ChatScreen(
                 onImageSelected = ::sendImage,
                 onStartVoice = ::startVoiceRecording,
                 onStopVoice = ::stopAndSendVoice,
+                onCancelVoice = ::cancelVoiceRecording,
                 onVoicePermissionDenied = { status = "Без доступа к микрофону нельзя записать войс" },
                 onClearHistory = { clearForBothSides = false; showClearHistoryDialog = true },
                 onOpenProfile = { viewedProfileNickname = recipient },
