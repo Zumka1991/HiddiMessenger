@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -82,6 +84,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -126,6 +129,7 @@ fun ConversationScreen(
     isBlocked: Boolean,
     peerOnline: Boolean,
     peerTyping: Boolean,
+    scrollToNewestRevision: Int,
     onDraftChange: (String) -> Unit,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
@@ -143,6 +147,8 @@ fun ConversationScreen(
     onSend: () -> Unit,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
     val listState = rememberLazyListState()
     var menuExpanded by remember { mutableStateOf(false) }
     var selectedForActions by remember { mutableStateOf<ChatHistoryItem?>(null) }
@@ -175,6 +181,18 @@ fun ConversationScreen(
             }
             pendingPrependSize = -1
         } else if (history.isNotEmpty() && followNewest) {
+            listState.animateScrollToItem(history.lastIndex)
+        }
+    }
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0 && history.isNotEmpty()) {
+            followNewest = true
+            listState.scrollToItem(history.lastIndex)
+        }
+    }
+    LaunchedEffect(scrollToNewestRevision) {
+        if (scrollToNewestRevision > 0 && history.isNotEmpty()) {
+            followNewest = true
             listState.animateScrollToItem(history.lastIndex)
         }
     }

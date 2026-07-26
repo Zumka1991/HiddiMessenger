@@ -148,6 +148,7 @@ fun ChatScreen(
     var peers by remember { mutableStateOf(historyStore.peers()) }
     var contacts by remember { mutableStateOf(contactsStore.contacts()) }
     var historyRevision by remember { mutableIntStateOf(0) }
+    var scrollToNewestRevision by remember { mutableIntStateOf(0) }
     var connection by remember { mutableStateOf(ServerConnection.CHECKING) }
     var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
     var peerOnline by remember { mutableStateOf(false) }
@@ -1174,6 +1175,7 @@ fun ChatScreen(
                 isBlocked = recipient in blockedUsers,
                 peerOnline = peerOnline,
                 peerTyping = peerTyping,
+                scrollToNewestRevision = scrollToNewestRevision,
                 onDraftChange = { draft = it },
                 onLoadOlder = ::loadOlderHistory,
                 onBack = { recipient = null; draft = ""; focusManager.clearFocus() },
@@ -1273,6 +1275,7 @@ fun ChatScreen(
                             deliveryStatus = "sending",
                         )
                     history = history + pending
+                    scrollToNewestRevision++
                     draft = ""
                     status = "Отправляем…"
                     scope.launch {
