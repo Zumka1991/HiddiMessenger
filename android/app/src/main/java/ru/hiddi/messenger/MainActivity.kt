@@ -145,6 +145,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         isVisible = false
+        if (CalculatorLockStore(this).enabled()) {
+            stopService(Intent(this, MessagingService::class.java))
+        }
         super.onPause()
     }
 
@@ -168,8 +171,12 @@ private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: 
     val accountStore = remember { AccountStore(context) }
     var account by remember { mutableStateOf(accountStore.read()) }
     val hasLegacyToken = remember { accountStore.hasLegacyToken() }
-    LaunchedEffect(account?.nickname) {
+    LaunchedEffect(account?.nickname, unlocked) {
         account?.let { current ->
+            if (!unlocked) {
+                context.stopService(Intent(context, MessagingService::class.java))
+                return@let
+            }
             ContextCompat.startForegroundService(context, Intent(context, MessagingService::class.java))
             runCatching {
                 withContext(Dispatchers.IO) {

@@ -24,6 +24,7 @@ import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.PrivacySettingsStore
+import ru.hiddi.messenger.security.CalculatorLockStore
 import ru.hiddi.messenger.security.SignalStateRepository
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -317,6 +318,7 @@ class MessagingService : Service() {
         .build()
 
     private fun showMessageNotification(sender: String) {
+        if (CalculatorLockStore(this).enabled()) return
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_hiddi_notification)
             .setContentTitle("Hiddi")
@@ -331,6 +333,7 @@ class MessagingService : Service() {
     }
 
     private fun showGroupNotification() {
+        if (CalculatorLockStore(this).enabled()) return
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_hiddi_notification)
             .setContentTitle("Hiddi")
