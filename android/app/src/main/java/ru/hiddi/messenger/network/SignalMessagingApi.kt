@@ -496,9 +496,11 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             if (normalized != profile.nickname) {
                 val sync = JSONObject().put("type", "hiddi.sync.v1").put("peer", normalized).put("text", message).toString()
                 val selfDeliveries = encryptForDevices(profile, profile.nickname, sync, store, local)
-                repository.save(store.snapshot())
-                request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
-                    .put("recipient_nickname", profile.nickname).put("device_ciphertexts", selfDeliveries).toString(), profile.accessToken)
+                if (selfDeliveries.length() > 0) {
+                    repository.save(store.snapshot())
+                    request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
+                        .put("recipient_nickname", profile.nickname).put("device_ciphertexts", selfDeliveries).toString(), profile.accessToken)
+                }
             }
             messageId
         }
