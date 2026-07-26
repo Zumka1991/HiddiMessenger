@@ -58,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -69,6 +70,7 @@ import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.sanitizeImage
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
 import ru.hiddi.messenger.security.PrivacySettingsStore
+import ru.hiddi.messenger.security.CalculatorLockStore
 import ru.hiddi.messenger.security.SignalCryptoBoundary
 import ru.hiddi.messenger.security.deviceLinkQrBitmap
 
@@ -83,7 +85,11 @@ fun SettingsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val privacySettings = remember { PrivacySettingsStore(context) }
+    val calculatorLock = remember { CalculatorLockStore(context) }
     var invisibleMode by remember { mutableStateOf(privacySettings.invisibleMode()) }
+    var calculatorLockEnabled by remember { mutableStateOf(calculatorLock.enabled()) }
+    var showCalculatorPinDialog by remember { mutableStateOf(false) }
+    var calculatorPin by remember { mutableStateOf("") }
     var profile by remember { mutableStateOf<UserSearchResult?>(null) }
     var displayName by remember { mutableStateOf("") }
     var bio by remember { mutableStateOf("") }
@@ -281,6 +287,19 @@ fun SettingsScreen(
                             }
                         }
                     }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Маскировка под калькулятор", fontWeight = FontWeight.SemiBold)
+                        Text("Запуск через PIN и кнопку =. Забытый PIN не восстанавливается.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(checked = calculatorLockEnabled, onCheckedChange = { enabled ->
+                        if (enabled) { calculatorPin = ""; showCalculatorPinDialog = true }
+                        else { calculatorLock.disable(); calculatorLockEnabled = false }
+                    })
                 }
             }
 
@@ -652,6 +671,16 @@ fun SettingsScreen(
                     Text("Отмена")
                 }
             },
+        )
+    }
+
+    if (showCalculatorPinDialog) {
+        AlertDialog(
+            onDismissRequest = { showCalculatorPinDialog = false },
+            title = { Text("PIN калькулятора") },
+            text = { OutlinedTextField(value = calculatorPin, onValueChange = { calculatorPin = it.filter(Char::isDigit).take(12) }, label = { Text("4–12 цифр") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword)) },
+            confirmButton = { TextButton(onClick = { runCatching { calculatorLock.setPin(calculatorPin.toCharArray()) }.onSuccess { calculatorLockEnabled = true; showCalculatorPinDialog = false }.onFailure { status = it.message } }) { Text("Включить") } },
+            dismissButton = { TextButton(onClick = { showCalculatorPinDialog = false }) { Text("Отмена") } },
         )
     }
 }

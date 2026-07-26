@@ -103,6 +103,7 @@ import ru.hiddi.messenger.network.GroupMlsCoordinator
 import ru.hiddi.messenger.network.RegistrationApi
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
+import ru.hiddi.messenger.security.CalculatorLockStore
 import ru.hiddi.messenger.security.SignalCryptoBoundary
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
@@ -158,6 +159,12 @@ class MainActivity : ComponentActivity() {
 private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: () -> Unit) {
     var showRegistration by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val calculatorLock = remember { CalculatorLockStore(context) }
+    var unlocked by remember { mutableStateOf(!calculatorLock.enabled()) }
+    LaunchedEffect(resumeRevision) {
+        // Returning from the launcher/recents must not leave the messenger visible.
+        if (resumeRevision > 1 && calculatorLock.enabled()) unlocked = false
+    }
     val accountStore = remember { AccountStore(context) }
     var account by remember { mutableStateOf(accountStore.read()) }
     val hasLegacyToken = remember { accountStore.hasLegacyToken() }
@@ -181,7 +188,9 @@ private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: 
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
         ) {
-            if (account != null) {
+            if (!unlocked) {
+                CalculatorLockScreen(calculatorLock) { unlocked = true }
+            } else if (account != null) {
                 ChatScreen(
                     account!!,
                     requestedPeer,
