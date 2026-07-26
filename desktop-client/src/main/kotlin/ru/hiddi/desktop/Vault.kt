@@ -8,6 +8,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
+import java.util.Comparator
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -81,6 +82,15 @@ class Vault(private val path: Path) {
             Files.deleteIfExists(temporary)
             salt.fill(0)
             iv.fill(0)
+        }
+    }
+
+    /** Deletes only Hiddi Desktop local material. Server revocation must happen first. */
+    fun deleteLocalData() {
+        val directory = storageDirectory
+        if (!Files.exists(directory)) return
+        Files.walk(directory).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
         }
     }
 

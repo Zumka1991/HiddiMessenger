@@ -2,6 +2,8 @@ package ru.hiddi.desktop
 
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.MultiFormatReader
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import java.awt.image.BufferedImage
@@ -17,6 +19,17 @@ data class DeviceLinkQr(
     val serverUrl: String,
     val code: String,
 )
+
+fun createDeviceLinkQr(serverUrl: String, code: String, size: Int = 720): BufferedImage {
+    val encoded = Base64.getUrlEncoder().withoutPadding()
+        .encodeToString("${serverUrl.trimEnd('/')}\n$code".toByteArray(StandardCharsets.UTF_8))
+    val matrix = QRCodeWriter().encode(DEVICE_LINK_QR_PREFIX + encoded, BarcodeFormat.QR_CODE, size, size)
+    return BufferedImage(size, size, BufferedImage.TYPE_INT_RGB).apply {
+        for (y in 0 until size) for (x in 0 until size) {
+            setRGB(x, y, if (matrix[x, y]) 0xFF071017.toInt() else 0xFFFFFFFF.toInt())
+        }
+    }
+}
 
 fun readDeviceLinkQr(file: File): DeviceLinkQr =
     ImageIO.read(file)?.let(::readDeviceLinkQr)

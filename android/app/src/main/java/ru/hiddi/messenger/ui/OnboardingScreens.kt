@@ -1,5 +1,8 @@
 package ru.hiddi.messenger
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,6 +53,7 @@ import ru.hiddi.messenger.network.AccountStore
 import ru.hiddi.messenger.network.RegistrationApi
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
 import ru.hiddi.messenger.security.SignalCryptoBoundary
+import ru.hiddi.messenger.security.readDeviceLinkQr
 
 @Composable
 fun WelcomeScreen(onRegister: () -> Unit) {
@@ -142,6 +146,23 @@ fun RegistrationScreen(
     var recoveryKeyInput by remember { mutableStateOf("") }
     var generatedRecoveryKey by remember { mutableStateOf<String?>(null) }
     var pendingProfile by remember { mutableStateOf<AccountProfile?>(null) }
+    val linkQrCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        val payload = bitmap?.let(::readDeviceLinkQr)
+        if (payload == null) {
+            message = "Не удалось прочитать QR-код привязки"
+        } else {
+            isRegistering = true
+            scope.launch {
+                try {
+                    val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
+                        .linkDevice(payload.serverUrl, payload.code)
+                    onRegistered(AccountProfile(payload.serverUrl, linkedNickname, device.accessToken, device.deviceId))
+                } catch (error: Exception) {
+                    message = error.message ?: "Не удалось подключить аккаунт"
+                } finally { isRegistering = false }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -199,6 +220,16 @@ fun RegistrationScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+            Spacer(Modifier.height(18.dp))
+            OutlinedButton(
+                onClick = { linkQrCamera.launch(null) },
+                enabled = !isRegistering && pendingProfile == null,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(Icons.Rounded.Security, contentDescription = null)
+                Spacer(Modifier.size(8.dp))
+                Text("Подключить аккаунт с Desktop по QR")
             }
             Spacer(Modifier.height(18.dp))
             if (BuildConfig.DEBUG) {

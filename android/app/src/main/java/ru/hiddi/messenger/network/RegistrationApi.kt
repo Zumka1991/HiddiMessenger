@@ -13,6 +13,25 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class RegistrationApi(private val crypto: CryptoBoundary) {
+    suspend fun linkDevice(serverUrl: String, linkCode: String, deviceName: String = "Android"): Pair<RegisteredDevice, String> =
+        withContext(Dispatchers.IO) {
+            val baseUrl = serverUrl.trimEnd('/')
+            require(baseUrl.startsWith("https://") || baseUrl.startsWith("http://")) { "Некорректный адрес сервера" }
+            require(linkCode.length >= 32) { "Некорректный код привязки" }
+            val bundle = crypto.createRegistrationBundle()
+            val registration = post(
+                "$baseUrl/v1/devices/link",
+                JSONObject().put("link_code", linkCode).put("identity_public_key", bundle.identityPublicKey.base64Url())
+                    .put("registration_id", bundle.registrationId).put("device_name", deviceName).toString(),
+                null,
+            )
+            val token = registration.getString("access_token")
+            put("$baseUrl/v1/devices/prekeys", JSONObject()
+                .put("signed_prekey", bundle.signedPreKey.toJson()).put("kyber_signed_prekey", bundle.kyberSignedPreKey.toJson())
+                .put("one_time_prekeys", bundle.oneTimePreKeys.toJsonArray()).put("kyber_one_time_prekeys", bundle.kyberOneTimePreKeys.toJsonArray()).toString(), token)
+            RegisteredDevice(registration.getString("account_id"), registration.getString("device_id"), registration.getInt("registration_id"), token, "") to registration.getString("nickname")
+        }
+
     suspend fun register(serverUrl: String, nickname: String, inviteCode: String): RegisteredDevice =
         withContext(Dispatchers.IO) {
             require(serverUrl.startsWith("https://") || serverUrl.startsWith("http://")) { "Некорректный адрес сервера" }

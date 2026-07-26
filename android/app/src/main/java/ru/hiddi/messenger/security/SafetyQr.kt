@@ -50,3 +50,16 @@ fun readSafetyQr(bitmap: Bitmap): String? {
     }.getOrNull() ?: return null
     return text.removePrefix(PREFIX).takeIf { text.startsWith(PREFIX) && it.matches(Regex("[0-9a-f]{60}")) }
 }
+
+data class DeviceLinkPayload(val serverUrl: String, val code: String)
+
+fun readDeviceLinkQr(bitmap: Bitmap): DeviceLinkPayload? {
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    val text = runCatching { MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(RGBLuminanceSource(bitmap.width, bitmap.height, pixels)))).text }.getOrNull() ?: return null
+    if (!text.startsWith(DEVICE_LINK_PREFIX)) return null
+    val decoded = runCatching { String(Base64.decode(text.removePrefix(DEVICE_LINK_PREFIX), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP), Charsets.UTF_8) }.getOrNull() ?: return null
+    val separator = decoded.indexOf('\n')
+    if (separator <= 0) return null
+    return DeviceLinkPayload(decoded.substring(0, separator).trimEnd('/'), decoded.substring(separator + 1))
+}

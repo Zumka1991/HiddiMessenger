@@ -159,6 +159,19 @@ class HiddiSession internal constructor(
         persist()
     }
 
+    @Synchronized
+    fun createDeviceLinkCode(): Pair<String, Long> {
+        val json = authenticatedRequest("POST", "$server/v1/devices/link-code", JSONObject()) as JSONObject
+        return json.getString("link_code") to json.getLong("expires_at")
+    }
+
+    @Synchronized
+    fun logoutCurrentDevice() {
+        authenticatedRequest("DELETE", "$server/v1/devices/current", null)
+        passphrase.fill('\u0000')
+        vault.deleteLocalData()
+    }
+
     fun isOnline(): Boolean {
         val response =
             client.send(

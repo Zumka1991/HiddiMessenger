@@ -208,7 +208,11 @@ fun main() = application {
                     }
                 AppScreen.Messenger ->
                     session?.let {
-                        MessengerScreen(it)
+                        MessengerScreen(it) {
+                            session = null
+                            recoveryKey = null
+                            screen = AppScreen.Pairing
+                        }
                         recoveryKey?.let { key -> RecoveryKeyDialog(key) { recoveryKey = null } }
                     }
             }
@@ -509,7 +513,7 @@ private fun ErrorText(message: String) {
 }
 
 @Composable
-private fun MessengerScreen(session: HiddiSession) {
+private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     var online by remember { mutableStateOf(false) }
     var section by remember { mutableStateOf(DesktopSection.Chats) }
     var query by remember { mutableStateOf("") }
@@ -651,6 +655,7 @@ private fun MessengerScreen(session: HiddiSession) {
                             }
                         }
                     },
+                    onLoggedOut = onLoggedOut,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
             } else {
@@ -944,6 +949,7 @@ private fun DesktopSettingsDetail(
     session: HiddiSession,
     invisibleMode: Boolean,
     onInvisibleModeChange: (Boolean) -> Unit,
+    onLoggedOut: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -953,6 +959,10 @@ private fun DesktopSettingsDetail(
     var avatar by remember(session) { mutableStateOf<ByteArray?>(null) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var linkCode by remember { mutableStateOf<String?>(null) }
+    var linkQr by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var showLinkDialog by remember { mutableStateOf(false) }
+    var showLogoutDialog by remember { mutableStateOf(false) }
 
     suspend fun reload() {
         val loaded = withContext(Dispatchers.IO) { session.profile() }
@@ -1158,12 +1168,70 @@ private fun DesktopSettingsDetail(
                         color = TextMuted,
                         fontSize = 13.sp,
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = {
+                                busy = true
+                                scope.launch {
+                                    runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            val (code, _) = session.createDeviceLinkCode()
+                                            val png = ByteArrayOutputStream().also { ImageIO.write(createDeviceLinkQr(session.server, code), "png", it) }.toByteArray()
+                                            code to SkiaImage.makeFromEncoded(png).toComposeImageBitmap()
+                                        }
+                                    }.onSuccess { (code, image) ->
+                                        linkCode = code
+                                        linkQr = image
+                                        showLinkDialog = true
+                                    }.onFailure { status = it.message ?: "Не удалось создать QR-код" }
+                                    busy = false
+                                }
+                            },
+                        ) { Text("Подключить Android") }
+                        TextButton(enabled = !busy, onClick = { showLogoutDialog = true }) {
+                            Text("Выйти с устройства", color = Color(0xFFFF8D91))
+                        }
+                    }
                 }
             }
         }
         status?.let { message ->
             item { Text(message, color = TextMuted, fontSize = 13.sp) }
         }
+    }
+    if (showLinkDialog && linkQr != null) {
+        AlertDialog(
+            onDismissRequest = { showLinkDialog = false },
+            title = { Text("Подключить Android") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("На телефоне выберите подключение существующего аккаунта и отсканируйте QR. Код одноразовый.")
+                    Spacer(Modifier.height(14.dp))
+                    Image(linkQr!!, "QR-код привязки Android", modifier = Modifier.size(320.dp).background(Color.White).padding(10.dp))
+                    linkCode?.let { Text(it, color = TextMuted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showLinkDialog = false }) { Text("Готово") } },
+        )
+    }
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) showLogoutDialog = false },
+            title = { Text("Выйти с этого компьютера?") },
+            text = { Text("Устройство будет отозвано, а локальные ключи, история и кэш вложений удалены без возможности восстановления.") },
+            confirmButton = {
+                TextButton(enabled = !busy, onClick = {
+                    busy = true
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { session.logoutCurrentDevice() } }
+                            .onSuccess { showLogoutDialog = false; onLoggedOut() }
+                            .onFailure { status = it.message ?: "Не удалось выйти"; busy = false }
+                    }
+                }) { Text("Выйти", color = Color(0xFFFF8D91)) }
+            },
+            dismissButton = { TextButton(enabled = !busy, onClick = { showLogoutDialog = false }) { Text("Отмена") } },
+        )
     }
 }
 
