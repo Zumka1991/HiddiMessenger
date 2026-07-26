@@ -216,6 +216,14 @@ fun ChatScreen(
         historyRevision++
     }
 
+    suspend fun refreshDeliveryStatuses(peer: String) {
+        val statuses =
+            api.messageStatuses(profile, peer)
+                .mapValues { (_, status) -> status.name.lowercase() }
+        historyStore.updateDeliveryStatuses(statuses)
+        reloadVisibleHistory(peer)
+    }
+
     suspend fun refreshKnownProfiles() {
         (peers + contacts).distinct().forEach { peer ->
             runCatching { api.userProfile(profile, peer) }.getOrNull()?.let { loaded ->
@@ -796,6 +804,13 @@ fun ChatScreen(
                         }
                         status = "Новое зашифрованное сообщение"
                     }
+                    MessagingService.ACTION_RECEIPTS_UPDATED -> {
+                        recipient?.let { peer ->
+                            scope.launch {
+                                runCatching { refreshDeliveryStatuses(peer) }
+                            }
+                        }
+                    }
                     MessagingService.ACTION_CONNECTION_CHANGED -> {
                         connection = ServerConnection.fromWire(
                             intent.getStringExtra(MessagingService.EXTRA_CONNECTION_STATE),
@@ -835,6 +850,7 @@ fun ChatScreen(
             receiver,
             IntentFilter().apply {
                 addAction(MessagingService.ACTION_MESSAGES_UPDATED)
+                addAction(MessagingService.ACTION_RECEIPTS_UPDATED)
                 addAction(MessagingService.ACTION_CONNECTION_CHANGED)
                 addAction(MessagingService.ACTION_GROUPS_UPDATED)
                 addAction(MessagingService.ACTION_PROFILES_UPDATED)
@@ -850,17 +866,9 @@ fun ChatScreen(
 
     LaunchedEffect(recipient) {
         while (recipient != null) {
-            delay(5_000)
+            delay(3_000)
             val peer = recipient ?: break
-            val outgoing = historyStore.messagesWith(peer).filter { it.outgoing && it.messageId != null }
-            outgoing.forEach { item ->
-                val messageId = item.messageId ?: return@forEach
-                runCatching { api.messageStatus(profile, messageId) }.getOrNull()?.let { delivery ->
-                    val wire = delivery.name.lowercase()
-                    if (item.deliveryStatus != wire) historyStore.updateDeliveryStatus(messageId, wire)
-                }
-            }
-            reloadVisibleHistory(peer)
+            runCatching { refreshDeliveryStatuses(peer) }
         }
     }
 

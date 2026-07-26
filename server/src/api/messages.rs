@@ -32,6 +32,10 @@ pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
             post(mark_peer_messages_read),
         )
         .route(
+            "/v1/messages/statuses/{nickname}",
+            get(conversation_message_statuses),
+        )
+        .route(
             "/v1/conversations/deletions",
             get(pending_conversation_deletions),
         )
@@ -84,6 +88,13 @@ struct HistoryResponse {
 
 #[derive(Serialize)]
 struct MessageStatusResponse {
+    delivered: bool,
+    read: bool,
+}
+
+#[derive(Serialize)]
+struct ConversationMessageStatusResponse {
+    message_id: Uuid,
     delivered: bool,
     read: bool,
 }
@@ -521,6 +532,70 @@ async fn message_status(
     })
 }
 
+/// Compact status snapshot for the visible dialogue. This avoids one network
+/// request per outgoing message and lets all checks update atomically.
+async fn conversation_message_statuses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<Json<Vec<ConversationMessageStatusResponse>>, Error> {
+    let sender = authenticate(&state, &headers)?;
+    let recipient_nickname = normalize_nickname(&nickname)
+        .ok_or(Error(StatusCode::BAD_REQUEST, "invalid recipient nickname"))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT messages.id,
+                    (
+                        messages.delivered_at IS NOT NULL OR EXISTS(
+                            SELECT 1 FROM message_deliveries
+                            WHERE message_deliveries.message_id = messages.id
+                              AND message_deliveries.delivered_at IS NOT NULL
+                        )
+                    ),
+                    messages.read_at IS NOT NULL
+             FROM messages
+             WHERE messages.sender_account_id = ?1
+               AND messages.recipient_account_id = (
+                   SELECT id FROM accounts WHERE nickname = ?2
+               )
+             ORDER BY messages.created_at DESC
+             LIMIT 500",
+        )
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load conversation statuses",
+            )
+        })?;
+    let statuses = statement
+        .query_map(params![sender.account_id, recipient_nickname], |row| {
+            let id: String = row.get(0)?;
+            Ok(ConversationMessageStatusResponse {
+                message_id: Uuid::parse_str(&id).expect("database contains valid UUIDs"),
+                delivered: row.get(1)?,
+                read: row.get(2)?,
+            })
+        })
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load conversation statuses",
+            )
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load conversation statuses",
+            )
+        })?;
+    Ok(Json(statuses))
+}
+
 /// Called only when the recipient has opened a dialogue.  It deliberately records no message text.
 async fn mark_peer_messages_read(
     State(state): State<AppState>,
@@ -534,8 +609,24 @@ async fn mark_peer_messages_read(
         .db
         .lock()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    db.execute(
-        "UPDATE messages
+    let sender_account_id: String = db
+        .query_row(
+            "SELECT id FROM accounts WHERE nickname = ?1",
+            params![sender_nickname],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                Error(StatusCode::NOT_FOUND, "sender not found")
+            }
+            _ => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not find message sender",
+            ),
+        })?;
+    let changed = db
+        .execute(
+            "UPDATE messages
          SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP),
              read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
          WHERE recipient_account_id = ?1
@@ -546,15 +637,19 @@ async fn mark_peer_messages_read(
                      AND message_deliveries.delivered_at IS NOT NULL
                )
            )
-           AND sender_account_id = (SELECT id FROM accounts WHERE nickname = ?2)",
-        params![recipient.account_id, sender_nickname],
-    )
-    .map_err(|_| {
-        Error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not acknowledge read state",
+           AND sender_account_id = ?2",
+            params![recipient.account_id, sender_account_id],
         )
-    })?;
+        .map_err(|_| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not acknowledge read state",
+            )
+        })?;
+    drop(db);
+    if changed > 0 {
+        state.realtime.publish(&sender_account_id, "receipt");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

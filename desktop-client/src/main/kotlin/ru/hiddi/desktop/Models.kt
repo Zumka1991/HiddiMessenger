@@ -1,5 +1,11 @@
 package ru.hiddi.desktop
 
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoField
+
 data class HiddiProfile(
     val nickname: String,
     val displayName: String,
@@ -45,3 +51,20 @@ enum class DesktopSection {
     Contacts,
     Settings,
 }
+
+private val sqliteUtcTimestamp =
+    DateTimeFormatterBuilder()
+        .appendPattern("yyyy-MM-dd HH:mm:ss")
+        .optionalStart()
+        .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
+        .optionalEnd()
+        .toFormatter()
+
+/** Accepts both RFC 3339 and SQLite UTC timestamps from older server rows. */
+internal fun wireTimestampMillis(value: String): Long =
+    runCatching { Instant.parse(value).toEpochMilli() }
+        .getOrElse {
+            LocalDateTime.parse(value, sqliteUtcTimestamp)
+                .toInstant(ZoneOffset.UTC)
+                .toEpochMilli()
+        }

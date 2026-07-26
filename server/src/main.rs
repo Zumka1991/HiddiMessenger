@@ -534,6 +534,19 @@ mod tests {
         let delivery = serde_json::from_str::<serde_json::Value>(&delivery).unwrap();
         assert_eq!(delivery["delivered"], true);
         assert_eq!(delivery["read"], false);
+        let (status, statuses) = request(
+            &app,
+            "GET",
+            "/v1/messages/statuses/bob",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let statuses = serde_json::from_str::<serde_json::Value>(&statuses).unwrap();
+        assert_eq!(statuses[0]["message_id"], message_id);
+        assert_eq!(statuses[0]["delivered"], true);
+        assert_eq!(statuses[0]["read"], false);
 
         let (status, _) = request(
             &app,
@@ -554,6 +567,18 @@ mod tests {
         .await;
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&delivery).unwrap()["read"],
+            true,
+        );
+        let (_, statuses) = request(
+            &app,
+            "GET",
+            "/v1/messages/statuses/bob",
+            Some(&alice),
+            String::new(),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&statuses).unwrap()[0]["read"],
             true,
         );
     }

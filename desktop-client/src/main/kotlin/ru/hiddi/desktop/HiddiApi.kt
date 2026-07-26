@@ -482,6 +482,7 @@ class HiddiSession internal constructor(
                             peer = peer,
                             text = attachment?.displayText() ?: visibleText,
                             outgoing = sync != null,
+                            createdAt = wireTimestampMillis(item.getString("created_at")),
                             messageId = messageId,
                             deliveryStatus = "delivered",
                             attachment = attachment,
@@ -795,6 +796,42 @@ class HiddiSession internal constructor(
             }
         }
         return null
+    }
+
+    @Synchronized
+    fun updateDeliveryStatuses(peer: String): Map<String, String> {
+        val normalized = normalizePeer(peer)
+        val statuses =
+            authenticatedRequest(
+                "GET",
+                "$server/v1/messages/statuses/${URLEncoder.encode(normalized, Charsets.UTF_8)}",
+                null,
+            ) as JSONArray
+        val result = buildMap {
+            for (index in 0 until statuses.length()) {
+                val item = statuses.getJSONObject(index)
+                put(
+                    item.getString("message_id"),
+                    when {
+                        item.getBoolean("read") -> "read"
+                        item.getBoolean("delivered") -> "delivered"
+                        else -> "sent"
+                    },
+                )
+            }
+        }
+        val history = historyJson()
+        var changed = false
+        for (index in 0 until history.length()) {
+            val item = history.getJSONObject(index)
+            val next = result[item.optString("message_id")] ?: continue
+            if (item.optString("delivery_status", "sent") != next) {
+                item.put("delivery_status", next)
+                changed = true
+            }
+        }
+        if (changed) persist()
+        return result
     }
 
     private fun bundle(json: JSONObject): PreKeyBundle {

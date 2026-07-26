@@ -574,6 +574,35 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         request("POST", "${profile.serverUrl}/v1/messages/read/$normalized", null, profile.accessToken)
     }
 
+    suspend fun messageStatuses(
+        profile: AccountProfile,
+        peer: String,
+    ): Map<String, DeliveryStatus> = withContext(Dispatchers.IO) {
+        val normalized = peer.trim().removePrefix("@").lowercase()
+        val response =
+            JSONArray(
+                request(
+                    "GET",
+                    "${profile.serverUrl}/v1/messages/statuses/$normalized",
+                    null,
+                    profile.accessToken,
+                ),
+            )
+        buildMap {
+            for (index in 0 until response.length()) {
+                val item = response.getJSONObject(index)
+                put(
+                    item.getString("message_id"),
+                    when {
+                        item.getBoolean("read") -> DeliveryStatus.READ
+                        item.getBoolean("delivered") -> DeliveryStatus.DELIVERED
+                        else -> DeliveryStatus.SENT
+                    },
+                )
+            }
+        }
+    }
+
     suspend fun deleteConversationForBoth(profile: AccountProfile, peer: String) = withContext(Dispatchers.IO) {
         val normalized = peer.trim().removePrefix("@").lowercase()
         request("DELETE", "${profile.serverUrl}/v1/conversations/$normalized", null, profile.accessToken)

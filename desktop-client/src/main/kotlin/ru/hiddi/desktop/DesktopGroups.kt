@@ -302,7 +302,7 @@ internal class DesktopGroupManager(
                 .put("outgoing", false)
                 .put(
                     "created_at",
-                    runCatching { Instant.parse(createdAt).toEpochMilli() }
+                    runCatching { wireTimestampMillis(createdAt) }
                         .getOrDefault(System.currentTimeMillis()),
                 ),
         )

@@ -553,6 +553,25 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
         messages.addAll(snapshot.boundedHistoryWindow())
     }
 
+    suspend fun refreshDeliveryStatuses(peers: Set<String>) {
+        peers.forEach { peer ->
+            val statuses =
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        session.updateDeliveryStatuses(peer)
+                    }
+                }.getOrNull() ?: return@forEach
+            messages.indices.forEach { index ->
+                val current = messages[index]
+                val messageId = current.messageId ?: return@forEach
+                val next = statuses[messageId] ?: return@forEach
+                if (current.deliveryStatus != next) {
+                    messages[index] = current.copy(deliveryStatus = next)
+                }
+            }
+        }
+    }
+
     DisposableEffect(session) {
         realtime.connect(invisibleMode)
         onDispose {
@@ -630,7 +649,12 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                 DesktopRealtime.Event.Connected -> {
                     selected?.let { realtime.subscribePresence(it.nickname) }
                 }
-                DesktopRealtime.Event.SyncRequired -> synchronizeInbox()
+                DesktopRealtime.Event.SyncRequired -> {
+                    synchronizeInbox()
+                    refreshDeliveryStatuses(
+                        selected?.nickname?.let(::setOf).orEmpty(),
+                    )
+                }
                 is DesktopRealtime.Event.Presence -> {
                     if (event.nickname == selected?.nickname) {
                         peerOnline = event.online
@@ -677,17 +701,13 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     }
     LaunchedEffect(session) {
         while (true) {
-            messages.toList().forEach { entry ->
-                entry.messageId?.takeIf { entry.outgoing }?.let { messageId ->
-                    val status = runCatching { withContext(Dispatchers.IO) { session.updateDeliveryStatus(messageId) } }.getOrNull()
-                    val currentIndex = messages.indexOfFirst { it.messageId == messageId }
-                    val current = messages.getOrNull(currentIndex)
-                    if (status != null && current != null && status != current.deliveryStatus) {
-                        messages[currentIndex] = current.copy(deliveryStatus = status)
-                    }
-                }
-            }
-            delay(1_500)
+            refreshDeliveryStatuses(
+                messages.asSequence()
+                    .filter(ChatEntry::outgoing)
+                    .map(ChatEntry::peer)
+                    .toSet(),
+            )
+            delay(3_000)
         }
     }
 

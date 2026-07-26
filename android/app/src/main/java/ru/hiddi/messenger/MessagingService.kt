@@ -157,6 +157,9 @@ class MessagingService : Service() {
                             if (event.kind == "profile" || event.kind == "sync_required") {
                                 sendBroadcast(Intent(ACTION_PROFILES_UPDATED).setPackage(packageName))
                             }
+                            if (event.kind == "receipt") {
+                                sendBroadcast(Intent(ACTION_RECEIPTS_UPDATED).setPackage(packageName))
+                            }
                         }
                         is RealtimeConnection.Event.Disconnected -> {
                             event.cause?.let {
@@ -375,6 +378,7 @@ class MessagingService : Service() {
 
     companion object {
         const val ACTION_MESSAGES_UPDATED = "ru.hiddi.messenger.MESSAGES_UPDATED"
+        const val ACTION_RECEIPTS_UPDATED = "ru.hiddi.messenger.RECEIPTS_UPDATED"
         const val ACTION_GROUPS_UPDATED = "ru.hiddi.messenger.GROUPS_UPDATED"
         const val ACTION_PROFILES_UPDATED = "ru.hiddi.messenger.PROFILES_UPDATED"
         const val ACTION_CONNECTION_CHANGED = "ru.hiddi.messenger.CONNECTION_CHANGED"

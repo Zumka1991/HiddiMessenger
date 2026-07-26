@@ -102,8 +102,12 @@ import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.playVoicePcm
 import ru.hiddi.messenger.security.sanitizeImage
 import java.time.Instant
+import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoField
 
 @androidx.compose.runtime.Composable
 fun MessageBubble(
@@ -169,9 +173,10 @@ private fun MessageMeta(item: ChatHistoryItem, color: Color, modifier: Modifier 
         Text(messageTime(item.time), style = MaterialTheme.typography.labelSmall, color = color)
         if (item.outgoing) {
             Spacer(Modifier.size(3.dp))
+            val delivered = item.deliveryStatus == "delivered"
             val read = item.deliveryStatus == "read"
             Icon(
-                imageVector = if (read) Icons.Rounded.DoneAll else Icons.Rounded.Check,
+                imageVector = if (delivered || read) Icons.Rounded.DoneAll else Icons.Rounded.Check,
                 contentDescription = when (item.deliveryStatus) {
                     "read" -> "Прочитано"
                     "delivered" -> "Доставлено на устройство"
@@ -388,8 +393,24 @@ fun ProfileAvatar(seed: String, image: ByteArray?, size: Int) {
     }
 }
 
+private val sqliteUtcTimestamp =
+    DateTimeFormatterBuilder()
+        .appendPattern("yyyy-MM-dd HH:mm:ss")
+        .optionalStart()
+        .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
+        .optionalEnd()
+        .toFormatter()
+
+internal fun parseMessageInstant(value: String): Instant =
+    runCatching { Instant.parse(value) }
+        .getOrElse {
+            LocalDateTime.parse(value, sqliteUtcTimestamp).toInstant(ZoneOffset.UTC)
+        }
+
 fun messageTime(value: String): String = runCatching {
-    DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()).format(Instant.parse(value))
+    DateTimeFormatter.ofPattern("HH:mm")
+        .withZone(ZoneId.systemDefault())
+        .format(parseMessageInstant(value))
 }.getOrElse {
     Regex("""(\d{2}):(\d{2})(?::\d{2})?""").find(value)?.let { match ->
         "${match.groupValues[1]}:${match.groupValues[2]}"

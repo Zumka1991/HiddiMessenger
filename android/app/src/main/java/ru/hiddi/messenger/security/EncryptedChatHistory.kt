@@ -84,12 +84,18 @@ class EncryptedChatHistory(context: Context) {
     }
 
     fun updateDeliveryStatus(messageId: String, status: String) = synchronized(historyLock) {
+        updateDeliveryStatuses(mapOf(messageId to status))
+    }
+
+    fun updateDeliveryStatuses(statuses: Map<String, String>) = synchronized(historyLock) {
+        if (statuses.isEmpty()) return@synchronized
         val entries = read()
         var changed = false
         for (index in 0 until entries.length()) {
             val item = entries.getJSONObject(index)
-            if (item.optString("message_id") == messageId && item.optString("delivery_status", "sent") != status) {
-                item.put("delivery_status", status)
+            val next = statuses[item.optString("message_id")] ?: continue
+            if (item.optString("delivery_status", "sent") != next) {
+                item.put("delivery_status", next)
                 changed = true
             }
         }
