@@ -73,7 +73,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -139,11 +138,11 @@ fun ConversationsScreen(
     onOpenSettings: () -> Unit,
     onOpenProfile: (String) -> Unit,
 ) {
-    var showContacts by rememberSaveable { mutableStateOf(false) }
+    var showContacts by remember { mutableStateOf(false) }
     var mainMenuExpanded by remember { mutableStateOf(false) }
-    var showCreateGroup by rememberSaveable { mutableStateOf(false) }
-    var newGroupName by rememberSaveable { mutableStateOf("") }
-    var firstMember by rememberSaveable { mutableStateOf("") }
+    var showCreateGroup by remember { mutableStateOf(false) }
+    var newGroupName by remember { mutableStateOf("") }
+    var firstMember by remember { mutableStateOf("") }
     Column(
         modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
     ) {

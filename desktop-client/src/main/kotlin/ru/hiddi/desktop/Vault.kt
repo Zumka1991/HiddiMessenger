@@ -3,9 +3,11 @@ package ru.hiddi.desktop
 import de.mkammerer.argon2.Argon2Factory
 import java.nio.ByteBuffer
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -16,7 +18,10 @@ import javax.crypto.spec.SecretKeySpec
  * The passphrase and derived key are never written to disk.
  */
 class Vault(private val path: Path) {
-    fun exists(): Boolean = Files.exists(path)
+    fun exists(): Boolean =
+        Files.exists(path).also { present ->
+            if (present) hardenStoragePermissions()
+        }
 
     fun read(passphrase: CharArray): ByteArray? {
         if (!exists()) return null
@@ -39,6 +44,7 @@ class Vault(private val path: Path) {
     }
 
     fun write(plaintext: ByteArray, passphrase: CharArray) {
+        prepareStorageDirectory()
         val salt = ByteArray(SALT_BYTES).also(SecureRandom()::nextBytes)
         val iv = ByteArray(IV_BYTES).also(SecureRandom()::nextBytes)
         val key = deriveKey(passphrase, salt)
@@ -53,9 +59,9 @@ class Vault(private val path: Path) {
             .put(iv)
             .put(ciphertext)
             .array()
-        path.parent?.let(Files::createDirectories)
         val temporary = Files.createTempFile(path.parent, ".hiddi-vault-", ".tmp")
         try {
+            setOwnerOnlyPermissions(temporary, FILE_PERMISSIONS)
             Files.write(temporary, output)
             try {
                 Files.move(
@@ -67,6 +73,7 @@ class Vault(private val path: Path) {
             } catch (_: AtomicMoveNotSupportedException) {
                 Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING)
             }
+            setOwnerOnlyPermissions(path, FILE_PERMISSIONS)
         } finally {
             Files.deleteIfExists(temporary)
             salt.fill(0)
@@ -83,6 +90,24 @@ class Vault(private val path: Path) {
             init(mode, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
         }
 
+    private fun prepareStorageDirectory() {
+        path.parent?.let { directory ->
+            Files.createDirectories(directory)
+            setOwnerOnlyPermissions(directory, DIRECTORY_PERMISSIONS)
+        }
+    }
+
+    private fun hardenStoragePermissions() {
+        prepareStorageDirectory()
+        setOwnerOnlyPermissions(path, FILE_PERMISSIONS)
+    }
+
+    private fun setOwnerOnlyPermissions(target: Path, permissions: Set<PosixFilePermission>) {
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            Files.setPosixFilePermissions(target, permissions)
+        }
+    }
+
     companion object {
         const val FILE_NAME = "signal-device.v1"
         private const val FORMAT_VERSION: Byte = 1
@@ -94,5 +119,14 @@ class Vault(private val path: Path) {
         private const val ARGON_ITERATIONS = 3
         private const val ARGON_MEMORY_KIB = 65_536
         private const val ARGON_PARALLELISM = 1
+        private val DIRECTORY_PERMISSIONS = setOf(
+            PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE,
+            PosixFilePermission.OWNER_EXECUTE,
+        )
+        private val FILE_PERMISSIONS = setOf(
+            PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE,
+        )
     }
 }

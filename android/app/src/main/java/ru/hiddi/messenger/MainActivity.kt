@@ -70,7 +70,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -157,7 +156,7 @@ class MainActivity : ComponentActivity() {
 
 @androidx.compose.runtime.Composable
 private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: () -> Unit) {
-    var showRegistration by rememberSaveable { mutableStateOf(false) }
+    var showRegistration by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val accountStore = remember { AccountStore(context) }
     var account by remember { mutableStateOf(accountStore.read()) }
@@ -167,7 +166,9 @@ private fun HiddiApp(requestedPeer: String?, resumeRevision: Int, onPeerOpened: 
             ContextCompat.startForegroundService(context, Intent(context, MessagingService::class.java))
             runCatching {
                 withContext(Dispatchers.IO) {
-                    val api = SignalMessagingApi(SignalStateRepository(context))
+                    val repository = SignalStateRepository(context)
+                    repository.migrateEncryptionFormat()
+                    val api = SignalMessagingApi(repository)
                     GroupMlsCoordinator(context, api).prepare(current)
                 }
             }.getOrNull()?.let { prepared ->

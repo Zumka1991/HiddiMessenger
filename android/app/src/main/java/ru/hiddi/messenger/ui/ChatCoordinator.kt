@@ -70,7 +70,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -124,13 +123,13 @@ fun ChatScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
-    var recipient by rememberSaveable { mutableStateOf<String?>(null) }
-    var search by rememberSaveable { mutableStateOf("") }
+    var recipient by remember { mutableStateOf<String?>(null) }
+    var search by remember { mutableStateOf("") }
     var foundUsers by remember { mutableStateOf(emptyList<UserSearchResult>()) }
-    var searchError by rememberSaveable { mutableStateOf<String?>(null) }
+    var searchError by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
-    var draft by rememberSaveable { mutableStateOf("") }
-    var status by rememberSaveable { mutableStateOf("Защищено · E2EE") }
+    var draft by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf("Защищено · E2EE") }
     var attachmentInProgress by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
     val api = remember { SignalMessagingApi(ru.hiddi.messenger.security.SignalStateRepository(context)) }
@@ -153,21 +152,21 @@ fun ChatScreen(
     var knownProfiles by remember { mutableStateOf(emptyMap<String, UserSearchResult>()) }
     var knownAvatars by remember { mutableStateOf(emptyMap<String, ByteArray>()) }
     var knownAvatarVersions by remember { mutableStateOf(emptyMap<String, String>()) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
-    var viewedProfileNickname by rememberSaveable { mutableStateOf<String?>(null) }
-    var showClearHistoryDialog by rememberSaveable { mutableStateOf(false) }
-    var clearForBothSides by rememberSaveable { mutableStateOf(false) }
-    var showSafetyNumberDialog by rememberSaveable { mutableStateOf(false) }
-    var safetyNumber by rememberSaveable { mutableStateOf<String?>(null) }
-    var safetyNumberTrusted by rememberSaveable { mutableStateOf(false) }
-    var identityChanged by rememberSaveable { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var viewedProfileNickname by remember { mutableStateOf<String?>(null) }
+    var showClearHistoryDialog by remember { mutableStateOf(false) }
+    var clearForBothSides by remember { mutableStateOf(false) }
+    var showSafetyNumberDialog by remember { mutableStateOf(false) }
+    var safetyNumber by remember { mutableStateOf<String?>(null) }
+    var safetyNumberTrusted by remember { mutableStateOf(false) }
+    var identityChanged by remember { mutableStateOf(false) }
     var groups by remember { mutableStateOf(groupCoordinator.groups()) }
     var groupRevision by remember { mutableIntStateOf(0) }
-    var selectedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
-    var groupDraft by rememberSaveable { mutableStateOf("") }
-    var groupStatus by rememberSaveable { mutableStateOf("OpenMLS · сквозное шифрование") }
+    var selectedGroupId by remember { mutableStateOf<String?>(null) }
+    var groupDraft by remember { mutableStateOf("") }
+    var groupStatus by remember { mutableStateOf("OpenMLS · сквозное шифрование") }
     var groupBusy by remember { mutableStateOf(false) }
-    var groupCreationError by rememberSaveable { mutableStateOf<String?>(null) }
+    var groupCreationError by remember { mutableStateOf<String?>(null) }
     val safetyQrPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {

@@ -33,15 +33,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -135,16 +133,15 @@ fun RegistrationScreen(
     onRecover: ((String, String) -> AccountProfile?)?,
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    var nickname by rememberSaveable { mutableStateOf("") }
-    var inviteCode by rememberSaveable { mutableStateOf("") }
-    var serverUrl by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_SERVER_URL) }
-    var message by rememberSaveable { mutableStateOf<String?>(null) }
-    var isRegistering by rememberSaveable { mutableStateOf(false) }
-    var recoveryKeyInput by rememberSaveable { mutableStateOf("") }
-    var generatedRecoveryKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var pendingProfile by rememberSaveable { mutableStateOf<AccountProfile?>(null) }
+    var nickname by remember { mutableStateOf("") }
+    var inviteCode by remember { mutableStateOf("") }
+    var serverUrl by remember { mutableStateOf(BuildConfig.DEFAULT_SERVER_URL) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var isRegistering by remember { mutableStateOf(false) }
+    var recoveryKeyInput by remember { mutableStateOf("") }
+    var generatedRecoveryKey by remember { mutableStateOf<String?>(null) }
+    var pendingProfile by remember { mutableStateOf<AccountProfile?>(null) }
 
     Column(
         modifier = Modifier
@@ -306,7 +303,9 @@ fun RegistrationScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { clipboard.setText(AnnotatedString(key)) },
+                    onClick = {
+                        copySensitiveText(context, "Ключ восстановления Hiddi", key)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Скопировать ключ")

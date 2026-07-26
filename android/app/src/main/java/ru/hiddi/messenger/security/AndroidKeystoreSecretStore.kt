@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 /** Encrypts private Signal records at rest; the AES key is non-exportable. */
 class AndroidKeystoreSecretStore(
     context: Context,
-    fileName: String = "signal-private-material.v1",
+    private val fileName: String = "signal-private-material.v1",
     private val keyAlias: String = DEFAULT_KEY_ALIAS,
 ) {
     private val file = AtomicFile(context.noBackupFilesDir.resolve(fileName))
@@ -24,16 +24,27 @@ class AndroidKeystoreSecretStore(
         val stored = file.openRead().use { it.readBytes() }
         require(stored.size >= 14) { "Encrypted Signal material is truncated" }
         val buffer = ByteBuffer.wrap(stored)
-        require(buffer.get() == FORMAT_VERSION) { "Unsupported Signal material format" }
+        val formatVersion = buffer.get()
+        require(formatVersion == LEGACY_FORMAT_VERSION || formatVersion == FORMAT_VERSION) {
+            "Unsupported Signal material format"
+        }
         val ivSize = buffer.get().toInt() and 0xff
         require(ivSize in 12..16 && buffer.remaining() > ivSize) { "Invalid Signal material IV" }
         val iv = ByteArray(ivSize).also(buffer::get)
         val encrypted = ByteArray(buffer.remaining()).also(buffer::get)
-        return cipher(Cipher.DECRYPT_MODE, iv).doFinal(encrypted)
+        val plainText = cipher(
+            mode = Cipher.DECRYPT_MODE,
+            iv = iv,
+            authenticateStore = formatVersion == FORMAT_VERSION,
+        ).doFinal(encrypted)
+        if (formatVersion == LEGACY_FORMAT_VERSION) {
+            write(plainText)
+        }
+        return plainText
     }
 
     fun write(plainText: ByteArray) {
-        val encryptor = cipher(Cipher.ENCRYPT_MODE)
+        val encryptor = cipher(Cipher.ENCRYPT_MODE, authenticateStore = true)
         val encrypted = encryptor.doFinal(plainText)
         val output = file.startWrite()
         try {
@@ -55,8 +66,13 @@ class AndroidKeystoreSecretStore(
         }
     }
 
-    private fun cipher(mode: Int, iv: ByteArray? = null): Cipher = Cipher.getInstance(AES_GCM).apply {
+    private fun cipher(
+        mode: Int,
+        iv: ByteArray? = null,
+        authenticateStore: Boolean,
+    ): Cipher = Cipher.getInstance(AES_GCM).apply {
         if (iv == null) init(mode, getOrCreateKey()) else init(mode, getOrCreateKey(), GCMParameterSpec(TAG_BITS, iv))
+        if (authenticateStore) updateAAD("$FORMAT_VERSION\u0000$fileName\u0000$keyAlias".encodeToByteArray())
     }
 
     private fun getOrCreateKey(): SecretKey {
@@ -68,6 +84,7 @@ class AndroidKeystoreSecretStore(
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setKeySize(256)
+                    .setRandomizedEncryptionRequired(true)
                     .build(),
             )
         }.generateKey()
@@ -77,7 +94,8 @@ class AndroidKeystoreSecretStore(
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val DEFAULT_KEY_ALIAS = "ru.hiddi.messenger.signal-storage.v1"
         const val AES_GCM = "AES/GCM/NoPadding"
-        const val FORMAT_VERSION: Byte = 1
+        const val LEGACY_FORMAT_VERSION: Byte = 1
+        const val FORMAT_VERSION: Byte = 2
         const val TAG_BITS = 128
     }
 }

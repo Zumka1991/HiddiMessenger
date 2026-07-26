@@ -16,6 +16,15 @@ class SignalStateRepository(context: Context) {
         keyAlias = "ru.hiddi.messenger.signal-ratchet-state.v1",
     )
 
+    /**
+     * Authenticates and upgrades both documents before the first network event.
+     * Returned plaintext is not retained by the migration path.
+     */
+    fun migrateEncryptionFormat() {
+        keyRecords.read()?.fill(0)
+        ratchetRecords.read()?.fill(0)
+    }
+
     fun load(): SignalState {
         val keys = keyRecords.read()?.let(SignalPrivateState::decode)
             ?: error("На этом устройстве ещё нет Signal-ключей")

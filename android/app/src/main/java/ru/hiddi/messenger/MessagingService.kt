@@ -68,7 +68,10 @@ class MessagingService : Service() {
             stopSelf()
             return
         }
-        val api = SignalMessagingApi(SignalStateRepository(this))
+        val repository = SignalStateRepository(this).also {
+            it.migrateEncryptionFormat()
+        }
+        val api = SignalMessagingApi(repository)
         val history = EncryptedChatHistory(this)
         val attachments = EncryptedAttachmentStore(this)
         val groupCoordinator = GroupMlsCoordinator(this, api)

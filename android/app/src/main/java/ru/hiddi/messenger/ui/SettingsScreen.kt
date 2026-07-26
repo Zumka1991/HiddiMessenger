@@ -53,8 +53,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,7 +77,6 @@ fun SettingsScreen(
     onLogout: () -> Unit,
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var profile by remember { mutableStateOf<UserSearchResult?>(null) }
     var displayName by remember { mutableStateOf("") }
@@ -514,7 +511,7 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        clipboard.setText(AnnotatedString(linkCode!!))
+                        copySensitiveText(context, "Код привязки Hiddi", linkCode!!)
                         Toast.makeText(context, "Код скопирован", Toast.LENGTH_SHORT).show()
                     },
                 ) {
@@ -557,7 +554,7 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        clipboard.setText(AnnotatedString(key))
+                        copySensitiveText(context, "Ключ восстановления Hiddi", key)
                         Toast.makeText(context, "Ключ скопирован", Toast.LENGTH_SHORT).show()
                     },
                 ) {
