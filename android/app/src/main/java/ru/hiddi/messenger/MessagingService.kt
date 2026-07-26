@@ -75,7 +75,13 @@ class MessagingService : Service() {
         }
         if (realtimeJob?.isActive != true) {
             publishConnection(STATE_CONNECTING)
-            realtimeJob = serviceScope.launch { runRealtime() }
+            realtimeJob = serviceScope.launch {
+                runCatching { runRealtime() }.onFailure { error ->
+                    Log.e(TAG, "Realtime service stopped safely", error)
+                    publishConnection(STATE_OFFLINE)
+                    stopSelf()
+                }
+            }
         }
         return START_STICKY
     }

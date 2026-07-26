@@ -486,7 +486,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             val normalized = recipient.trim().removePrefix("@").lowercase()
             val state = resolveRegistrationId(profile, repository.load())
             val store = AndroidSignalProtocolStore(state)
-            val local = SignalProtocolAddress(profile.nickname, DEVICE_ID)
+            val local = SignalProtocolAddress(profile.nickname, resolveDeviceNumber(profile))
             val deliveries = encryptForDevices(profile, normalized, message, store, local)
             repository.save(store.snapshot())
             val messageId = JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
@@ -507,7 +507,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     private fun encryptForDevices(profile: AccountProfile, peer: String, plaintext: String, store: AndroidSignalProtocolStore, local: SignalProtocolAddress): JSONArray {
         val deliveries = JSONArray()
         fetchBundles(profile, peer).forEach { (deviceNumber, bundle) ->
-            if (peer == profile.nickname && deviceNumber == DEVICE_ID) return@forEach
+            if (peer == profile.nickname && deviceNumber == local.deviceId) return@forEach
             val remote = SignalProtocolAddress(peer, deviceNumber)
             if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(bundle)
             val cipher = SessionCipher(store, local, remote).encrypt(plaintext.encodeToByteArray())
@@ -619,32 +619,44 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             val output = mutableListOf<DecryptedMessage>()
             for (index in 0 until items.length()) {
                 val item = items.getJSONObject(index)
-                val state = resolveRegistrationId(profile, repository.load())
-                val store = AndroidSignalProtocolStore(state)
-                val sender = item.getString("sender_nickname")
-                val local = SignalProtocolAddress(profile.nickname, DEVICE_ID)
-                val remote = SignalProtocolAddress(
-                    sender,
-                    item.optInt("sender_device_number", DEVICE_ID),
-                )
-                val raw = item.getString("ciphertext").decode()
-                require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
-                val plain = when (raw.first().toInt()) {
-                    CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
-                    CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
-                    else -> error("Неизвестный тип сообщения")
+                try {
+                    val state = resolveRegistrationId(profile, repository.load())
+                    val store = AndroidSignalProtocolStore(state)
+                    val sender = item.getString("sender_nickname")
+                    val local = SignalProtocolAddress(profile.nickname, resolveDeviceNumber(profile))
+                    val remote = SignalProtocolAddress(
+                        sender,
+                        item.optInt("sender_device_number", DEFAULT_DEVICE_NUMBER),
+                    )
+                    val raw = item.getString("ciphertext").decode()
+                    require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
+                    val plain = when (raw.first().toInt()) {
+                        CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
+                        CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
+                        else -> error("Неизвестный тип сообщения")
+                    }
+                    repository.save(store.snapshot())
+                    val text = plain.decodeToString()
+                    val sync = runCatching { JSONObject(text) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
+                    output += DecryptedMessage(
+                        messageId = item.getString("message_id"),
+                        senderNickname = sync?.optString("peer")?.ifBlank { sender } ?: sender,
+                        text = sync?.optString("text") ?: text,
+                        createdAt = item.getString("created_at"),
+                        outgoing = sync != null,
+                    )
+                    plain.fill(0)
+                } catch (_: Exception) {
+                    // One invalid envelope must not permanently block every newer message.
+                    runCatching {
+                        request(
+                            "POST",
+                            "${profile.serverUrl}/v1/messages/${item.getString("message_id")}",
+                            null,
+                            profile.accessToken,
+                        )
+                    }
                 }
-                repository.save(store.snapshot())
-                val text = plain.decodeToString()
-                val sync = runCatching { JSONObject(text) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
-                output += DecryptedMessage(
-                    messageId = item.getString("message_id"),
-                    senderNickname = sync?.optString("peer")?.ifBlank { sender } ?: sender,
-                    text = sync?.optString("text") ?: text,
-                    createdAt = item.getString("created_at"),
-                    outgoing = sync != null,
-                )
-                plain.fill(0)
             }
             output
         }
@@ -674,7 +686,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         val kyberSigned = bundle.getJSONObject("kyber_signed_prekey")
         val oneTime = bundle.optJSONObject("one_time_prekey")
         val kyberOneTime = bundle.optJSONObject("kyber_one_time_prekey")
-        return PreKeyBundle(bundle.getInt("registration_id"), bundle.optInt("device_number", DEVICE_ID),
+        return PreKeyBundle(bundle.getInt("registration_id"), bundle.optInt("device_number", DEFAULT_DEVICE_NUMBER),
             oneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID, oneTime?.let { ECPublicKey(it.getString("public_key").decode()) },
             signed.getInt("id"), ECPublicKey(signed.getString("public_key").decode()), signed.getString("signature").decode(), IdentityKey(bundle.getString("identity_public_key").decode()),
             kyberOneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID,
@@ -690,6 +702,13 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         return migrated
     }
 
+    private fun resolveDeviceNumber(profile: AccountProfile): Int {
+        if (profile.deviceNumber > 0) return profile.deviceNumber
+        return JSONObject(
+            request("GET", "${profile.serverUrl}/v1/devices/current", null, profile.accessToken),
+        ).getInt("device_number")
+    }
+
     private fun request(method: String, url: String, body: String?, token: String?): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method; connectTimeout = 15_000; readTimeout = 30_000
@@ -703,7 +722,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     }
 
     private companion object {
-        const val DEVICE_ID = 1
+        const val DEFAULT_DEVICE_NUMBER = 1
         val SIGNAL_STATE_MUTEX = Mutex()
     }
 }

@@ -9,7 +9,11 @@ import org.json.JSONObject
 
 /** PIN gate metadata is itself Keystore-encrypted; a PIN is never stored. */
 class CalculatorLockStore(context: Context) {
-    private val store = AndroidKeystoreSecretStore(context.applicationContext, "calculator-lock.v1")
+    private val store = AndroidKeystoreSecretStore(
+        context.applicationContext,
+        fileName = "calculator-lock.v1",
+        keyAlias = "ru.hiddi.messenger.calculator-lock.v1",
+    )
 
     fun enabled(): Boolean = read()?.optBoolean("enabled", false) == true
 

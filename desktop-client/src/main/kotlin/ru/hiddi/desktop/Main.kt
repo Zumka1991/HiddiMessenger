@@ -74,6 +74,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -526,6 +527,8 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     var typingRevision by remember { mutableStateOf(0) }
     var invisibleMode by remember(session) { mutableStateOf(session.invisibleMode()) }
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
+    val peerProfiles = remember(session) { mutableStateMapOf<String, HiddiProfile>() }
+    val peerAvatars = remember(session) { mutableStateMapOf<String, ByteArray>() }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val realtime = remember(session) { DesktopRealtime(session.server, session.accessToken) }
@@ -564,6 +567,26 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
         results =
             runCatching { withContext(Dispatchers.IO) { session.search(query) } }
                 .getOrDefault(emptyList())
+    }
+    val conversationPeers = messages.map(ChatEntry::peer).distinct().sorted()
+    LaunchedEffect(conversationPeers) {
+        conversationPeers.forEach { peer ->
+            val profile =
+                runCatching { withContext(Dispatchers.IO) { session.userProfile(peer) } }
+                    .getOrNull()
+                    ?: return@forEach
+            peerProfiles[peer] = profile
+            if (profile.avatarVersion != null) {
+                runCatching { withContext(Dispatchers.IO) { session.avatar(peer) } }
+                    .getOrNull()
+                    ?.let { peerAvatars[peer] = it }
+            } else {
+                peerAvatars.remove(peer)
+            }
+        }
+    }
+    LaunchedEffect(selected?.nickname, peerProfiles[selected?.nickname]) {
+        selected?.nickname?.let { peerProfiles[it] }?.let { selected = it }
     }
     LaunchedEffect(selected?.nickname) {
         peerOnline = false
@@ -628,7 +651,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
             DesktopNavigation(section, online, session.nickname) { section = it }
             Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
                 when (section) {
-                    DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
+                    DesktopSection.Chats -> ChatListPane(messages, selected, peerProfiles, peerAvatars) { profile -> selected = profile }
                     DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
                         selected = profile
                         section = DesktopSection.Chats
@@ -662,6 +685,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                 selected?.let { profile ->
                     ChatPane(
                         profile = profile,
+                        profileAvatar = peerAvatars[profile.nickname],
                         messages = messages.filter { it.peer == profile.nickname },
                         isBlocked = profile.nickname in blockedUsers,
                         peerOnline = peerOnline,
@@ -864,6 +888,8 @@ private fun CorporateTextField(
 private fun ChatListPane(
     messages: List<ChatEntry>,
     selected: HiddiProfile?,
+    profiles: Map<String, HiddiProfile>,
+    avatars: Map<String, ByteArray>,
     onSelect: (HiddiProfile) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
@@ -884,22 +910,28 @@ private fun ChatListPane(
     } else {
         LazyColumn(Modifier.fillMaxSize().padding(top = 14.dp, start = 12.dp, end = 12.dp)) {
             items(conversations, key = { it.first }) { (peer, last) ->
-                val profile = HiddiProfile(peer, "", "")
-                ConversationRow(profile, last, selected?.nickname == peer) { onSelect(profile) }
+                val profile = profiles[peer] ?: HiddiProfile(peer, "", "")
+                ConversationRow(profile, avatars[peer], last, selected?.nickname == peer) { onSelect(profile) }
             }
         }
     }
 }
 
 @Composable
-private fun ConversationRow(profile: HiddiProfile, last: ChatEntry, selected: Boolean, onClick: () -> Unit) {
+private fun ConversationRow(
+    profile: HiddiProfile,
+    avatar: ByteArray?,
+    last: ChatEntry,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     Surface(
         color = if (selected) Color(0xFF1A3333) else Color.Transparent,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(onClick = onClick),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(14.dp)) {
-            Avatar(profile, 48.dp)
+            Avatar(profile, 48.dp, avatar)
             Spacer(Modifier.width(11.dp))
             Column(Modifier.weight(1f)) {
                 Text("@${profile.nickname}", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1360,25 +1392,43 @@ private fun UserRow(profile: HiddiProfile, selected: Boolean, onClick: () -> Uni
 }
 
 @Composable
-private fun Avatar(profile: HiddiProfile, size: Dp = 42.dp) {
+private fun Avatar(profile: HiddiProfile, size: Dp = 42.dp, avatar: ByteArray? = null) {
+    val bitmap =
+        remember(avatar?.contentHashCode()) {
+            avatar?.let { bytes ->
+                runCatching {
+                    org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+                }.getOrNull()
+            }
+        }
     Box(
         Modifier.size(size).clip(CircleShape).background(Color(0xFF243B43)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            profile.displayName.ifBlank { profile.nickname }
-                .firstOrNull()
-                ?.uppercase()
-                ?: "H",
-            color = Mint,
-            fontWeight = FontWeight.Bold,
-        )
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = "Аватар @${profile.nickname}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text(
+                profile.displayName.ifBlank { profile.nickname }
+                    .firstOrNull()
+                    ?.uppercase()
+                    ?: "H",
+                color = Mint,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
 @Composable
 private fun ChatPane(
     profile: HiddiProfile,
+    profileAvatar: ByteArray?,
     messages: List<ChatEntry>,
     isBlocked: Boolean,
     peerOnline: Boolean,
@@ -1530,7 +1580,7 @@ private fun ChatPane(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF111923)).padding(horizontal = 28.dp, vertical = 17.dp),
         ) {
             Box {
-                Avatar(profile, 46.dp)
+                Avatar(profile, 46.dp, profileAvatar)
                 Box(
                     Modifier.align(Alignment.BottomEnd)
                         .size(12.dp)

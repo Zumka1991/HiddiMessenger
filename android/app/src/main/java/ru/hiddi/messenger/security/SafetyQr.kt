@@ -63,3 +63,6 @@ fun readDeviceLinkQr(bitmap: Bitmap): DeviceLinkPayload? {
     if (separator <= 0) return null
     return DeviceLinkPayload(decoded.substring(0, separator).trimEnd('/'), decoded.substring(separator + 1))
 }
+
+fun readDeviceLinkQr(resolver: ContentResolver, uri: Uri): DeviceLinkPayload? =
+    resolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)?.let(::readDeviceLinkQr)

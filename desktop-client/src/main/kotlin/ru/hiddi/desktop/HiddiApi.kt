@@ -258,6 +258,17 @@ class HiddiSession internal constructor(
         }
     }
 
+    fun userProfile(peer: String): HiddiProfile {
+        val encoded = URLEncoder.encode(normalizePeer(peer), Charsets.UTF_8)
+        val json = authenticatedRequest("GET", "$server/v1/users/$encoded", null) as JSONObject
+        return HiddiProfile(
+            nickname = json.getString("nickname"),
+            displayName = json.optString("display_name"),
+            bio = json.optString("bio"),
+            avatarVersion = json.optString("avatar_version").takeIf(String::isNotBlank),
+        )
+    }
+
     @Synchronized
     fun history(): List<ChatEntry> =
         state.optJSONArray("chat_history")?.let { entries ->

@@ -156,7 +156,40 @@ fun RegistrationScreen(
                 try {
                     val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
                         .linkDevice(payload.serverUrl, payload.code)
-                    onRegistered(AccountProfile(payload.serverUrl, linkedNickname, device.accessToken, device.deviceId))
+                    val profile = AccountProfile(
+                        payload.serverUrl,
+                        linkedNickname,
+                        device.accessToken,
+                        device.deviceId,
+                        device.deviceNumber,
+                    )
+                    AccountStore(context).save(profile)
+                    onRegistered(profile)
+                } catch (error: Exception) {
+                    message = error.message ?: "Не удалось подключить аккаунт"
+                } finally { isRegistering = false }
+            }
+        }
+    }
+    val linkQrImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val payload = uri?.let { readDeviceLinkQr(context.contentResolver, it) }
+        if (payload == null) {
+            message = "Не удалось прочитать QR-код привязки"
+        } else {
+            isRegistering = true
+            scope.launch {
+                try {
+                    val (device, linkedNickname) = RegistrationApi(SignalCryptoBoundary(AndroidKeystoreSecretStore(context)))
+                        .linkDevice(payload.serverUrl, payload.code)
+                    val profile = AccountProfile(
+                        payload.serverUrl,
+                        linkedNickname,
+                        device.accessToken,
+                        device.deviceId,
+                        device.deviceNumber,
+                    )
+                    AccountStore(context).save(profile)
+                    onRegistered(profile)
                 } catch (error: Exception) {
                     message = error.message ?: "Не удалось подключить аккаунт"
                 } finally { isRegistering = false }
@@ -231,6 +264,12 @@ fun RegistrationScreen(
                 Spacer(Modifier.size(8.dp))
                 Text("Подключить аккаунт с Desktop по QR")
             }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = { linkQrImage.launch("image/*") },
+                enabled = !isRegistering && pendingProfile == null,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) { Text("Выбрать QR из изображения") }
             Spacer(Modifier.height(18.dp))
             if (BuildConfig.DEBUG) {
                 OutlinedTextField(
@@ -288,6 +327,7 @@ fun RegistrationScreen(
                                 normalizedNickname,
                                 device.accessToken,
                                 device.deviceId,
+                                device.deviceNumber,
                             )
                             generatedRecoveryKey = device.recoveryKey
                             pendingProfile = profile
@@ -384,6 +424,7 @@ fun RegistrationScreen(
                                 nickname.removePrefix("@").lowercase(),
                                 device.accessToken,
                                 device.deviceId,
+                                device.deviceNumber,
                             )
                             AccountStore(context).save(profile)
                             onRegistered(profile)

@@ -29,7 +29,14 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
             put("$baseUrl/v1/devices/prekeys", JSONObject()
                 .put("signed_prekey", bundle.signedPreKey.toJson()).put("kyber_signed_prekey", bundle.kyberSignedPreKey.toJson())
                 .put("one_time_prekeys", bundle.oneTimePreKeys.toJsonArray()).put("kyber_one_time_prekeys", bundle.kyberOneTimePreKeys.toJsonArray()).toString(), token)
-            RegisteredDevice(registration.getString("account_id"), registration.getString("device_id"), registration.getInt("registration_id"), token, "") to registration.getString("nickname")
+            RegisteredDevice(
+                accountId = registration.getString("account_id"),
+                deviceId = registration.getString("device_id"),
+                deviceNumber = registration.getInt("device_number"),
+                registrationId = registration.getInt("registration_id"),
+                accessToken = token,
+                recoveryKey = "",
+            ) to registration.getString("nickname")
         }
 
     suspend fun register(serverUrl: String, nickname: String, inviteCode: String): RegisteredDevice =
@@ -65,6 +72,7 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
             RegisteredDevice(
                 accountId = registration.getString("account_id"),
                 deviceId = registration.getString("device_id"),
+                deviceNumber = registration.optInt("device_number", 1),
                 registrationId = registrationId,
                 accessToken = token,
                 recoveryKey = recoveryKey.encoded,
@@ -119,6 +127,7 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
             RegisteredDevice(
                 accountId = registration.getString("account_id"),
                 deviceId = registration.getString("device_id"),
+                deviceNumber = registration.getInt("device_number"),
                 registrationId = registration.getInt("registration_id"),
                 accessToken = token,
                 recoveryKey = recoveryKey.encoded,
@@ -177,6 +186,7 @@ class AccountStore(context: android.content.Context) {
             .put("nickname", profile.nickname.removePrefix("@").lowercase())
             .put("token", profile.accessToken)
             .put("device_id", profile.deviceId)
+            .put("device_number", profile.deviceNumber)
             .toString().encodeToByteArray(),
     )
 
@@ -187,6 +197,7 @@ class AccountStore(context: android.content.Context) {
                 it.getString("nickname"),
                 it.getString("token"),
                 it.optString("device_id").takeIf(String::isNotBlank),
+                it.optInt("device_number", 0),
             )
         }
     }.getOrNull()
@@ -205,6 +216,7 @@ class AccountStore(context: android.content.Context) {
 data class RegisteredDevice(
     val accountId: String,
     val deviceId: String,
+    val deviceNumber: Int,
     val registrationId: Int,
     val accessToken: String,
     val recoveryKey: String,
@@ -215,6 +227,7 @@ data class AccountProfile(
     val nickname: String,
     val accessToken: String,
     val deviceId: String? = null,
+    val deviceNumber: Int = 0,
 )
 
 private fun ByteArray.base64Url(): String = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
