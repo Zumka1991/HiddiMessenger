@@ -2,6 +2,7 @@ package ru.hiddi.desktop
 
 import androidx.compose.desktop.ui.tooling.preview.Preview
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
@@ -21,8 +24,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,8 +35,10 @@ import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,6 +52,7 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -71,6 +80,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -624,6 +634,73 @@ private fun DesktopNavButton(label: String, icon: ImageVector, selected: Boolean
 }
 
 @Composable
+private fun CorporateTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    leadingIcon: ImageVector? = null,
+    enabled: Boolean = true,
+    singleLine: Boolean = true,
+    maxLines: Int = 1,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val foreground = if (enabled) Color(0xFFEAF3F7) else TextMuted.copy(alpha = 0.55f)
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        singleLine = singleLine,
+        maxLines = maxLines,
+        textStyle = LocalTextStyle.current.copy(color = foreground, fontSize = 14.sp),
+        cursorBrush = SolidColor(Mint),
+        modifier = modifier.onFocusChanged { focused = it.isFocused },
+        decorationBox = { innerTextField ->
+            Surface(
+                color = Color(0xFF18222D),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(
+                    1.dp,
+                    if (focused) Mint.copy(alpha = 0.75f) else Color.White.copy(alpha = 0.08f),
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
+                    modifier = Modifier.fillMaxWidth().padding(
+                        horizontal = 16.dp,
+                        vertical = if (singleLine) 0.dp else 14.dp,
+                    ),
+                ) {
+                    leadingIcon?.let {
+                        Icon(
+                            it,
+                            contentDescription = null,
+                            tint = if (focused) Mint else TextMuted,
+                            modifier = Modifier.size(19.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Box(
+                        contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (value.isEmpty()) {
+                            Text(
+                                placeholder,
+                                color = TextMuted.copy(alpha = if (enabled) 0.82f else 0.45f),
+                                fontSize = 14.sp,
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
+            }
+        },
+    )
+}
+
+@Composable
 private fun ChatListPane(
     messages: List<ChatEntry>,
     selected: HiddiProfile?,
@@ -635,20 +712,12 @@ private fun ChatListPane(
         .filter { (peer, last) -> query.isBlank() || peer.contains(query.trim().removePrefix("@"), ignoreCase = true) || last.text.contains(query, ignoreCase = true) }
         .sortedByDescending { it.second.createdAt }
     Text("Чаты", fontSize = 27.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 24.dp, end = 20.dp, top = 24.dp, bottom = 14.dp))
-    OutlinedTextField(
+    CorporateTextField(
         value = query,
         onValueChange = { query = it },
-        placeholder = { Text("Поиск") },
-        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = TextMuted) },
-        singleLine = true,
-        shape = RoundedCornerShape(14.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = PanelRaised,
-            unfocusedContainerColor = PanelRaised,
-            focusedBorderColor = Mint.copy(alpha = 0.45f),
-            unfocusedBorderColor = Color.Transparent,
-        ),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+        placeholder = "Поиск",
+        leadingIcon = Icons.Rounded.Search,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp).height(48.dp),
     )
     if (conversations.isEmpty()) {
         Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(20.dp))
@@ -690,7 +759,13 @@ private fun ContactsPane(
     onOpen: (HiddiProfile) -> Unit,
 ) {
     Text("Контакты", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp))
-    OutlinedTextField(query, onQueryChange, placeholder = { Text("Поиск по @nickname") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+    CorporateTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = "Поиск по @nickname",
+        leadingIcon = Icons.Rounded.Search,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(48.dp),
+    )
     Text(if (query.length < 2) "Введите хотя бы 2 символа" else "НАЙДЕННЫЕ ЛЮДИ", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp, 16.dp, 18.dp, 8.dp))
     LazyColumn(Modifier.fillMaxSize()) {
         items(results, key = HiddiProfile::nickname) { profile -> UserRow(profile, selected?.nickname == profile.nickname) { onOpen(profile) } }
@@ -806,6 +881,16 @@ private fun ChatPane(
     var draft by remember(profile.nickname) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var forceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
+    var handledForceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
+    val messageListState = rememberLazyListState()
+    val isAtNewestMessage by remember {
+        derivedStateOf {
+            val layout = messageListState.layoutInfo
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index
+            lastVisible == null || lastVisible >= layout.totalItemsCount - 2
+        }
+    }
     fun submit() {
         if (draft.isBlank() || sending) return
         val text = draft
@@ -814,8 +899,21 @@ private fun ChatPane(
         onSend(text) { failure ->
             sending = false
             error = failure
-            if (failure == null) draft = ""
+            if (failure == null) {
+                draft = ""
+                forceScrollRevision++
+            }
         }
+    }
+    LaunchedEffect(profile.nickname, messages.size, forceScrollRevision) {
+        val forced = forceScrollRevision != handledForceScrollRevision
+        if (messages.isNotEmpty() && (forced || isAtNewestMessage)) {
+            messageListState.animateScrollToItem(messages.size)
+        }
+        handledForceScrollRevision = forceScrollRevision
+    }
+    LaunchedEffect(profile.nickname) {
+        if (messages.isNotEmpty()) messageListState.scrollToItem(messages.size)
     }
     Column(modifier.background(Color(0xFF090F15))) {
         Row(
@@ -835,6 +933,7 @@ private fun ChatPane(
             IconButton(onClick = {}) { Icon(Icons.Rounded.MoreVert, contentDescription = "Меню", tint = TextMuted) }
         }
         LazyColumn(
+            state = messageListState,
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
             contentPadding = PaddingValues(horizontal = 34.dp, vertical = 24.dp),
             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -880,44 +979,62 @@ private fun ChatPane(
         error?.let { ErrorText(it) }
         Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
+                verticalAlignment = Alignment.Top,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
             ) {
                 Column(Modifier.weight(1f)) {
-                        OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it },
-                placeholder = { Text("Сообщение") },
-                enabled = !sending,
-                minLines = 1,
-                maxLines = 5,
-                shape = RoundedCornerShape(16.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = Color(0xFF18212B),
-                    unfocusedContainerColor = Color(0xFF18212B),
-                    focusedBorderColor = Mint.copy(alpha = 0.75f),
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.12f),
-                ),
-                modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) return@onPreviewKeyEvent false
-                    if (event.isCtrlPressed) {
-                        draft += "\n"
-                    } else {
-                        submit()
-                    }
-                    true
-                },
-                        )
-                        Text("Enter — отправить · Ctrl+Enter — новая строка", color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(start = 4.dp, top = 5.dp))
+                    CorporateTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        placeholder = "Сообщение",
+                        enabled = !sending,
+                        singleLine = false,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 124.dp)
+                            .onPreviewKeyEvent { event ->
+                                if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) {
+                                    return@onPreviewKeyEvent false
+                                }
+                                if (event.isCtrlPressed) {
+                                    draft += "\n"
+                                } else {
+                                    submit()
+                                }
+                                true
+                            },
+                    )
+                    Text(
+                        "Enter — отправить · Ctrl+Enter — новая строка",
+                        color = TextMuted,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(start = 4.dp, top = 5.dp),
+                    )
                 }
-                Spacer(Modifier.width(10.dp))
-                Button(
+                Spacer(Modifier.width(12.dp))
+                FilledIconButton(
                     enabled = draft.isNotBlank() && !sending,
                     onClick = ::submit,
-                    shape = CircleShape,
-                    modifier = Modifier.size(46.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = Mint,
+                        contentColor = Ink,
+                        disabledContainerColor = Color(0xFF27313B),
+                        disabledContentColor = TextMuted.copy(alpha = 0.55f),
+                    ),
+                    modifier = Modifier.padding(top = 1.dp).size(50.dp),
                 ) {
-                    if (sending) Text("…") else Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Отправить")
+                    if (sending) {
+                        CircularProgressIndicator(
+                            color = TextMuted,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.Send,
+                            contentDescription = "Отправить",
+                            modifier = Modifier.offset(x = 1.dp).size(22.dp),
+                        )
+                    }
                 }
             }
         }
