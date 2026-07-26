@@ -862,7 +862,10 @@ private fun ChatPane(
                         shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
                         modifier = Modifier.widthIn(min = if (message.outgoing) 118.dp else 142.dp, max = 520.dp),
                     ) {
-                        Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), horizontalAlignment = Alignment.End) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                            horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                        ) {
                             Text(message.text)
                             MessageMeta(message)
                         }
