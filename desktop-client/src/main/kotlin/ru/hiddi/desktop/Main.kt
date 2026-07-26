@@ -25,6 +25,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -53,6 +54,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 
 private val Ink = Color(0xFF0B1016)
 private val Panel = Color(0xFF121A23)
@@ -76,6 +80,7 @@ fun main() = application {
         }
     val api = remember { HiddiApi(vault) }
     var session by remember { mutableStateOf<HiddiSession?>(null) }
+    var recoveryKey by remember { mutableStateOf<String?>(null) }
     var screen by remember {
         mutableStateOf<AppScreen>(if (vault.exists()) AppScreen.Unlock else AppScreen.Pairing)
     }
@@ -90,8 +95,14 @@ fun main() = application {
         HiddiTheme {
             when (screen) {
                 AppScreen.Pairing ->
-                    PairingScreen(api) { unlocked ->
+                    PairingScreen(api, onRegister = { screen = AppScreen.Registration }) { unlocked ->
                         session = unlocked
+                        screen = AppScreen.Messenger
+                    }
+                AppScreen.Registration ->
+                    RegistrationScreen(api) { unlocked, key ->
+                        session = unlocked
+                        recoveryKey = key
                         screen = AppScreen.Messenger
                     }
                 AppScreen.Unlock ->
@@ -100,7 +111,10 @@ fun main() = application {
                         screen = AppScreen.Messenger
                     }
                 AppScreen.Messenger ->
-                    session?.let { MessengerScreen(it) }
+                    session?.let {
+                        MessengerScreen(it)
+                        recoveryKey?.let { key -> RecoveryKeyDialog(key) { recoveryKey = null } }
+                    }
             }
         }
     }
@@ -123,7 +137,7 @@ private fun HiddiTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun PairingScreen(api: HiddiApi, onReady: (HiddiSession) -> Unit) {
+private fun PairingScreen(api: HiddiApi, onRegister: () -> Unit, onReady: (HiddiSession) -> Unit) {
     val scope = rememberCoroutineScope()
     var server by remember { mutableStateOf(PRODUCTION_SERVER) }
     var code by remember { mutableStateOf("") }
@@ -138,7 +152,7 @@ private fun PairingScreen(api: HiddiApi, onReady: (HiddiSession) -> Unit) {
         title = "Привязать Linux",
         subtitle =
             "На Android откройте Настройки → Устройства → Привязать компьютер. " +
-                "Код действует 10 минут и используется один раз.",
+                "Выберите скриншот QR-кода или вставьте одноразовый код вручную.",
     ) {
         OutlinedTextField(
             value = server,
@@ -147,6 +161,24 @@ private fun PairingScreen(api: HiddiApi, onReady: (HiddiSession) -> Unit) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        OutlinedButton(
+            onClick = {
+                runCatching {
+                    val image = chooseQrImage() ?: return@OutlinedButton
+                    readDeviceLinkQr(image)
+                }.onSuccess { qr ->
+                    server = qr.serverUrl
+                    code = qr.code
+                    error = null
+                }.onFailure { failure ->
+                    error = failure.message ?: "Не удалось прочитать QR-код"
+                }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Выбрать QR-код из изображения")
+        }
         OutlinedTextField(
             value = code,
             onValueChange = { code = it.trim() },
@@ -207,7 +239,70 @@ private fun PairingScreen(api: HiddiApi, onReady: (HiddiSession) -> Unit) {
                 }
             }
         }
+        OutlinedButton(onClick = onRegister, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Создать новый аккаунт")
+        }
     }
+}
+
+@Composable
+private fun RegistrationScreen(api: HiddiApi, onReady: (HiddiSession, String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var server by remember { mutableStateOf(PRODUCTION_SERVER) }
+    var nickname by remember { mutableStateOf("") }
+    var inviteCode by remember { mutableStateOf("") }
+    var deviceName by remember { mutableStateOf(defaultDeviceName()) }
+    var password by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AuthLayout("НОВЫЙ АККАУНТ", "Создать Hiddi", "Инвайт создаёт новый независимый аккаунт на этом компьютере.") {
+        OutlinedTextField(server, { server = it }, label = { Text("Сервер") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(nickname, { nickname = it.trim().take(32) }, label = { Text("Никнейм") }, prefix = { Text("@") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(inviteCode, { inviteCode = it.trim() }, label = { Text("Инвайт") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(deviceName, { deviceName = it.take(64) }, label = { Text("Название компьютера") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("Пароль локальных ключей") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(confirmation, { confirmation = it }, label = { Text("Повторите пароль") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+        error?.let { ErrorText(it) }
+        PrimaryButton("Создать аккаунт", busy) {
+            if (password.length < 8) error = "Пароль должен содержать хотя бы 8 символов"
+            else if (password != confirmation) error = "Пароли не совпадают"
+            else {
+                busy = true
+                error = null
+                scope.launch {
+                    val passphrase = password.toCharArray()
+                    val sessionPassphrase = passphrase.copyOf()
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            val result = api.register(server, nickname, inviteCode, deviceName, passphrase)
+                            api.unlock(sessionPassphrase) to result.recoveryKey
+                        }
+                    }.onSuccess { (session, key) -> onReady(session, key) }
+                        .onFailure { error = it.message ?: "Не удалось создать аккаунт" }
+                    passphrase.fill('\u0000')
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecoveryKeyDialog(key: String, onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ключ восстановления") },
+        text = { Text("Сохраните ключ вне компьютера. Hiddi покажет его только сейчас:\n\n$key") },
+        confirmButton = { androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Я сохранил") } },
+    )
+}
+
+private fun chooseQrImage(): File? {
+    val dialog = FileDialog(null as Frame?, "Выберите QR-код Hiddi", FileDialog.LOAD)
+    dialog.isVisible = true
+    val filename = dialog.file ?: return null
+    return File(dialog.directory, filename)
 }
 
 @Composable

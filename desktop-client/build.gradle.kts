@@ -19,6 +19,8 @@ dependencies {
     implementation("de.mkammerer:argon2-jvm:2.12")
     implementation("org.json:json:20240303")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.80")
     testImplementation(kotlin("test"))
 }
 

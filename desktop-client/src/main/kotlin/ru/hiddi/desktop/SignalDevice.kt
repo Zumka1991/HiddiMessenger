@@ -19,6 +19,7 @@ class SignalDevice private constructor(
     private val kyberSigned: KyberPreKeyRecord,
     private val classical: List<PreKeyRecord>,
     private val kyber: List<KyberPreKeyRecord>,
+    private val publicPrekeys: JSONObject,
 ) {
     fun linkJson(linkCode: String, deviceName: String): JSONObject =
         JSONObject()
@@ -27,15 +28,16 @@ class SignalDevice private constructor(
             .put("registration_id", registrationId)
             .put("identity_public_key", identity.publicKey.serialize().base64Url())
 
-    fun publicPrekeysJson(): JSONObject =
+    fun registrationJson(nickname: String, inviteCode: String, deviceName: String, recoveryPublicKey: ByteArray): JSONObject =
         JSONObject()
-            .put("signed_prekey", signed.publicJson())
-            .put("kyber_signed_prekey", kyberSigned.publicJson())
-            .put("one_time_prekeys", JSONArray(classical.map(PreKeyRecord::publicJson)))
-            .put(
-                "kyber_one_time_prekeys",
-                JSONArray(kyber.map(KyberPreKeyRecord::publicJson)),
-            )
+            .put("nickname", nickname.trim().removePrefix("@").lowercase())
+            .put("invite_code", inviteCode.trim())
+            .put("device_name", deviceName.trim())
+            .put("registration_id", registrationId)
+            .put("identity_public_key", identity.publicKey.serialize().base64Url())
+            .put("recovery_public_key", recoveryPublicKey.base64Url())
+
+    fun publicPrekeysJson(): JSONObject = JSONObject(publicPrekeys.toString())
 
     fun privateState(registration: JSONObject, server: String): JSONObject =
         JSONObject()
@@ -66,61 +68,61 @@ class SignalDevice private constructor(
         fun create(): SignalDevice {
             val identity = IdentityKeyPair.generate()
             val signedPair = ECKeyPair.generate()
+            val signedPublicKey = signedPair.publicKey.serialize()
+            val signedSignature = identity.privateKey.calculateSignature(signedPublicKey)
             val signed =
                 SignedPreKeyRecord(
                     1,
                     System.currentTimeMillis(),
                     signedPair,
-                    identity.privateKey.calculateSignature(signedPair.publicKey.serialize()),
+                    signedSignature,
                 )
             val kyberPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+            // KyberPreKeyRecord owns the native key-pair handle: retain public
+            // material before creating the record, as on Android.
+            val kyberPublicKey = kyberPair.publicKey.serialize()
+            val kyberSignature = identity.privateKey.calculateSignature(kyberPublicKey)
             val kyberSigned =
                 KyberPreKeyRecord(
                     2,
                     System.currentTimeMillis(),
                     kyberPair,
-                    identity.privateKey.calculateSignature(kyberPair.publicKey.serialize()),
+                    kyberSignature,
                 )
-            val classical =
+            val classicalMaterial =
                 (0 until ONE_TIME_COUNT).map {
-                    PreKeyRecord(10_000 + it, ECKeyPair.generate())
+                    val pair = ECKeyPair.generate()
+                    PreKeyRecord(10_000 + it, pair) to pair.publicKey.serialize()
                 }
-            val kyber =
+            val kyberMaterial =
                 (0 until ONE_TIME_COUNT).map { offset ->
                     val pair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+                    val publicKey = pair.publicKey.serialize()
+                    val signature = identity.privateKey.calculateSignature(publicKey)
                     KyberPreKeyRecord(
                         20_000 + offset,
                         System.currentTimeMillis(),
                         pair,
-                        identity.privateKey.calculateSignature(pair.publicKey.serialize()),
-                    )
+                        signature,
+                    ) to (publicKey to signature)
                 }
+            val publicPrekeys = JSONObject()
+                .put("signed_prekey", JSONObject().put("id", 1).put("public_key", signedPublicKey.base64Url()).put("signature", signedSignature.base64Url()))
+                .put("kyber_signed_prekey", JSONObject().put("id", 2).put("public_key", kyberPublicKey.base64Url()).put("signature", kyberSignature.base64Url()))
+                .put("one_time_prekeys", JSONArray(classicalMaterial.map { (record, publicKey) -> JSONObject().put("id", record.id).put("public_key", publicKey.base64Url()) }))
+                .put("kyber_one_time_prekeys", JSONArray(kyberMaterial.map { (record, material) -> JSONObject().put("id", record.id).put("public_key", material.first.base64Url()).put("signature", material.second.base64Url()) }))
             return SignalDevice(
                 SecureRandom().nextInt(16_380) + 1,
                 identity,
                 signed,
                 kyberSigned,
-                classical,
-                kyber,
+                classicalMaterial.map { it.first },
+                kyberMaterial.map { it.first },
+                publicPrekeys,
             )
         }
     }
 }
-
-private fun PreKeyRecord.publicJson(): JSONObject =
-    JSONObject().put("id", id).put("public_key", keyPair.publicKey.serialize().base64Url())
-
-private fun SignedPreKeyRecord.publicJson(): JSONObject =
-    JSONObject()
-        .put("id", id)
-        .put("public_key", keyPair.publicKey.serialize().base64Url())
-        .put("signature", signature.base64Url())
-
-private fun KyberPreKeyRecord.publicJson(): JSONObject =
-    JSONObject()
-        .put("id", id)
-        .put("public_key", keyPair.publicKey.serialize().base64Url())
-        .put("signature", signature.base64Url())
 
 fun ByteArray.base64Url(): String =
     Base64.getUrlEncoder().withoutPadding().encodeToString(this)

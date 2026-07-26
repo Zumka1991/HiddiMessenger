@@ -21,6 +21,31 @@ class HiddiApi(
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build(),
 ) {
+    fun register(
+        server: String,
+        nickname: String,
+        inviteCode: String,
+        deviceName: String,
+        passphrase: CharArray,
+    ): RegistrationResult {
+        val endpoint = validateServer(server)
+        require(nickname.trim().removePrefix("@").lowercase().matches(Regex("[a-z0-9_]{3,32}"))) {
+            "Никнейм: 3–32 символа a-z, 0-9 или _"
+        }
+        require(inviteCode.isNotBlank()) { "Введите инвайт" }
+        require(deviceName.trim().length in 1..64) { "Название устройства: от 1 до 64 символов" }
+        require(!vault.exists()) { "Это приложение уже настроено" }
+        val device = SignalDevice.create()
+        RecoveryKey.generate().use { recoveryKey ->
+            val registration = request("POST", "$endpoint/v1/auth/register", device.registrationJson(nickname, inviteCode, deviceName, recoveryKey.publicKey()), null) as JSONObject
+            check(registration.getInt("registration_id") == device.registrationId) { "Сервер вернул другой registration_id" }
+            val state = device.privateState(registration, endpoint)
+            persist(state, passphrase)
+            publishPendingPrekeys(state, passphrase)
+            return RegistrationResult(registration.getString("nickname"), recoveryKey.encoded)
+        }
+    }
+
     fun pair(
         server: String,
         linkCode: String,

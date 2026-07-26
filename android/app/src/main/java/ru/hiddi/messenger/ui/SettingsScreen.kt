@@ -68,6 +68,7 @@ import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.sanitizeImage
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
 import ru.hiddi.messenger.security.SignalCryptoBoundary
+import ru.hiddi.messenger.security.deviceLinkQrBitmap
 
 @Composable
 fun SettingsScreen(
@@ -484,9 +485,15 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "Введите этот одноразовый код в Hiddi Desktop. Код действует 10 минут. " +
+                        "Сохраните этот QR-код как скриншот и выберите его в Hiddi Desktop. " +
+                            "Код действует 10 минут и используется один раз. " +
                             "Компьютер создаст собственные Signal-ключи; приватные ключи телефона " +
-                            "никуда не передаются.",
+                            "никуда не передаются. Не пересылайте QR-код другим людям.",
+                    )
+                    Image(
+                        bitmap = deviceLinkQrBitmap(account.serverUrl, linkCode!!).asImageBitmap(),
+                        contentDescription = "QR-код привязки компьютера",
+                        modifier = Modifier.align(Alignment.CenterHorizontally).size(220.dp),
                     )
                     Surface(
                         shape = RoundedCornerShape(16.dp),

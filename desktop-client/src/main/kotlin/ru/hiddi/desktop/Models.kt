@@ -18,8 +18,14 @@ data class DeviceLinkResult(
     val deviceNumber: Int,
 )
 
+data class RegistrationResult(
+    val nickname: String,
+    val recoveryKey: String,
+)
+
 sealed interface AppScreen {
     data object Pairing : AppScreen
+    data object Registration : AppScreen
     data object Unlock : AppScreen
     data object Messenger : AppScreen
 }

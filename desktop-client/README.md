@@ -4,7 +4,8 @@ Compose Desktop client for Linux, Windows and macOS. The first packaged target i
 
 ## Security model
 
-- A computer is linked to an existing Hiddi account with a one-time, 10-minute code.
+- A new account can be created with an invite; its recovery key is shown exactly once.
+- A computer can be linked to an existing Hiddi account with a one-time, 10-minute code.
 - Every computer creates its own Signal PQXDH identity and Kyber-1024 prekeys locally.
 - Private key state is encrypted at rest with Argon2id and AES-256-GCM.
 - The vault password is not sent to the server and is not stored on disk.
@@ -23,8 +24,9 @@ cd desktop-client
 env JAVA_HOME=/opt/android-studio/jbr gradle run --no-daemon
 ```
 
-On Android open `Настройки → Устройства → Привязать компьютер`, copy the code, and paste it into
-the desktop app.
+On Android open `Настройки → Устройства → Привязать компьютер`, take a screenshot of the QR and
+choose it in the desktop app (or paste the displayed code). The QR contains the same short-lived,
+one-use code, so do not share its screenshot.
 
 ## Linux package
 
@@ -34,3 +36,11 @@ env JAVA_HOME=/opt/android-studio/jbr gradle packageDeb --no-daemon
 ```
 
 The package is created under `build/compose/binaries/main/deb/` and includes its own Java runtime.
+
+For CachyOS/Arch, where `dpkg` is normally absent, create an immediately runnable bundle instead:
+
+```bash
+cd desktop-client
+env JAVA_HOME=/usr/lib/jvm/java-26-openjdk gradle -Dorg.gradle.java.installations.paths=/opt/android-studio/jbr createDistributable --no-daemon
+build/compose/binaries/main/app/Hiddi/bin/Hiddi
+```
