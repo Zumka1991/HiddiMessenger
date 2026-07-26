@@ -133,6 +133,8 @@ fun ChatScreen(
     var attachmentInProgress by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
     var voiceLevel by remember { mutableStateOf(0f) }
+    var voiceRecordingId by remember { mutableIntStateOf(0) }
+    var cancelledVoiceRecordingId by remember { mutableIntStateOf(0) }
     val api = remember { SignalMessagingApi(ru.hiddi.messenger.security.SignalStateRepository(context)) }
     val groupCoordinator = remember { GroupMlsCoordinator(context, api) }
     val historyStore = remember { EncryptedChatHistory(context) }
@@ -455,11 +457,12 @@ fun ChatScreen(
         if (attachmentInProgress || voiceRecording) return
         try {
             voiceRecorder.start(scope)
+            voiceRecordingId += 1
             voiceRecording = true
-            status = "🔴 Идёт запись · нажмите квадрат для отправки"
+            status = "🔴 Идёт запись · корзина отменяет, квадрат отправляет"
         } catch (error: Exception) {
-            voiceRecorder.cancel()
             voiceRecording = false
+            voiceRecorder.cancel()
             status = error.message ?: "Не удалось начать запись"
         }
     }
@@ -471,6 +474,7 @@ fun ChatScreen(
             return
         }
         if (!voiceRecording) return
+        val recordingId = voiceRecordingId
         voiceRecording = false
         attachmentInProgress = true
         status = "Шифруем войс…"
@@ -479,6 +483,7 @@ fun ChatScreen(
             var messageSent = false
             try {
                 val recorded = voiceRecorder.stop()
+                check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                 val prepared = withContext(Dispatchers.IO) {
                     try {
                         attachmentStore.encrypt(
@@ -491,8 +496,10 @@ fun ChatScreen(
                         recorded.pcm.fill(0)
                     }
                 }
+                check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                 val uploadedId = api.uploadAttachment(profile, target, prepared.ciphertext)
                 attachmentId = uploadedId
+                check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                 val descriptor = prepared.descriptor(uploadedId)
                 withContext(Dispatchers.IO) {
                     attachmentStore.saveCiphertext(uploadedId, prepared.ciphertext)
@@ -529,9 +536,10 @@ fun ChatScreen(
 
     fun cancelVoiceRecording() {
         if (!voiceRecording) return
-        voiceRecorder.cancel()
+        cancelledVoiceRecordingId = maxOf(cancelledVoiceRecordingId, voiceRecordingId)
         voiceRecording = false
         voiceLevel = 0f
+        voiceRecorder.cancel()
         status = "Голосовое отменено"
     }
 
@@ -595,17 +603,19 @@ fun ChatScreen(
         if (groupBusy || voiceRecording) return
         runCatching {
             voiceRecorder.start(scope)
+            voiceRecordingId += 1
             voiceRecording = true
-            groupStatus = "🔴 Идёт запись · нажмите квадрат для отправки"
+            groupStatus = "🔴 Идёт запись · корзина отменяет, квадрат отправляет"
         }.onFailure {
-            voiceRecorder.cancel()
             voiceRecording = false
+            voiceRecorder.cancel()
             groupStatus = it.message ?: "Не удалось начать запись"
         }
     }
 
     fun stopAndSendGroupVoice(groupId: ByteArray) {
         if (!voiceRecording) return
+        val recordingId = voiceRecordingId
         voiceRecording = false
         groupBusy = true
         groupStatus = "Шифруем войс для MLS-группы…"
@@ -613,6 +623,7 @@ fun ChatScreen(
             var uploadedId: String? = null
             try {
                 val recorded = voiceRecorder.stop()
+                check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                 val prepared = withContext(Dispatchers.IO) {
                     try {
                         attachmentStore.encrypt(
@@ -626,8 +637,10 @@ fun ChatScreen(
                     }
                 }
                 try {
+                    check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                     val id = api.uploadGroupAttachment(profile, groupId, prepared.ciphertext)
                     uploadedId = id
+                    check(recordingId > cancelledVoiceRecordingId) { "Голосовое отменено" }
                     val descriptor = prepared.descriptor(id)
                     withContext(Dispatchers.IO) {
                         attachmentStore.saveCiphertext(id, prepared.ciphertext)
@@ -652,7 +665,12 @@ fun ChatScreen(
     }
 
     fun cancelGroupVoiceRecording() {
-        cancelVoiceRecording()
+        if (voiceRecording) {
+            cancelledVoiceRecordingId = maxOf(cancelledVoiceRecordingId, voiceRecordingId)
+            voiceRecording = false
+            voiceLevel = 0f
+            voiceRecorder.cancel()
+        }
         groupStatus = "Голосовое отменено"
     }
 

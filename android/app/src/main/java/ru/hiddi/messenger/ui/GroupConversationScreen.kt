@@ -284,7 +284,7 @@ fun GroupConversationScreen(
                     Icon(Icons.Rounded.Delete, contentDescription = "Отменить голосовое", tint = MaterialTheme.colorScheme.error)
                 }
                 Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                    Text("Запись · нажмите ■, чтобы отправить", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                    Text("Запись · корзина отменяет · ■ отправляет", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
                     VoiceWaveform(0, MaterialTheme.colorScheme.error, Modifier.fillMaxWidth().height(24.dp), voiceLevel)
                 }
                 IconButton(onClick = onStopVoice) {

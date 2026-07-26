@@ -147,8 +147,62 @@ class HiddiSession internal constructor(
 
     val nickname: String get() = state.getString("nickname")
     val deviceNumber: Int get() = state.getInt("device_number")
+    internal val deviceId: String get() = state.getString("device_id")
     val server: String get() = state.getString("server")
     internal val accessToken: String get() = state.getString("access_token")
+    internal val storageDirectory get() = vault.storageDirectory
+    private val groupManager by lazy { DesktopGroupManager(this) }
+
+    @Synchronized
+    fun prepareGroups() = groupManager.initialize()
+
+    @Synchronized
+    fun groups(): List<DesktopGroup> = groupManager.groups()
+
+    @Synchronized
+    fun createGroup(name: String, invitedNickname: String): DesktopGroup =
+        groupManager.create(name, invitedNickname)
+
+    @Synchronized
+    fun sendGroupText(groupId: String, text: String): DesktopGroupMessage =
+        groupManager.sendText(groupId, text)
+
+    @Synchronized
+    fun syncGroups(): List<DesktopGroup> {
+        groupManager.synchronize()
+        return groupManager.groups()
+    }
+
+    internal fun ensureGroupState() {
+        var changed = false
+        if (!state.has("mls_storage_key")) {
+            state.put(
+                "mls_storage_key",
+                ByteArray(64).also(java.security.SecureRandom()::nextBytes).base64Url(),
+            )
+            changed = true
+        }
+        if (!state.has("mls_groups")) {
+            state.put("mls_groups", JSONArray())
+            changed = true
+        }
+        if (!state.has("mls_pending_events")) {
+            state.put("mls_pending_events", JSONArray())
+            changed = true
+        }
+        if (changed) persist()
+    }
+
+    internal fun groupStorageKey(): ByteArray = state.getString("mls_storage_key").base64UrlDecode()
+
+    internal fun groupStateArray(): JSONArray = state.getJSONArray("mls_groups")
+
+    internal fun groupPendingEvents(): JSONArray = state.getJSONArray("mls_pending_events")
+
+    internal fun persistGroupState() = persist()
+
+    internal fun groupRequest(method: String, url: String, body: JSONObject?): Any =
+        authenticatedRequest(method, url, body)
 
     @Synchronized
     fun invisibleMode(): Boolean = state.optBoolean("invisible_mode", false)

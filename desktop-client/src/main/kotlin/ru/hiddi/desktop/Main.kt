@@ -58,6 +58,7 @@ import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
@@ -523,6 +524,10 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     var listWidth by remember { mutableStateOf(320.dp) }
     var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
     var contacts by remember(session) { mutableStateOf(session.contacts()) }
+    var groups by remember(session) { mutableStateOf(emptyList<DesktopGroup>()) }
+    var groupsReady by remember(session) { mutableStateOf(false) }
+    var selectedGroupId by remember(session) { mutableStateOf<String?>(null) }
+    var groupError by remember { mutableStateOf<String?>(null) }
     var peerOnline by remember { mutableStateOf(false) }
     var peerTyping by remember { mutableStateOf(false) }
     var typingRevision by remember { mutableStateOf(0) }
@@ -556,6 +561,21 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
         blockedUsers =
             runCatching { withContext(Dispatchers.IO) { session.blockedUsers() } }
                 .getOrDefault(emptySet())
+    }
+    LaunchedEffect(session) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                session.prepareGroups()
+                session.groups()
+            }
+        }.onSuccess {
+            groups = it
+            groupsReady = true
+            groupError = null
+        }.onFailure {
+            groupsReady = false
+            groupError = it.message ?: "Не удалось запустить OpenMLS"
+        }
     }
     LaunchedEffect(session) {
         while (true) {
@@ -633,6 +653,18 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     }
     LaunchedEffect(session) {
         while (true) {
+            delay(2_000)
+            if (!groupsReady) continue
+            runCatching { withContext(Dispatchers.IO) { session.syncGroups() } }
+                .onSuccess {
+                    groups = it
+                    groupError = null
+                }
+                .onFailure { groupError = it.message ?: "Не удалось синхронизировать группы" }
+        }
+    }
+    LaunchedEffect(session) {
+        while (true) {
             messages.toList().forEach { entry ->
                 entry.messageId?.takeIf { entry.outgoing }?.let { messageId ->
                     val status = runCatching { withContext(Dispatchers.IO) { session.updateDeliveryStatus(messageId) } }.getOrNull()
@@ -653,6 +685,26 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
             Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
                 when (section) {
                     DesktopSection.Chats -> ChatListPane(messages, selected, peerProfiles, peerAvatars) { profile -> selected = profile }
+                    DesktopSection.Groups -> GroupListPane(
+                        groups = groups,
+                        selectedGroupId = selectedGroupId,
+                        error = groupError,
+                        onSelect = { selectedGroupId = it },
+                        onCreate = { name, nickname, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        session.createGroup(name, nickname)
+                                        session.groups()
+                                    }
+                                }.onSuccess {
+                                    groups = it
+                                    selectedGroupId = it.lastOrNull()?.id
+                                    report(null)
+                                }.onFailure { report(it.message ?: "Не удалось создать группу") }
+                            }
+                        },
+                    )
                     DesktopSection.Contacts -> ContactsPane(
                         query,
                         { query = it },
@@ -690,6 +742,27 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                     onLoggedOut = onLoggedOut,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
+            } else if (section == DesktopSection.Groups) {
+                groups.firstOrNull { it.id == selectedGroupId }?.let { group ->
+                    GroupChatPane(
+                        group = group,
+                        ownNickname = session.nickname,
+                        onSend = { text, report ->
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        session.sendGroupText(group.id, text)
+                                        session.groups()
+                                    }
+                                }.onSuccess {
+                                    groups = it
+                                    report(null)
+                                }.onFailure { report(it.message ?: "Не удалось отправить") }
+                            }
+                        },
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                    )
+                } ?: EmptyGroup(Modifier.weight(1f).fillMaxHeight(), groupError)
             } else {
                 selected?.let { profile ->
                     ChatPane(
@@ -811,6 +884,7 @@ private fun DesktopNavigation(selected: DesktopSection, online: Boolean, nicknam
         AppMark()
         Spacer(Modifier.height(22.dp))
         DesktopNavButton("Чаты", Icons.Rounded.ChatBubble, selected == DesktopSection.Chats) { onSelect(DesktopSection.Chats) }
+        DesktopNavButton("Группы", Icons.Rounded.Group, selected == DesktopSection.Groups) { onSelect(DesktopSection.Groups) }
         DesktopNavButton("Контакты", Icons.Rounded.Contacts, selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
         Spacer(Modifier.weight(1f))
         DesktopNavButton("Настройки", Icons.Rounded.Settings, selected == DesktopSection.Settings) { onSelect(DesktopSection.Settings) }
@@ -931,6 +1005,263 @@ private fun ChatListPane(
                 val profile = profiles[peer] ?: HiddiProfile(peer, "", "")
                 ConversationRow(profile, avatars[peer], last, selected?.nickname == peer) { onSelect(profile) }
             }
+        }
+    }
+}
+
+@Composable
+private fun GroupListPane(
+    groups: List<DesktopGroup>,
+    selectedGroupId: String?,
+    error: String?,
+    onSelect: (String) -> Unit,
+    onCreate: (String, String, (String?) -> Unit) -> Unit,
+) {
+    var showCreate by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var nickname by remember { mutableStateOf("") }
+    var creating by remember { mutableStateOf(false) }
+    var createError by remember { mutableStateOf<String?>(null) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 18.dp, top = 24.dp, bottom = 14.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Группы", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+            Text("OpenMLS · сквозное шифрование", color = Mint, fontSize = 11.sp)
+        }
+        FilledIconButton(
+            onClick = { showCreate = true },
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Mint, contentColor = Ink),
+        ) {
+            Text("+", fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+    error?.let {
+        Text(it, color = Color(0xFFFF8D91), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp))
+    }
+    if (groups.isEmpty()) {
+        Text(
+            "Защищённых групп пока нет. Создайте первую и пригласите участника по @nickname.",
+            color = TextMuted,
+            modifier = Modifier.padding(20.dp),
+        )
+    } else {
+        LazyColumn(Modifier.fillMaxSize().padding(top = 8.dp, start = 12.dp, end = 12.dp)) {
+            items(groups, key = DesktopGroup::id) { group ->
+                val last = group.messages.lastOrNull()
+                Surface(
+                    color = if (selectedGroupId == group.id) Color(0xFF1A3333) else Color.Transparent,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onSelect(group.id) },
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(14.dp),
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF203B43)),
+                        ) {
+                            Icon(Icons.Rounded.Group, contentDescription = null, tint = Mint)
+                        }
+                        Spacer(Modifier.width(11.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(group.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                last?.let { (if (it.outgoing) "Вы: " else "@${it.sender}: ") + it.text }
+                                    ?: "${group.members.size} участника",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        last?.let { Text(formatMessageTime(it.createdAt), color = TextMuted, fontSize = 11.sp) }
+                    }
+                }
+            }
+        }
+    }
+    if (showCreate) {
+        AlertDialog(
+            onDismissRequest = { if (!creating) showCreate = false },
+            icon = { Icon(Icons.Rounded.Lock, contentDescription = null, tint = Mint) },
+            title = { Text("Новая защищённая группа") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CorporateTextField(
+                        value = name,
+                        onValueChange = { if (it.length <= 80) name = it },
+                        placeholder = "Название группы",
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    )
+                    CorporateTextField(
+                        value = nickname,
+                        onValueChange = { nickname = it },
+                        placeholder = "@nickname первого участника",
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    )
+                    Text(
+                        "Название и сообщения шифруются OpenMLS. Сервер видит только маршрутизацию участников.",
+                        color = TextMuted,
+                        fontSize = 12.sp,
+                    )
+                    createError?.let { ErrorText(it) }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !creating && name.isNotBlank() && nickname.isNotBlank(),
+                    onClick = {
+                        creating = true
+                        createError = null
+                        onCreate(name, nickname) { failure ->
+                            creating = false
+                            createError = failure
+                            if (failure == null) {
+                                showCreate = false
+                                name = ""
+                                nickname = ""
+                            }
+                        }
+                    },
+                ) { Text(if (creating) "Создаём…" else "Создать") }
+            },
+            dismissButton = {
+                TextButton(enabled = !creating, onClick = { showCreate = false }) { Text("Отмена") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun GroupChatPane(
+    group: DesktopGroup,
+    ownNickname: String,
+    onSend: (String, (String?) -> Unit) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var draft by remember(group.id) { mutableStateOf("") }
+    var sending by remember(group.id) { mutableStateOf(false) }
+    var error by remember(group.id) { mutableStateOf<String?>(null) }
+    val listState = rememberLazyListState()
+    fun submit() {
+        if (sending || draft.isBlank()) return
+        val text = draft
+        sending = true
+        error = null
+        onSend(text) { failure ->
+            sending = false
+            error = failure
+            if (failure == null) draft = ""
+        }
+    }
+    LaunchedEffect(group.id, group.messages.size) {
+        if (group.messages.isNotEmpty()) listState.animateScrollToItem(group.messages.lastIndex)
+    }
+    Column(modifier.background(Color(0xFF090F15))) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().background(Color(0xFF111923)).padding(horizontal = 28.dp, vertical = 17.dp),
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF203B43)),
+            ) {
+                Icon(Icons.Rounded.Group, contentDescription = null, tint = Mint)
+            }
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(group.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(
+                    "OpenMLS · ${group.members.size} участников · владелец @${group.owner}",
+                    color = Mint,
+                    fontSize = 12.sp,
+                )
+            }
+            Icon(Icons.Rounded.Lock, contentDescription = "Сквозное шифрование", tint = Mint)
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 28.dp),
+            contentPadding = PaddingValues(vertical = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            items(group.messages, key = { it.messageId ?: "${it.sender}:${it.createdAt}" }) { message ->
+                Column(
+                    horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (!message.outgoing) {
+                        Text("@${message.sender}", color = Mint, fontSize = 11.sp, modifier = Modifier.padding(start = 9.dp, bottom = 3.dp))
+                    }
+                    Surface(
+                        color = if (message.outgoing) Color(0xFF1E5B51) else Color(0xFF192530),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
+                        Column(Modifier.widthIn(max = 520.dp).padding(horizontal = 15.dp, vertical = 11.dp)) {
+                            Text(message.text, color = Color(0xFFEAF3F7))
+                            Text(
+                                formatMessageTime(message.createdAt),
+                                color = TextMuted,
+                                fontSize = 10.sp,
+                                modifier = Modifier.align(Alignment.End).padding(top = 4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        error?.let { ErrorText(it) }
+        Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
+            ) {
+                CorporateTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    placeholder = "Сообщение в группу",
+                    singleLine = false,
+                    maxLines = 5,
+                    enabled = !sending,
+                    modifier = Modifier.weight(1f).heightIn(min = 50.dp, max = 120.dp)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isCtrlPressed) {
+                                submit()
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                )
+                Spacer(Modifier.width(12.dp))
+                FilledIconButton(
+                    enabled = !sending && draft.isNotBlank(),
+                    onClick = ::submit,
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Mint, contentColor = Ink),
+                    modifier = Modifier.size(50.dp),
+                ) {
+                    if (sending) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                    } else {
+                        Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Отправить")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyGroup(modifier: Modifier, error: String?) {
+    Box(modifier.background(Color(0xFF090F15)), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Rounded.Group, contentDescription = null, tint = Mint, modifier = Modifier.size(42.dp))
+            Spacer(Modifier.height(12.dp))
+            Text("Выберите или создайте MLS-группу", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            error?.let { Text(it, color = Color(0xFFFF8D91), modifier = Modifier.padding(top = 8.dp)) }
         }
     }
 }
@@ -1600,6 +1931,8 @@ private fun ChatPane(
     var sending by remember { mutableStateOf(false) }
     var attachmentBusy by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
+    var voiceRecordingId by remember(profile.nickname) { mutableStateOf(0) }
+    var cancelledVoiceRecordingId by remember(profile.nickname) { mutableStateOf(0) }
     var recordingSeconds by remember { mutableStateOf(0L) }
     var voiceLevel by remember { mutableStateOf(0f) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1674,6 +2007,7 @@ private fun ChatPane(
     }
     fun stopAndSendVoice() {
         if (!voiceRecording || attachmentBusy) return
+        val recordingId = voiceRecordingId
         voiceRecording = false
         attachmentBusy = true
         error = null
@@ -1681,6 +2015,12 @@ private fun ChatPane(
             runCatching {
                 withContext(Dispatchers.IO) { voiceRecorder.stop() }
             }.onSuccess { recorded ->
+                if (recordingId <= cancelledVoiceRecordingId) {
+                    recorded.pcm.fill(0)
+                    attachmentBusy = false
+                    refocusRevision++
+                    return@onSuccess
+                }
                 onSendVoice(recorded.pcm, recorded.durationMs) { failure ->
                     attachmentBusy = false
                     error = failure
@@ -1697,9 +2037,10 @@ private fun ChatPane(
     }
     fun cancelVoice() {
         if (!voiceRecording) return
-        voiceRecorder.cancel()
+        cancelledVoiceRecordingId = maxOf(cancelledVoiceRecordingId, voiceRecordingId)
         voiceRecording = false
         voiceLevel = 0f
+        voiceRecorder.cancel()
         error = null
         refocusRevision++
     }
@@ -1965,6 +2306,7 @@ private fun ChatPane(
                                 .onSuccess {
                                     draft = ""
                                     onTypingChange(false)
+                                    voiceRecordingId += 1
                                     voiceRecording = true
                                 }
                                 .onFailure {
@@ -2017,7 +2359,7 @@ private fun ChatPane(
                                     level = voiceLevel,
                                     modifier = Modifier.width(130.dp).height(28.dp),
                                 )
-                                TextButton(onClick = ::cancelVoice) { Text("Отмена", color = Color(0xFFFF9DA4)) }
+                                TextButton(onClick = ::cancelVoice) { Text("Удалить", color = Color(0xFFFF9DA4)) }
                                 Text("■ отправить", color = TextMuted, fontSize = 11.sp)
                             }
                         }

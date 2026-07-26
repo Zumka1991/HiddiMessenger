@@ -14,7 +14,7 @@ Android/desktop через небольшой Rust bridge. Сервер Rust н�
 Crate `group-mls-core` закрепляет OpenMLS 0.8.1, MLS 1.0 и версионированный
 opaque envelope. Он создаёт persistent группу, хранит signer, выпускает
 KeyPackage, Add Commit/Welcome, принимает Welcome/Commit и шифрует application
-messages. Тот же cdylib вызывают Android и terminal/будущий desktop.
+messages. Тот же cdylib вызывают Android, terminal и Desktop.
 
 `group-mls-core` проверяет настоящий MLS round-trip: Alice создаёт группу,
 добавляет Bob через Welcome, затем добавляет Charlie новым Commit/Welcome.
@@ -24,8 +24,9 @@ Bob читает сообщение следующей epoch, а Charlie рас�
 Тест также восстанавливает группу из `StorageProvider`: ratchet state не
 сериализуется Hiddi вручную.
 
-Android хранит Rust/OpenMLS SQLite в `noBackupFilesDir`; каждая запись
-зашифрована AES-256-SIV ключом из Android Keystore. Отдельные Keystore-хранилища
+Android хранит Rust/OpenMLS SQLite в `noBackupFilesDir`, а Desktop — в закрытом
+каталоге данных клиента; каждая запись зашифрована AES-256-SIV. Ключ Android
+защищён Keystore, ключ Desktop — Argon2id/AES-GCM vault. Отдельные Keystore-хранилища
 держат group directory, локальную историю и retry-outbox. Kotlin не
 интерпретирует приватное MLS state.
 

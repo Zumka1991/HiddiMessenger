@@ -40,6 +40,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Lock
@@ -390,10 +391,10 @@ fun ConversationScreen(
             Row(Modifier.padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (voiceRecording) {
                     IconButton(onClick = onCancelVoice) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Отменить голосовое", tint = MaterialTheme.colorScheme.error)
+                        Icon(Icons.Rounded.Delete, contentDescription = "Отменить и удалить запись", tint = MaterialTheme.colorScheme.error)
                     }
                     Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                        Text("Запись · нажмите ■, чтобы отправить", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                        Text("Запись · корзина отменяет · ■ отправляет", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
                         VoiceWaveform(0, MaterialTheme.colorScheme.error, Modifier.fillMaxWidth().height(24.dp), voiceLevel)
                     }
                     Box(

@@ -41,6 +41,7 @@ sealed interface AppScreen {
 
 enum class DesktopSection {
     Chats,
+    Groups,
     Contacts,
     Settings,
 }

@@ -197,6 +197,7 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
+            SettingsSectionTitle("ПРОФИЛЬ")
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -290,27 +291,6 @@ fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Маскировка под калькулятор", fontWeight = FontWeight.SemiBold)
-                        Text("Запуск через PIN и кнопку =. Забытый PIN не восстанавливается.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(checked = calculatorLockEnabled, onCheckedChange = { enabled ->
-                        if (enabled) { calculatorPin = ""; showCalculatorPinDialog = true }
-                        else { calculatorLock.disable(); calculatorLockEnabled = false }
-                    })
-                }
-            }
-
-            Spacer(Modifier.height(20.dp))
-            Text(
-                "ПРОФИЛЬ",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
-            )
             OutlinedTextField(
                 value = displayName,
                 onValueChange = { candidate ->
@@ -368,7 +348,8 @@ fun SettingsScreen(
                     )
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(22.dp))
+            SettingsSectionTitle("ПРИВАТНОСТЬ")
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -396,6 +377,38 @@ fun SettingsScreen(
                                     .setAction(MessagingService.ACTION_SET_INVISIBLE)
                                     .putExtra(MessagingService.EXTRA_INVISIBLE, enabled),
                             )
+                        },
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Маскировка под калькулятор", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Скрывает Hiddi за калькулятором, отключает уведомления и открывает данные только после PIN + =.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = calculatorLockEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                calculatorPin = ""
+                                showCalculatorPinDialog = true
+                            } else {
+                                calculatorLock.disable()
+                                calculatorLockEnabled = false
+                            }
                         },
                     )
                 }
@@ -442,13 +455,7 @@ fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(14.dp))
-            Text(
-                "ВОССТАНОВЛЕНИЕ",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
-            )
+            SettingsSectionTitle("БЕЗОПАСНОСТЬ И ВОССТАНОВЛЕНИЕ")
             OutlinedButton(
                 onClick = {
                     if (creatingRecoveryKey) return@OutlinedButton
@@ -482,13 +489,7 @@ fun SettingsScreen(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
             )
             Spacer(Modifier.height(10.dp))
-            Text(
-                "УСТРОЙСТВА",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
-            )
+            SettingsSectionTitle("УСТРОЙСТВА")
             OutlinedButton(
                 onClick = {
                     if (creatingLinkCode) return@OutlinedButton
@@ -512,6 +513,7 @@ fun SettingsScreen(
                 Text(if (creatingLinkCode) "Создаём код…" else "Привязать компьютер")
             }
             Spacer(Modifier.height(10.dp))
+            SettingsSectionTitle("СЕССИЯ И ЛОКАЛЬНЫЕ ДАННЫЕ")
             OutlinedButton(
                 onClick = { showLogoutDialog = true },
                 enabled = !saving && !loggingOut,
@@ -683,4 +685,15 @@ fun SettingsScreen(
             dismissButton = { TextButton(onClick = { showCalculatorPinDialog = false }) { Text("Отмена") } },
         )
     }
+}
+
+@Composable
+private fun SettingsSectionTitle(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp, bottom = 8.dp),
+    )
 }

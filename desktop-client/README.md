@@ -12,6 +12,9 @@ Compose Desktop client for Linux, Windows and macOS. The first packaged target i
   ciphertext and attachment keys remain inside the Signal-encrypted chat history.
 - Images are resized and re-encoded before encryption, so EXIF metadata is not sent.
 - Voice is recorded directly into process memory and never touches a plaintext temporary file.
+- Group names, membership changes and messages use the same Rust/OpenMLS core as Android.
+  OpenMLS state is stored in an AES-256-SIV encrypted SQLite provider; only routing metadata
+  reaches the server.
 - The vault password is not sent to the server and is not stored on disk.
 - Remote HTTP is rejected; production connections require HTTPS.
 
@@ -23,6 +26,7 @@ Android client. Attachment blobs on the server are opaque AES-GCM ciphertext.
 Java 21 is needed only to build from source:
 
 ```bash
+cargo build --release --manifest-path group-mls-core/Cargo.toml
 cd desktop-client
 env JAVA_HOME=/opt/android-studio/jbr gradle run --no-daemon
 ```
