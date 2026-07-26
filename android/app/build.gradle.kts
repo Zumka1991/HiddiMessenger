@@ -127,5 +127,7 @@ dependencies {
     implementation(libs.libsignal.client)
     implementation(libs.libsignal.android)
     implementation(libs.zxing.core)
+    implementation(libs.okhttp)
+    implementation(libs.bouncycastle)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

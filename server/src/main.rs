@@ -20,7 +20,7 @@ use axum::{Router, extract::DefaultBodyLimit};
 use config::ServerConfig;
 use db::migrate;
 use rusqlite::Connection;
-use state::{AppState, RateLimiter};
+use state::{AppState, RateLimiter, RealtimeHub};
 use tokio::sync::Notify;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         db: Arc::new(Mutex::new(db)),
         bootstrap_secret: config.bootstrap_secret.into(),
         message_notify: Arc::new(Notify::new()),
+        realtime: RealtimeHub::default(),
         attachment_backend,
         rate_limiter: Arc::new(RateLimiter::new()),
     };
@@ -61,7 +62,9 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_app(state: AppState) -> Router {
     api::registration::routes(api::users::routes(api::devices::routes(
-        api::messages::routes(api::groups::routes(api::attachments::routes(Router::new()))),
+        api::messages::routes(api::groups::routes(api::attachments::routes(
+            api::realtime::routes(Router::new()),
+        ))),
     )))
     .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
     .layer(TraceLayer::new_for_http())
@@ -70,7 +73,7 @@ fn build_app(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, RateLimiter, build_app};
+    use super::{AppState, RateLimiter, RealtimeHub, build_app};
     use crate::{
         attachment_storage::AttachmentStorageBackend,
         crypto::hash,
@@ -82,6 +85,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
     use rusqlite::Connection;
     use std::{
         sync::{Arc, Mutex},
@@ -124,6 +128,7 @@ mod tests {
             db: Arc::new(Mutex::new(db)),
             bootstrap_secret: "test-bootstrap-secret-with-enough-length".into(),
             message_notify: Arc::new(Notify::new()),
+            realtime: RealtimeHub::default(),
             attachment_backend: AttachmentStorageBackend::Sqlite,
             rate_limiter: Arc::new(RateLimiter::new()),
         }
@@ -929,10 +934,34 @@ mod tests {
         )
         .await;
         assert_eq!(notice_status, StatusCode::OK);
+        let notices = serde_json::from_str::<serde_json::Value>(&notices).unwrap();
+        assert_eq!(notices[0]["peer_nickname"], "alice");
+        let deletion_id = notices[0]["deletion_id"].as_i64().unwrap();
+        let (_, repeated) = request(
+            &app,
+            "GET",
+            "/v1/conversations/deletions",
+            Some(&bob),
+            String::new(),
+        )
+        .await;
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&notices).unwrap()[0]["peer_nickname"],
-            "alice"
+            serde_json::from_str::<serde_json::Value>(&repeated)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
+        let (acknowledged, _) = request(
+            &app,
+            "POST",
+            &format!("/v1/conversations/deletions/{deletion_id}"),
+            Some(&bob),
+            String::new(),
+        )
+        .await;
+        assert_eq!(acknowledged, StatusCode::NO_CONTENT);
         let (inbox_status, inbox) =
             request(&app, "GET", "/v1/messages", Some(&bob), String::new()).await;
         assert_eq!(inbox_status, StatusCode::OK);
@@ -1177,5 +1206,93 @@ mod tests {
         )
         .await;
         assert_eq!(deleted, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn recovery_key_adds_a_new_device_and_challenge_is_single_use() {
+        let app = test_app();
+        let (_, invite) = request(
+            &app,
+            "POST",
+            "/v1/admin/invites",
+            Some("test-bootstrap-secret-with-enough-length"),
+            String::new(),
+        )
+        .await;
+        let invite = serde_json::from_str::<serde_json::Value>(&invite).unwrap()["invite_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let signing_key = SigningKey::from_bytes(&[73_u8; 32]);
+        let (status, registered) = request(
+            &app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            serde_json::json!({
+                "nickname": "recoverable",
+                "invite_code": invite,
+                "identity_public_key": URL_SAFE_NO_PAD.encode([5_u8; 33]),
+                "registration_id": 42,
+                "recovery_public_key": URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let registered = serde_json::from_str::<serde_json::Value>(&registered).unwrap();
+
+        let (status, challenge) = request(
+            &app,
+            "POST",
+            "/v1/auth/recovery/challenge",
+            None,
+            serde_json::json!({"nickname": "recoverable"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let challenge = serde_json::from_str::<serde_json::Value>(&challenge).unwrap();
+        let challenge_id = challenge["challenge_id"].as_str().unwrap();
+        let challenge_value = challenge["challenge"].as_str().unwrap();
+        let proof = format!("hiddi-recovery-v1\0{challenge_id}\0{challenge_value}");
+        let recovery_body = serde_json::json!({
+            "nickname": "recoverable",
+            "challenge_id": challenge_id,
+            "signature": URL_SAFE_NO_PAD.encode(signing_key.sign(proof.as_bytes()).to_bytes()),
+            "identity_public_key": URL_SAFE_NO_PAD.encode([7_u8; 33]),
+            "registration_id": 77,
+            "device_name": "Recovered test device",
+        })
+        .to_string();
+        let (status, recovered) = request(
+            &app,
+            "POST",
+            "/v1/auth/recover",
+            None,
+            recovery_body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let recovered = serde_json::from_str::<serde_json::Value>(&recovered).unwrap();
+        assert_eq!(recovered["account_id"], registered["account_id"]);
+        assert_eq!(recovered["device_number"], 2);
+
+        let (status, _) = request(&app, "POST", "/v1/auth/recover", None, recovery_body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn realtime_hub_delivers_account_scoped_wakeups() {
+        let hub = RealtimeHub::default();
+        let mut alice = hub.subscribe("alice");
+        let mut bob = hub.subscribe("bob");
+        hub.publish("alice", "message");
+
+        assert_eq!(alice.recv().await.unwrap().kind, "message");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), bob.recv())
+                .await
+                .is_err()
+        );
     }
 }

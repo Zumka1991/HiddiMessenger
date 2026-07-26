@@ -634,7 +634,7 @@ async fn delete_group(
                 )
             })?
     };
-    for recipient_id in recipient_ids {
+    for recipient_id in &recipient_ids {
         transaction
             .execute(
                 "INSERT INTO group_deletions (id, recipient_account_id, group_id)
@@ -657,6 +657,9 @@ async fn delete_group(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete group"))?;
     drop(db);
     state.message_notify.notify_waiters();
+    for recipient_id in &recipient_ids {
+        state.realtime.publish(recipient_id, "group_deletion");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1125,6 +1128,7 @@ async fn send_group_event(
         .unchecked_transaction()
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let mut event_ids = Vec::with_capacity(recipients.len());
+    let mut recipient_account_ids = Vec::with_capacity(recipients.len());
     for nickname in recipients {
         let recipient_id: String = transaction.query_row(
             "SELECT accounts.id FROM accounts JOIN group_members ON group_members.account_id = accounts.id WHERE accounts.nickname = ?1 AND group_members.group_id = ?2",
@@ -1161,6 +1165,7 @@ async fn send_group_event(
                 )
             })?;
         event_ids.push(event_id);
+        recipient_account_ids.push(recipient_id);
     }
     if let Some((target_id, _)) = removal {
         let removed = transaction
@@ -1189,6 +1194,9 @@ async fn send_group_event(
     })?;
     drop(db);
     state.message_notify.notify_waiters();
+    for recipient_id in &recipient_account_ids {
+        state.realtime.publish(recipient_id, "group_event");
+    }
     Ok((
         StatusCode::CREATED,
         Json(SendGroupEventResponse { event_ids }),

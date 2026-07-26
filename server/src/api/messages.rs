@@ -35,6 +35,10 @@ pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
             get(pending_conversation_deletions),
         )
         .route(
+            "/v1/conversations/deletions/{deletion_id}",
+            post(ack_conversation_deletion),
+        )
+        .route(
             "/v1/conversations/{nickname}",
             axum::routing::delete(delete_conversation),
         )
@@ -63,6 +67,7 @@ struct MessageStatusResponse {
 
 #[derive(Serialize)]
 struct ConversationDeletionResponse {
+    deletion_id: i64,
     peer_nickname: String,
 }
 
@@ -156,6 +161,7 @@ async fn send_message(
     .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not store message"))?;
     drop(db);
     state.message_notify.notify_waiters();
+    state.realtime.publish(&recipient_id, "message");
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({"message_id": message_id})),
@@ -164,7 +170,6 @@ async fn send_message(
 
 /// Registers only routing metadata for a new MLS group. No title, MLS state,
 /// epoch, public key, or message content is supplied to the server.
-
 async fn wait_for_message(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -393,6 +398,9 @@ async fn delete_message(
     })?;
     drop(db);
     state.message_notify.notify_waiters();
+    if query.for_everyone {
+        state.realtime.publish(&recipient_id, "message_deletion");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -501,6 +509,9 @@ async fn delete_conversation(
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not delete attachments"))?;
     db.execute("INSERT INTO conversation_deletions (recipient_account_id, peer_account_id) VALUES (?1, ?2)", params![peer_id, account.account_id])
         .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not mark remote deletion"))?;
+    drop(db);
+    state.realtime.publish(&peer_id, "conversation_deletion");
+    state.message_notify.notify_waiters();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -520,6 +531,7 @@ async fn pending_conversation_deletions(
             Ok((
                 row.get::<_, i64>(0)?,
                 ConversationDeletionResponse {
+                    deletion_id: row.get(0)?,
                     peer_nickname: row.get(1)?,
                 },
             ))
@@ -537,18 +549,36 @@ async fn pending_conversation_deletions(
                 "could not load deletions",
             )
         })?;
-    drop(statement);
-    for (id, _) in &rows {
-        db.execute(
-            "DELETE FROM conversation_deletions WHERE id = ?1",
-            params![id],
+    Ok(Json(rows.into_iter().map(|(_, item)| item).collect()))
+}
+
+async fn ack_conversation_deletion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(deletion_id): axum::extract::Path<i64>,
+) -> Result<StatusCode, Error> {
+    let account = authenticate(&state, &headers)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let removed = db
+        .execute(
+            "DELETE FROM conversation_deletions
+             WHERE id = ?1 AND recipient_account_id = ?2",
+            params![deletion_id, account.account_id],
         )
         .map_err(|_| {
             Error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "could not acknowledge deletion",
+                "could not acknowledge conversation deletion",
             )
         })?;
+    if removed == 0 {
+        return Err(Error(
+            StatusCode::NOT_FOUND,
+            "conversation deletion not found",
+        ));
     }
-    Ok(Json(rows.into_iter().map(|(_, item)| item).collect()))
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -6,7 +6,8 @@ use std::{
 
 use axum::http::StatusCode;
 use rusqlite::Connection;
-use tokio::sync::Notify;
+use serde::Serialize;
+use tokio::sync::{Notify, broadcast};
 
 use crate::{attachment_storage::AttachmentStorageBackend, error::Error};
 
@@ -15,8 +16,40 @@ pub(crate) struct AppState {
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) bootstrap_secret: Arc<str>,
     pub(crate) message_notify: Arc<Notify>,
+    pub(crate) realtime: RealtimeHub,
     pub(crate) attachment_backend: AttachmentStorageBackend,
     pub(crate) rate_limiter: Arc<RateLimiter>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RealtimeEvent {
+    pub(crate) kind: &'static str,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RealtimeHub {
+    accounts: Arc<Mutex<HashMap<String, broadcast::Sender<RealtimeEvent>>>>,
+}
+
+impl RealtimeHub {
+    pub(crate) fn subscribe(&self, account_id: &str) -> broadcast::Receiver<RealtimeEvent> {
+        let mut accounts = self.accounts.lock().expect("realtime hub mutex poisoned");
+        accounts
+            .entry(account_id.to_owned())
+            .or_insert_with(|| broadcast::channel(128).0)
+            .subscribe()
+    }
+
+    pub(crate) fn publish(&self, account_id: &str, kind: &'static str) {
+        let sender = {
+            let mut accounts = self.accounts.lock().expect("realtime hub mutex poisoned");
+            accounts
+                .entry(account_id.to_owned())
+                .or_insert_with(|| broadcast::channel(128).0)
+                .clone()
+        };
+        let _ = sender.send(RealtimeEvent { kind });
+    }
 }
 
 pub(crate) struct RateLimiter {

@@ -8,6 +8,7 @@ import org.json.JSONObject
 import ru.hiddi.messenger.security.CryptoBoundary
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
 import ru.hiddi.messenger.security.PublicPreKey
+import ru.hiddi.messenger.security.RecoveryKey
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -17,6 +18,7 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
             require(serverUrl.startsWith("https://") || serverUrl.startsWith("http://")) { "Некорректный адрес сервера" }
             val baseUrl = serverUrl.trimEnd('/')
             val bundle = crypto.createRegistrationBundle()
+            val recoveryKey = RecoveryKey.generate()
             val registration = post(
                 "$baseUrl/v1/auth/register",
                 JSONObject()
@@ -24,6 +26,7 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
                     .put("invite_code", inviteCode)
                     .put("registration_id", bundle.registrationId)
                     .put("identity_public_key", bundle.identityPublicKey.base64Url())
+                    .put("recovery_public_key", recoveryKey.publicKey().base64Url())
                     .toString(),
                 null,
             )
@@ -45,8 +48,82 @@ class RegistrationApi(private val crypto: CryptoBoundary) {
                 deviceId = registration.getString("device_id"),
                 registrationId = registrationId,
                 accessToken = token,
+                recoveryKey = recoveryKey.encoded,
             )
         }
+
+    suspend fun recover(
+        serverUrl: String,
+        nickname: String,
+        encodedRecoveryKey: String,
+    ): RegisteredDevice = withContext(Dispatchers.IO) {
+        require(serverUrl.startsWith("https://") || serverUrl.startsWith("http://")) {
+            "Некорректный адрес сервера"
+        }
+        val baseUrl = serverUrl.trimEnd('/')
+        val normalizedNickname = nickname.trim().removePrefix("@").lowercase()
+        val recoveryKey = RecoveryKey.parse(encodedRecoveryKey)
+        try {
+            val challenge = post(
+                "$baseUrl/v1/auth/recovery/challenge",
+                JSONObject().put("nickname", normalizedNickname).toString(),
+                null,
+            )
+            val challengeId = challenge.getString("challenge_id")
+            val challengeValue = challenge.getString("challenge")
+            val proof = "hiddi-recovery-v1\u0000$challengeId\u0000$challengeValue"
+                .encodeToByteArray()
+            val bundle = crypto.createRegistrationBundle()
+            val registration = post(
+                "$baseUrl/v1/auth/recover",
+                JSONObject()
+                    .put("nickname", normalizedNickname)
+                    .put("challenge_id", challengeId)
+                    .put("signature", recoveryKey.sign(proof).base64Url())
+                    .put("registration_id", bundle.registrationId)
+                    .put("identity_public_key", bundle.identityPublicKey.base64Url())
+                    .put("device_name", "Recovered Android")
+                    .toString(),
+                null,
+            )
+            val token = registration.getString("access_token")
+            put(
+                "$baseUrl/v1/devices/prekeys",
+                JSONObject()
+                    .put("signed_prekey", bundle.signedPreKey.toJson())
+                    .put("kyber_signed_prekey", bundle.kyberSignedPreKey.toJson())
+                    .put("one_time_prekeys", bundle.oneTimePreKeys.toJsonArray())
+                    .put("kyber_one_time_prekeys", bundle.kyberOneTimePreKeys.toJsonArray())
+                    .toString(),
+                token,
+            )
+            RegisteredDevice(
+                accountId = registration.getString("account_id"),
+                deviceId = registration.getString("device_id"),
+                registrationId = registration.getInt("registration_id"),
+                accessToken = token,
+                recoveryKey = recoveryKey.encoded,
+            )
+        } finally {
+            recoveryKey.destroy()
+        }
+    }
+
+    suspend fun createRecoveryKey(profile: AccountProfile): String = withContext(Dispatchers.IO) {
+        val recoveryKey = RecoveryKey.generate()
+        try {
+            put(
+                "${profile.serverUrl}/v1/auth/recovery-key",
+                JSONObject()
+                    .put("recovery_public_key", recoveryKey.publicKey().base64Url())
+                    .toString(),
+                profile.accessToken,
+            )
+            recoveryKey.encoded
+        } finally {
+            recoveryKey.destroy()
+        }
+    }
 
     private fun post(url: String, body: String, token: String?): JSONObject = request("POST", url, body, token)
     private fun put(url: String, body: String, token: String?): JSONObject = request("PUT", url, body, token)
@@ -111,6 +188,7 @@ data class RegisteredDevice(
     val deviceId: String,
     val registrationId: Int,
     val accessToken: String,
+    val recoveryKey: String,
 )
 
 data class AccountProfile(

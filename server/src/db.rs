@@ -14,6 +14,7 @@ pub(crate) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             bio TEXT NOT NULL DEFAULT '',
             avatar BLOB,
             avatar_version TEXT,
+            recovery_public_key TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS devices (
@@ -31,6 +32,14 @@ pub(crate) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             authorized_by_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
             code_hash TEXT NOT NULL UNIQUE,
+            expires_at INTEGER NOT NULL,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS recovery_challenges (
+            id TEXT PRIMARY KEY NOT NULL,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            challenge TEXT NOT NULL,
             expires_at INTEGER NOT NULL,
             consumed_at TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -284,6 +293,20 @@ pub(crate) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    if !account_columns
+        .iter()
+        .any(|column| column == "recovery_public_key")
+    {
+        db.execute(
+            "ALTER TABLE accounts ADD COLUMN recovery_public_key TEXT",
+            [],
+        )?;
+    }
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recovery_challenges_expiry
+         ON recovery_challenges(account_id, expires_at)",
+        [],
+    )?;
     if !account_columns.iter().any(|column| column == "bio") {
         db.execute(
             "ALTER TABLE accounts ADD COLUMN bio TEXT NOT NULL DEFAULT ''",

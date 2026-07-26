@@ -25,7 +25,7 @@ private fun printHelp() = println(
       register  Регистрация устройства и публикация PQXDH prekeys
       chat      Отправка E2EE-сообщения: --to nickname --message text
       inbox     Получение и расшифровка сообщений
-      watch     Live-приём новых сообщений (foreground long polling)
+      watch     Live-приём новых сообщений через WebSocket
       shell     Интерактивный режим: выбор диалога и отправка
       attachments  Список локальных зашифрованных вложений
       export-attachment  Явный экспорт: --id UUID --output PATH

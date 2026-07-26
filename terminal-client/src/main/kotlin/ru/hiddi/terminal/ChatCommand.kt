@@ -71,11 +71,16 @@ object ChatCommand {
 
     /** Keeps the encrypted vault unlocked only in this foreground terminal process. */
     fun watch(args: List<String>) = withVault(args) { state, store, vault, passphrase, dataDir ->
-        println("Live-приём запущен. Нажмите Ctrl+C для выхода.")
-        while (true) {
-            val client = HttpClient.newHttpClient()
-            val ready = request(client, "GET", "${state.getString("server")}/v1/messages/wait", null, state.getString("access_token")) as JSONObject
-            if (ready.getBoolean("available")) receive(state, store, vault, passphrase, dataDir, printEmpty = false)
+        println("WebSocket live-приём запущен. Нажмите Ctrl+C для выхода.")
+        RealtimeWatch.forever(
+            server = state.getString("server"),
+            token = state.getString("access_token"),
+        ) { kind ->
+            if (kind == "message" || kind == "message_deletion" ||
+                kind == "conversation_deletion" || kind == "sync_required"
+            ) {
+                receive(state, store, vault, passphrase, dataDir, printEmpty = false)
+            }
         }
     }
 

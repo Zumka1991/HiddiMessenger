@@ -52,6 +52,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -777,7 +778,8 @@ fun ChatScreen(
             }
         }
     }
-    Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
         if (showSettings) {
             SettingsScreen(
                 account = profile,
@@ -1154,6 +1156,37 @@ fun ChatScreen(
                     }
                 },
             )
+        }
+        }
+        if (connection != ServerConnection.ONLINE) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shadowElevation = 8.dp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.size(10.dp))
+                    Text(
+                        if (connection == ServerConnection.OFFLINE) {
+                            "Нет сети · подключаемся снова…"
+                        } else {
+                            "Подключаемся к Hiddi…"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+            }
         }
     }
 

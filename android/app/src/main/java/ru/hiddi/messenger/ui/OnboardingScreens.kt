@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -38,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -131,12 +135,16 @@ fun RegistrationScreen(
     onRecover: ((String, String) -> AccountProfile?)?,
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var nickname by rememberSaveable { mutableStateOf("") }
     var inviteCode by rememberSaveable { mutableStateOf("") }
     var serverUrl by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_SERVER_URL) }
     var message by rememberSaveable { mutableStateOf<String?>(null) }
     var isRegistering by rememberSaveable { mutableStateOf(false) }
+    var recoveryKeyInput by rememberSaveable { mutableStateOf("") }
+    var generatedRecoveryKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingProfile by rememberSaveable { mutableStateOf<AccountProfile?>(null) }
 
     Column(
         modifier = Modifier
@@ -166,7 +174,10 @@ fun RegistrationScreen(
         }
 
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             Surface(
                 shape = RoundedCornerShape(24.dp),
@@ -250,8 +261,9 @@ fun RegistrationScreen(
                                 device.accessToken,
                                 device.deviceId,
                             )
-                            AccountStore(context).save(profile)
-                            onRegistered(profile)
+                            generatedRecoveryKey = device.recoveryKey
+                            pendingProfile = profile
+                            message = "Сохраните ключ восстановления. Он показывается только сейчас."
                         } catch (error: Exception) {
                             message = error.message ?: "Не удалось зарегистрировать устройство"
                         } finally {
@@ -260,6 +272,7 @@ fun RegistrationScreen(
                     }
                 },
                 enabled = !isRegistering &&
+                    pendingProfile == null &&
                     nickname.length in 3..32 &&
                     inviteCode.isNotBlank() &&
                     (serverUrl.startsWith("https://") ||
@@ -277,6 +290,89 @@ fun RegistrationScreen(
                 } else {
                     Text("Создать защищённое устройство")
                 }
+            }
+            generatedRecoveryKey?.let { key ->
+                Spacer(Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Ключ восстановления") },
+                    supportingText = {
+                        Text("Без этого ключа восстановить профиль на новом устройстве невозможно")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { clipboard.setText(AnnotatedString(key)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Скопировать ключ")
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        pendingProfile?.let { profile ->
+                            AccountStore(context).save(profile)
+                            onRegistered(profile)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Я сохранил ключ")
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                "Восстановление существующего профиля",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = recoveryKeyInput,
+                onValueChange = { recoveryKeyInput = it.trim().take(256) },
+                label = { Text("Ключ hiddi1…") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    isRegistering = true
+                    message = null
+                    scope.launch {
+                        try {
+                            val crypto = SignalCryptoBoundary(AndroidKeystoreSecretStore(context))
+                            val device = RegistrationApi(crypto)
+                                .recover(serverUrl, nickname, recoveryKeyInput)
+                            val profile = AccountProfile(
+                                serverUrl.trimEnd('/'),
+                                nickname.removePrefix("@").lowercase(),
+                                device.accessToken,
+                                device.deviceId,
+                            )
+                            AccountStore(context).save(profile)
+                            onRegistered(profile)
+                        } catch (error: Exception) {
+                            message = error.message ?: "Не удалось восстановить профиль"
+                        } finally {
+                            isRegistering = false
+                        }
+                    }
+                },
+                enabled = !isRegistering &&
+                    nickname.length in 3..32 &&
+                    recoveryKeyInput.startsWith("hiddi1.") &&
+                    (serverUrl.startsWith("https://") ||
+                        (BuildConfig.DEBUG && serverUrl.startsWith("http://"))),
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Text("Восстановить профиль")
             }
             onRecover?.let { recover ->
                 Spacer(Modifier.height(10.dp))

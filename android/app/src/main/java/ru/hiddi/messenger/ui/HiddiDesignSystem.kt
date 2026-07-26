@@ -19,6 +19,7 @@ import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -83,7 +84,15 @@ fun ConnectionPill(connection: ServerConnection, onRefresh: () -> Unit) {
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+            if (connection == ServerConnection.ONLINE) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+            } else {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 2.dp,
+                    color = color,
+                )
+            }
             Spacer(Modifier.size(6.dp))
             Text(
                 label,

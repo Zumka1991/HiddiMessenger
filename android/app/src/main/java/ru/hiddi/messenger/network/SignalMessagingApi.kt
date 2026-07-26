@@ -557,10 +557,27 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         request("DELETE", "${profile.serverUrl}/v1/conversations/$normalized", null, profile.accessToken)
     }
 
-    suspend fun pendingConversationDeletions(profile: AccountProfile): List<String> = withContext(Dispatchers.IO) {
+    suspend fun pendingConversationDeletions(profile: AccountProfile): List<ConversationDeletion> = withContext(Dispatchers.IO) {
         val response = JSONArray(request("GET", "${profile.serverUrl}/v1/conversations/deletions", null, profile.accessToken))
-        List(response.length()) { response.getJSONObject(it).getString("peer_nickname") }
+        List(response.length()) {
+            response.getJSONObject(it).let { item ->
+                ConversationDeletion(
+                    deletionId = item.getLong("deletion_id"),
+                    peerNickname = item.getString("peer_nickname"),
+                )
+            }
+        }
     }
+
+    suspend fun acknowledgeConversationDeletion(profile: AccountProfile, deletionId: Long) =
+        withContext(Dispatchers.IO) {
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/conversations/deletions/$deletionId",
+                null,
+                profile.accessToken,
+            )
+        }
 
     /** Deterministic code for an out-of-band identity-key comparison. No secret leaves the device. */
     suspend fun safetyNumber(profile: AccountProfile, peer: String): String = withContext(Dispatchers.IO) {
@@ -598,7 +615,6 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                     else -> error("Неизвестный тип сообщения")
                 }
                 repository.save(store.snapshot())
-            request("POST", "${profile.serverUrl}/v1/messages/${item.getString("message_id")}", null, profile.accessToken)
                 output += DecryptedMessage(
                     messageId = item.getString("message_id"),
                     senderNickname = sender,
@@ -610,6 +626,16 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             output
         }
     }
+
+    suspend fun acknowledgeMessage(profile: AccountProfile, messageId: String) =
+        withContext(Dispatchers.IO) {
+            request(
+                "POST",
+                "${profile.serverUrl}/v1/messages/$messageId",
+                null,
+                profile.accessToken,
+            )
+        }
 
     private fun fetchBundle(profile: AccountProfile, nickname: String): PreKeyBundle {
         val bundle = JSONObject(request("GET", "${profile.serverUrl}/v1/users/$nickname/prekey-bundle", null, profile.accessToken))
@@ -666,6 +692,7 @@ data class LinkedDevice(
     val createdAt: String,
 )
 data class MessageDeletion(val deletionId: String, val messageId: String)
+data class ConversationDeletion(val deletionId: Long, val peerNickname: String)
 data class UserSearchResult(
     val nickname: String,
     val displayName: String,

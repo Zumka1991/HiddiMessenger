@@ -42,6 +42,12 @@ class EncryptedChatHistory(context: Context) {
 
     fun append(item: ChatHistoryItem) = synchronized(historyLock) {
         val entries = read()
+        if (item.messageId != null && (0 until entries.length()).any { index ->
+                entries.getJSONObject(index).optString("message_id") == item.messageId
+            }
+        ) {
+            return@synchronized
+        }
         entries.put(
             JSONObject()
                 .put("peer", item.peer)

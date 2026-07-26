@@ -18,6 +18,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.hiddi.messenger.network.AccountStore
 import ru.hiddi.messenger.network.GroupMlsCoordinator
+import ru.hiddi.messenger.network.RealtimeConnection
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
@@ -32,8 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class MessagingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var pollingJob: Job? = null
-    private var groupPollingJob: Job? = null
+    private var realtimeJob: Job? = null
+    private var realtimeConnection: RealtimeConnection? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -42,12 +43,9 @@ class MessagingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (pollingJob?.isActive != true) {
+        if (realtimeJob?.isActive != true) {
             publishConnection(STATE_CONNECTING)
-            pollingJob = serviceScope.launch { poll() }
-        }
-        if (groupPollingJob?.isActive != true) {
-            groupPollingJob = serviceScope.launch { pollGroups() }
+            realtimeJob = serviceScope.launch { runRealtime() }
         }
         return START_STICKY
     }
@@ -55,8 +53,8 @@ class MessagingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        pollingJob?.cancel()
-        groupPollingJob?.cancel()
+        realtimeJob?.cancel()
+        realtimeConnection?.close()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -65,7 +63,7 @@ class MessagingService : Service() {
         stopSelf(startId)
     }
 
-    private suspend fun poll() {
+    private suspend fun runRealtime() {
         val profile = AccountStore(this).read() ?: run {
             stopSelf()
             return
@@ -73,90 +71,116 @@ class MessagingService : Service() {
         val api = SignalMessagingApi(SignalStateRepository(this))
         val history = EncryptedChatHistory(this)
         val attachments = EncryptedAttachmentStore(this)
+        val groupCoordinator = GroupMlsCoordinator(this, api)
         var retryDelay = 1_000L
 
         downloadPendingAttachments(profile, api, history, attachments)
 
         while (serviceScope.isActive) {
+            val connection = RealtimeConnection()
+            realtimeConnection = connection
+            publishConnection(STATE_CONNECTING)
+            connection.connect(profile)
             try {
-                api.pendingMessageDeletions(profile).forEach { deletion ->
-                    history.deleteMessage(deletion.messageId).forEach { descriptor ->
-                        runCatching { attachments.delete(descriptor.attachmentId) }
-                    }
-                    api.acknowledgeMessageDeletion(profile, deletion.deletionId)
-                    sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
-                }
-                api.pendingConversationDeletions(profile).forEach { peer ->
-                    history.clearConversation(peer).forEach { descriptor ->
-                        runCatching { attachments.delete(descriptor.attachmentId) }
-                    }
-                    sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
-                }
-                if (api.waitForIncoming(profile)) {
-                    val messages = api.inbox(profile)
-                    messages.forEach { message ->
-                        val descriptor = runCatching {
-                            EncryptedAttachmentStore.parseEnvelope(message.text)
-                        }.getOrNull()
-                        history.append(
-                            ChatHistoryItem(
-                                peer = message.senderNickname,
-                                text = when (descriptor?.kind) {
-                                    EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
-                                    EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
-                                    else -> message.text
-                                },
-                                outgoing = false,
-                                time = message.createdAt,
-                                unread = true,
-                                attachment = descriptor,
-                                messageId = message.messageId,
-                            ),
-                        )
-                        descriptor?.let {
-                            listOfNotNull(it.preview, it).forEach { part ->
-                                runCatching { downloadAttachment(profile, api, attachments, part.attachmentId) }
-                                    .onFailure { Log.w(TAG, "Attachment download will be retried") }
-                            }
+                var connected = false
+                while (serviceScope.isActive) {
+                    when (val event = connection.events.receive()) {
+                        RealtimeConnection.Event.Connected -> {
+                            connected = true
+                            retryDelay = 1_000L
+                            publishConnection(STATE_ONLINE)
                         }
-                        if (!MainActivity.isVisible) showMessageNotification(message.senderNickname)
-                    }
-                    if (messages.isNotEmpty()) {
-                        sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
+                        is RealtimeConnection.Event.SyncRequired -> {
+                            synchronize(
+                                profile = profile,
+                                api = api,
+                                history = history,
+                                attachments = attachments,
+                                groupCoordinator = groupCoordinator,
+                            )
+                        }
+                        is RealtimeConnection.Event.Disconnected -> {
+                            event.cause?.let {
+                                Log.w(TAG, "Realtime disconnected: ${it.javaClass.simpleName}")
+                            }
+                            break
+                        }
                     }
                 }
-                publishConnection(STATE_ONLINE)
-                retryDelay = 1_000L
+                if (!connected) {
+                    retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
+                }
             } catch (error: Exception) {
-                Log.w(TAG, "Background receive failed: ${error.javaClass.simpleName}")
-                publishConnection(STATE_OFFLINE)
-                delay(retryDelay)
+                Log.w(TAG, "Realtime synchronization failed: ${error.javaClass.simpleName}")
                 retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
+            } finally {
+                connection.close()
+                if (realtimeConnection === connection) realtimeConnection = null
             }
+            publishConnection(STATE_OFFLINE)
+            delay(retryDelay)
         }
     }
 
-    private suspend fun pollGroups() {
-        val profile = AccountStore(this).read() ?: return
-        val api = SignalMessagingApi(SignalStateRepository(this))
-        val coordinator = GroupMlsCoordinator(this, api)
-        var retryDelay = 1_000L
-        // Startup prepares the native provider and publishes a KeyPackage first.
-        delay(2_000)
-        while (serviceScope.isActive) {
-            try {
-                val changed = coordinator.synchronize(profile)
-                if (changed.isNotEmpty()) {
-                    sendBroadcast(Intent(ACTION_GROUPS_UPDATED).setPackage(packageName))
-                    if (!MainActivity.isVisible) showGroupNotification()
-                }
-                retryDelay = 1_000L
-                if (!api.waitForGroupEvent(profile)) delay(1_000)
-            } catch (error: Exception) {
-                Log.w(TAG, "Background MLS receive failed: ${error.javaClass.simpleName}")
-                delay(retryDelay)
-                retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
+    private suspend fun synchronize(
+        profile: ru.hiddi.messenger.network.AccountProfile,
+        api: SignalMessagingApi,
+        history: EncryptedChatHistory,
+        attachments: EncryptedAttachmentStore,
+        groupCoordinator: GroupMlsCoordinator,
+    ) {
+        var messagesChanged = false
+        api.pendingMessageDeletions(profile).forEach { deletion ->
+            history.deleteMessage(deletion.messageId).forEach { descriptor ->
+                runCatching { attachments.delete(descriptor.attachmentId) }
             }
+            api.acknowledgeMessageDeletion(profile, deletion.deletionId)
+            messagesChanged = true
+        }
+        api.pendingConversationDeletions(profile).forEach { deletion ->
+            history.clearConversation(deletion.peerNickname).forEach { descriptor ->
+                runCatching { attachments.delete(descriptor.attachmentId) }
+            }
+            api.acknowledgeConversationDeletion(profile, deletion.deletionId)
+            messagesChanged = true
+        }
+        api.inbox(profile).forEach { message ->
+            val descriptor = runCatching {
+                EncryptedAttachmentStore.parseEnvelope(message.text)
+            }.getOrNull()
+            history.append(
+                ChatHistoryItem(
+                    peer = message.senderNickname,
+                    text = when (descriptor?.kind) {
+                        EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+                        EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+                        else -> message.text
+                    },
+                    outgoing = false,
+                    time = message.createdAt,
+                    unread = true,
+                    attachment = descriptor,
+                    messageId = message.messageId,
+                ),
+            )
+            api.acknowledgeMessage(profile, message.messageId)
+            descriptor?.let {
+                listOfNotNull(it.preview, it).forEach { part ->
+                    runCatching { downloadAttachment(profile, api, attachments, part.attachmentId) }
+                        .onFailure { Log.w(TAG, "Attachment download will be retried") }
+                }
+            }
+            if (!MainActivity.isVisible) showMessageNotification(message.senderNickname)
+            messagesChanged = true
+        }
+        if (messagesChanged) {
+            sendBroadcast(Intent(ACTION_MESSAGES_UPDATED).setPackage(packageName))
+        }
+
+        val changedGroups = groupCoordinator.synchronize(profile)
+        if (changedGroups.isNotEmpty()) {
+            sendBroadcast(Intent(ACTION_GROUPS_UPDATED).setPackage(packageName))
+            if (!MainActivity.isVisible) showGroupNotification()
         }
     }
 

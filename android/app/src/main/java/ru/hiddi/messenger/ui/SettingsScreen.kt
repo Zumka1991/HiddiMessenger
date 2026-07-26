@@ -62,9 +62,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.hiddi.messenger.network.AccountProfile
+import ru.hiddi.messenger.network.RegistrationApi
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.sanitizeImage
+import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
+import ru.hiddi.messenger.security.SignalCryptoBoundary
 
 @Composable
 fun SettingsScreen(
@@ -88,6 +91,8 @@ fun SettingsScreen(
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkCode by remember { mutableStateOf<String?>(null) }
     var creatingLinkCode by remember { mutableStateOf(false) }
+    var recoveryKey by remember { mutableStateOf<String?>(null) }
+    var creatingRecoveryKey by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
     suspend fun reload() {
@@ -383,6 +388,46 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(14.dp))
             Text(
+                "ВОССТАНОВЛЕНИЕ",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp),
+            )
+            OutlinedButton(
+                onClick = {
+                    if (creatingRecoveryKey) return@OutlinedButton
+                    creatingRecoveryKey = true
+                    scope.launch {
+                        try {
+                            recoveryKey = RegistrationApi(
+                                SignalCryptoBoundary(AndroidKeystoreSecretStore(context)),
+                            ).createRecoveryKey(account)
+                        } catch (error: Exception) {
+                            status = error.message ?: "Не удалось создать ключ восстановления"
+                        } finally {
+                            creatingRecoveryKey = false
+                        }
+                    }
+                },
+                enabled = !saving && !loggingOut && !creatingRecoveryKey,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(Icons.Rounded.Lock, contentDescription = null)
+                Spacer(Modifier.size(9.dp))
+                Text(
+                    if (creatingRecoveryKey) "Создаём ключ…"
+                    else "Создать новый ключ восстановления",
+                )
+            }
+            Text(
+                "Новый ключ заменяет предыдущий. Hiddi покажет его только один раз.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
                 "УСТРОЙСТВА",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
@@ -472,6 +517,49 @@ fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { showLinkDialog = false }) {
                     Text("Закрыть")
+                }
+            },
+        )
+    }
+
+    recoveryKey?.let { key ->
+        AlertDialog(
+            onDismissRequest = { recoveryKey = null },
+            title = { Text("Ключ восстановления") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Сохраните ключ вне телефона. Любой, кто получит его, сможет добавить " +
+                            "новое устройство к вашему аккаунту.",
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                key,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(14.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(key))
+                        Toast.makeText(context, "Ключ скопирован", Toast.LENGTH_SHORT).show()
+                    },
+                ) {
+                    Text("Копировать")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { recoveryKey = null }) {
+                    Text("Я сохранил")
                 }
             },
         )
