@@ -487,13 +487,18 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             val state = resolveRegistrationId(profile, repository.load())
             val store = AndroidSignalProtocolStore(state)
             val local = SignalProtocolAddress(profile.nickname, DEVICE_ID)
-            val remote = SignalProtocolAddress(normalized, DEVICE_ID)
-            if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(fetchBundle(profile, normalized))
-            val cipher = SessionCipher(store, local, remote).encrypt(message.encodeToByteArray())
+            val deliveries = JSONArray()
+            fetchBundles(profile, normalized).forEach { (deviceNumber, bundle) ->
+                val remote = SignalProtocolAddress(normalized, deviceNumber)
+                if (!store.containsSession(remote)) SessionBuilder(store, remote, local).process(bundle)
+                val cipher = SessionCipher(store, local, remote).encrypt(message.encodeToByteArray())
+                val envelope = byteArrayOf(cipher.type.toByte()) + cipher.serialize()
+                deliveries.put(JSONObject().put("device_number", deviceNumber).put("ciphertext", envelope.b64()))
+                envelope.fill(0)
+            }
             repository.save(store.snapshot())
-            val envelope = byteArrayOf(cipher.type.toByte()) + cipher.serialize()
             JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
-                .put("recipient_nickname", normalized).put("ciphertext", envelope.b64()).toString(), profile.accessToken))
+                .put("recipient_nickname", normalized).put("device_ciphertexts", deliveries).toString(), profile.accessToken))
                 .getString("message_id")
         }
     }
@@ -638,7 +643,15 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         }
 
     private fun fetchBundle(profile: AccountProfile, nickname: String): PreKeyBundle {
-        val bundle = JSONObject(request("GET", "${profile.serverUrl}/v1/users/$nickname/prekey-bundle", null, profile.accessToken))
+        return parseBundle(JSONObject(request("GET", "${profile.serverUrl}/v1/users/$nickname/prekey-bundle", null, profile.accessToken)))
+    }
+
+    private fun fetchBundles(profile: AccountProfile, nickname: String): List<Pair<Int, PreKeyBundle>> {
+        val values = JSONArray(request("GET", "${profile.serverUrl}/v1/users/$nickname/prekey-bundles", null, profile.accessToken))
+        return List(values.length()) { index -> values.getJSONObject(index).let { it.getInt("device_number") to parseBundle(it) } }
+    }
+
+    private fun parseBundle(bundle: JSONObject): PreKeyBundle {
         val signed = bundle.getJSONObject("signed_prekey")
         val kyberSigned = bundle.getJSONObject("kyber_signed_prekey")
         val oneTime = bundle.optJSONObject("one_time_prekey")

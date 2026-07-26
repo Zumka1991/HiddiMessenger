@@ -528,26 +528,30 @@ class HiddiSession internal constructor(
         val bundleJson =
             authenticatedRequest(
                 "GET",
-                "$server/v1/users/$peer/prekey-bundle",
+                "$server/v1/users/$peer/prekey-bundles",
                 null,
-            ) as JSONObject
-        val remote = SignalProtocolAddress(peer, bundleJson.optInt("device_number", 1))
-        if (!store.containsSession(remote)) {
-            SessionBuilder(store, remote, local).process(bundle(bundleJson))
+            ) as JSONArray
+        val deliveries = JSONArray()
+        for (index in 0 until bundleJson.length()) {
+            val value = bundleJson.getJSONObject(index)
+            val remote = SignalProtocolAddress(peer, value.optInt("device_number", 1))
+            if (!store.containsSession(remote)) {
+                SessionBuilder(store, remote, local).process(bundle(value))
+            }
+            val encrypted = SessionCipher(store, local, remote).encrypt(plaintext.encodeToByteArray())
+            val envelope = byteArrayOf(encrypted.type.toByte()) + encrypted.serialize()
+            deliveries.put(JSONObject().put("device_number", remote.deviceId).put("ciphertext", envelope.base64Url()))
+            envelope.fill(0)
         }
-        val encrypted =
-            SessionCipher(store, local, remote).encrypt(plaintext.encodeToByteArray())
         persist()
-        val envelope = byteArrayOf(encrypted.type.toByte()) + encrypted.serialize()
         val result =
             authenticatedRequest(
                 "POST",
                 "$server/v1/messages",
                 JSONObject()
                     .put("recipient_nickname", peer)
-                    .put("ciphertext", envelope.base64Url()),
+                    .put("device_ciphertexts", deliveries),
             ) as JSONObject
-        envelope.fill(0)
         val entry =
             ChatEntry(
                 peer = peer,

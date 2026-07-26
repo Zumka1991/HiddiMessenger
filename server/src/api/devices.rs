@@ -33,6 +33,10 @@ pub(crate) fn routes(router: Router<AppState>) -> Router<AppState> {
             "/v1/users/{nickname}/prekey-bundle",
             get(take_prekey_bundle),
         )
+        .route(
+            "/v1/users/{nickname}/prekey-bundles",
+            get(take_prekey_bundles),
+        )
 }
 
 #[derive(Serialize)]
@@ -323,6 +327,46 @@ async fn take_prekey_bundle(
         )
     })?;
     Ok(Json(bundle))
+}
+
+/// Returns and reserves one prekey bundle for every active device of an account.
+async fn take_prekey_bundles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(nickname): axum::extract::Path<String>,
+) -> Result<Json<Vec<PrekeyBundleResponse>>, Error> {
+    authenticate(&state, &headers)?;
+    let nickname = normalize_nickname(&nickname).ok_or(Error(StatusCode::BAD_REQUEST, "invalid nickname"))?;
+    let db = state.db.lock().map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let transaction = db.unchecked_transaction().map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let device_ids = transaction.prepare(
+        "SELECT devices.id FROM accounts JOIN devices ON devices.account_id = accounts.id
+         JOIN prekey_bundles ON prekey_bundles.device_id = devices.id
+         WHERE accounts.nickname = ?1 ORDER BY devices.device_number",
+    ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not retrieve prekey bundles"))?
+        .query_map(params![nickname], |row| row.get::<_, String>(0))
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not retrieve prekey bundles"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not retrieve prekey bundles"))?;
+    if device_ids.is_empty() { return Err(Error(StatusCode::NOT_FOUND, "user has no prekey bundle")); }
+    let mut result = Vec::with_capacity(device_ids.len());
+    for device_id in device_ids {
+        let mut bundle = transaction.query_row(
+            "SELECT accounts.id, accounts.nickname, devices.id, devices.device_number, devices.registration_id,
+                    devices.identity_public_key, prekey_bundles.signed_prekey_id, prekey_bundles.signed_prekey,
+                    prekey_bundles.signed_prekey_signature, prekey_bundles.kyber_signed_prekey_id,
+                    prekey_bundles.kyber_signed_prekey, prekey_bundles.kyber_signed_prekey_signature
+             FROM devices JOIN accounts ON accounts.id = devices.account_id
+             JOIN prekey_bundles ON prekey_bundles.device_id = devices.id WHERE devices.id = ?1",
+            params![device_id],
+            |row| Ok(PrekeyBundleResponse { account_id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid UUID"), nickname: row.get(1)?, device_id: Uuid::parse_str(&row.get::<_, String>(2)?).expect("valid UUID"), device_number: row.get(3)?, registration_id: row.get(4)?, identity_public_key: row.get(5)?, signed_prekey: StoredPreKey { id: row.get(6)?, public_key: row.get(7)?, signature: row.get(8)? }, kyber_signed_prekey: StoredPreKey { id: row.get(9)?, public_key: row.get(10)?, signature: row.get(11)? }, one_time_prekey: None, kyber_one_time_prekey: None }),
+        ).map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not retrieve prekey bundle"))?;
+        bundle.one_time_prekey = take_one_time_prekey(&transaction, &bundle.device_id.to_string(), "classical")?;
+        bundle.kyber_one_time_prekey = take_one_time_prekey(&transaction, &bundle.device_id.to_string(), "kyber")?;
+        result.push(bundle);
+    }
+    transaction.commit().map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "could not finalize prekey bundles"))?;
+    Ok(Json(result))
 }
 
 fn take_one_time_prekey(
