@@ -17,6 +17,7 @@ import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.security.MessageDigest
 
 class HiddiApi(
     private val vault: Vault,
@@ -147,6 +148,15 @@ class HiddiSession internal constructor(
     val server: String get() = state.getString("server")
     internal val accessToken: String get() = state.getString("access_token")
 
+    @Synchronized
+    fun invisibleMode(): Boolean = state.optBoolean("invisible_mode", false)
+
+    @Synchronized
+    fun setInvisibleMode(enabled: Boolean) {
+        state.put("invisible_mode", enabled)
+        persist()
+    }
+
     fun isOnline(): Boolean {
         val response =
             client.send(
@@ -162,7 +172,57 @@ class HiddiSession internal constructor(
             nickname = json.getString("nickname"),
             displayName = json.optString("display_name"),
             bio = json.optString("bio"),
+            avatarVersion = json.optString("avatar_version").takeIf(String::isNotBlank),
         )
+    }
+
+    @Synchronized
+    fun updateProfile(displayName: String, bio: String): HiddiProfile {
+        require(displayName.length <= 64 && displayName.none(Char::isISOControl)) {
+            "Имя должно быть не длиннее 64 символов"
+        }
+        require(bio.length <= 250) { "Описание должно быть не длиннее 250 символов" }
+        val json =
+            authenticatedRequest(
+                "PUT",
+                "$server/v1/profile",
+                JSONObject().put("display_name", displayName).put("bio", bio),
+            ) as JSONObject
+        return HiddiProfile(
+            nickname = json.getString("nickname"),
+            displayName = json.optString("display_name"),
+            bio = json.optString("bio"),
+            avatarVersion = json.optString("avatar_version").takeIf(String::isNotBlank),
+        )
+    }
+
+    @Synchronized
+    fun avatar(peer: String): ByteArray {
+        val encoded = URLEncoder.encode(normalizePeer(peer), Charsets.UTF_8)
+        val json =
+            authenticatedRequest("GET", "$server/v1/users/$encoded/avatar", null) as JSONObject
+        return json.getString("image").base64UrlDecode()
+    }
+
+    @Synchronized
+    fun uploadAvatar(jpeg: ByteArray): String {
+        require(jpeg.size in 4..512 * 1024) { "Аватар должен быть не больше 512 КиБ" }
+        require(
+            jpeg.take(3) == listOf(0xff.toByte(), 0xd8.toByte(), 0xff.toByte()) &&
+                jpeg.takeLast(2) == listOf(0xff.toByte(), 0xd9.toByte()),
+        ) { "Аватар должен быть JPEG-изображением" }
+        val response =
+            authenticatedRequest(
+                "PUT",
+                "$server/v1/profile/avatar",
+                JSONObject().put("image", jpeg.base64Url()),
+            ) as JSONObject
+        return response.getString("version")
+    }
+
+    @Synchronized
+    fun deleteAvatar() {
+        authenticatedRequest("DELETE", "$server/v1/profile/avatar", null)
     }
 
     fun search(query: String): List<HiddiProfile> {
@@ -177,6 +237,7 @@ class HiddiSession internal constructor(
                     nickname = it.getString("nickname"),
                     displayName = it.optString("display_name"),
                     bio = it.optString("bio"),
+                    avatarVersion = it.optString("avatar_version").takeIf(String::isNotBlank),
                 )
             }
         }
@@ -203,6 +264,7 @@ class HiddiSession internal constructor(
 
     @Synchronized
     fun syncInbox(): List<ChatEntry> {
+        synchronizeConversationDeletions()
         val inbox = authenticatedRequest("GET", "$server/v1/messages", null) as JSONArray
         val received = mutableListOf<ChatEntry>()
         for (index in 0 until inbox.length()) {
@@ -234,6 +296,69 @@ class HiddiSession internal constructor(
             }
         }
         return received
+    }
+
+    @Synchronized
+    fun safetyNumber(peer: String): SafetyNumberInfo {
+        val normalized = normalizePeer(peer)
+        val remote =
+            authenticatedRequest(
+                "GET",
+                "$server/v1/users/${URLEncoder.encode(normalized, Charsets.UTF_8)}",
+                null,
+            ) as JSONObject
+        val participants =
+            listOf(
+                "$nickname\u0000${store.identityKeyPair.publicKey.serialize().base64Url()}",
+                "${remote.getString("nickname")}\u0000${remote.getString("identity_public_key")}",
+            ).sorted()
+        val digest =
+            MessageDigest.getInstance("SHA-256").digest(
+                ("hiddi-safety-number-v1\u0000" + participants.joinToString("\u0000"))
+                    .encodeToByteArray(),
+            )
+        val value = digest.take(30).joinToString("") { "%02x".format(it) }
+            .chunked(5)
+            .joinToString(" ")
+        val trusted =
+            state.optJSONObject("trusted_safety_numbers")
+                ?.optString(normalized)
+                ?.takeIf(String::isNotBlank) == value
+        return SafetyNumberInfo(value, trusted)
+    }
+
+    @Synchronized
+    fun trustSafetyNumber(peer: String, value: String) {
+        val normalized = normalizePeer(peer)
+        val trusted = state.optJSONObject("trusted_safety_numbers")
+            ?: JSONObject().also { state.put("trusted_safety_numbers", it) }
+        trusted.put(normalized, value)
+        persist()
+    }
+
+    @Synchronized
+    fun clearConversation(peer: String, forBoth: Boolean) {
+        val normalized = normalizePeer(peer)
+        if (forBoth) {
+            val encoded = URLEncoder.encode(normalized, Charsets.UTF_8)
+            authenticatedRequest("DELETE", "$server/v1/conversations/$encoded", null)
+        }
+        removeConversationHistory(normalized)
+        persist()
+    }
+
+    @Synchronized
+    fun blockedUsers(): Set<String> {
+        val entries = authenticatedRequest("GET", "$server/v1/blocks", null) as JSONArray
+        return (0 until entries.length())
+            .map { entries.getJSONObject(it).getString("nickname") }
+            .toSet()
+    }
+
+    @Synchronized
+    fun setBlocked(peer: String, blocked: Boolean) {
+        val encoded = URLEncoder.encode(normalizePeer(peer), Charsets.UTF_8)
+        authenticatedRequest(if (blocked) "PUT" else "DELETE", "$server/v1/blocks/$encoded", null)
     }
 
     @Synchronized
@@ -330,6 +455,40 @@ class HiddiSession internal constructor(
     }
 
     private fun historyJson(): JSONArray = state.optJSONArray("chat_history") ?: JSONArray().also { state.put("chat_history", it) }
+
+    private fun synchronizeConversationDeletions() {
+        val deletions =
+            authenticatedRequest("GET", "$server/v1/conversations/deletions", null) as JSONArray
+        var changed = false
+        for (index in 0 until deletions.length()) {
+            val deletion = deletions.getJSONObject(index)
+            changed = removeConversationHistory(deletion.getString("peer_nickname")) || changed
+            authenticatedRequest(
+                "POST",
+                "$server/v1/conversations/deletions/${deletion.getLong("deletion_id")}",
+                null,
+            )
+        }
+        if (changed) persist()
+    }
+
+    private fun removeConversationHistory(peer: String): Boolean {
+        val normalized = normalizePeer(peer)
+        val history = historyJson()
+        var changed = false
+        for (index in history.length() - 1 downTo 0) {
+            if (history.getJSONObject(index).optString("peer") == normalized) {
+                history.remove(index)
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private fun normalizePeer(peer: String): String =
+        peer.trim().removePrefix("@").lowercase().also {
+            require(it.matches(Regex("[a-z0-9_]{3,32}"))) { "Некорректный никнейм" }
+        }
 
     private fun persist() {
         val plaintext = store.snapshot().toString().encodeToByteArray()

@@ -10,7 +10,6 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -83,6 +82,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -122,6 +122,8 @@ fun ConversationScreen(
     voiceRecording: Boolean,
     identityChanged: Boolean,
     isBlocked: Boolean,
+    peerOnline: Boolean,
+    peerTyping: Boolean,
     onDraftChange: (String) -> Unit,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
@@ -210,6 +212,21 @@ fun ConversationScreen(
             }
             Box(Modifier.clickable(onClick = onOpenProfile)) {
                 ProfileAvatar(displayName?.ifBlank { recipient } ?: recipient, avatar, 44)
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (peerOnline && !isBlocked) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outline
+                            },
+                        ),
+                )
             }
             Spacer(Modifier.size(11.dp))
             Column(Modifier.weight(1f).clickable(onClick = onOpenProfile)) {
@@ -227,11 +244,19 @@ fun ConversationScreen(
                         when {
                             isBlocked -> "в игноре"
                             identityChanged -> "ключ изменился — нужна проверка"
-                            displayName?.isNotBlank() == true -> "@$recipient · E2EE"
-                            else -> "сквозное шифрование"
+                            peerTyping -> "печатает…"
+                            peerOnline -> "в сети"
+                            else -> "не в сети · E2EE"
                         },
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (identityChanged || isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        color =
+                            if (identityChanged || isBlocked) {
+                                MaterialTheme.colorScheme.error
+                            } else if (peerTyping || peerOnline) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -299,21 +324,13 @@ fun ConversationScreen(
                 ),
             ),
         ) {
-            val dotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.055f)
-            Canvas(Modifier.fillMaxSize()) {
-                val gap = 54.dp.toPx()
-                var y = gap / 2
-                var row = 0
-                while (y < size.height) {
-                    var x = if (row % 2 == 0) gap / 2 else gap
-                    while (x < size.width) {
-                        drawCircle(dotColor, radius = 1.4.dp.toPx(), center = androidx.compose.ui.geometry.Offset(x, y))
-                        x += gap
-                    }
-                    y += gap
-                    row++
-                }
-            }
+            Image(
+                painter = painterResource(R.drawable.chat_background),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alpha = 0.32f,
+                modifier = Modifier.fillMaxSize(),
+            )
 
             if (history.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

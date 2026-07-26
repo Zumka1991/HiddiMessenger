@@ -18,6 +18,8 @@ class RealtimeConnection {
     sealed interface Event {
         data object Connected : Event
         data class SyncRequired(val kind: String) : Event
+        data class Presence(val nickname: String, val online: Boolean) : Event
+        data class Typing(val nickname: String, val typing: Boolean) : Event
         data class Disconnected(val cause: Throwable?) : Event
     }
 
@@ -30,14 +32,43 @@ class RealtimeConnection {
     private var socket: WebSocket? = null
     private var terminalEventSent = AtomicBoolean(false)
 
-    fun connect(profile: AccountProfile) {
+    fun connect(profile: AccountProfile, invisible: Boolean = false) {
         terminalEventSent = AtomicBoolean(false)
         socket?.cancel()
         val request = Request.Builder()
             .url(profile.serverUrl.toWebSocketUrl() + "/v1/realtime")
             .header("Authorization", "Bearer ${profile.accessToken}")
+            .header("X-Hiddi-Invisible", invisible.toString())
             .build()
         socket = client.newWebSocket(request, listener())
+    }
+
+    fun subscribePresence(nickname: String) {
+        send("presence_subscribe", nickname, null)
+    }
+
+    fun sendTyping(nickname: String, typing: Boolean) {
+        send("typing", nickname, typing)
+    }
+
+    fun setVisible(visible: Boolean) {
+        socket?.send(
+            JSONObject()
+                .put("version", 1)
+                .put("kind", "visibility")
+                .put("visible", visible)
+                .toString(),
+        )
+    }
+
+    private fun send(kind: String, nickname: String, typing: Boolean?) {
+        val payload =
+            JSONObject()
+                .put("version", 1)
+                .put("kind", kind)
+                .put("nickname", nickname)
+        typing?.let { payload.put("typing", it) }
+        socket?.send(payload.toString())
     }
 
     fun close() {
@@ -56,9 +87,21 @@ class RealtimeConnection {
             runCatching {
                 val payload = JSONObject(text)
                 check(payload.optInt("version") == 1) { "Unsupported realtime protocol" }
-                payload.getString("kind")
-            }.onSuccess { kind ->
-                events.trySend(Event.SyncRequired(kind))
+                when (val kind = payload.getString("kind")) {
+                    "presence" ->
+                        Event.Presence(
+                            nickname = payload.getString("nickname"),
+                            online = payload.getBoolean("online"),
+                        )
+                    "typing" ->
+                        Event.Typing(
+                            nickname = payload.getString("nickname"),
+                            typing = payload.optBoolean("typing"),
+                        )
+                    else -> Event.SyncRequired(kind)
+                }
+            }.onSuccess { event ->
+                events.trySend(event)
             }.onFailure {
                 webSocket.close(1003, "invalid realtime event")
             }

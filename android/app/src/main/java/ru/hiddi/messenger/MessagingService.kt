@@ -23,6 +23,7 @@ import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.EncryptedChatHistory
+import ru.hiddi.messenger.security.PrivacySettingsStore
 import ru.hiddi.messenger.security.SignalStateRepository
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -35,14 +36,42 @@ class MessagingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var realtimeJob: Job? = null
     private var realtimeConnection: RealtimeConnection? = null
+    @Volatile private var watchedPeer: String? = null
+    @Volatile private var invisibleMode: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
+        invisibleMode = PrivacySettingsStore(this).invisibleMode()
         createNotificationChannels()
         startForeground(FOREGROUND_NOTIFICATION_ID, foregroundNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_WATCH_PRESENCE -> {
+                watchedPeer =
+                    intent.getStringExtra(EXTRA_PEER)
+                        ?.trim()
+                        ?.removePrefix("@")
+                        ?.lowercase()
+                        ?.takeIf(String::isNotBlank)
+                watchedPeer?.let { realtimeConnection?.subscribePresence(it) }
+            }
+            ACTION_TYPING -> {
+                val peer = intent.getStringExtra(EXTRA_PEER)
+                if (!peer.isNullOrBlank()) {
+                    realtimeConnection?.sendTyping(
+                        peer,
+                        intent.getBooleanExtra(EXTRA_TYPING, false) && !invisibleMode,
+                    )
+                }
+            }
+            ACTION_SET_INVISIBLE -> {
+                invisibleMode = intent.getBooleanExtra(EXTRA_INVISIBLE, false)
+                PrivacySettingsStore(this).setInvisibleMode(invisibleMode)
+                realtimeConnection?.setVisible(!invisibleMode)
+            }
+        }
         if (realtimeJob?.isActive != true) {
             publishConnection(STATE_CONNECTING)
             realtimeJob = serviceScope.launch { runRealtime() }
@@ -83,7 +112,7 @@ class MessagingService : Service() {
             val connection = RealtimeConnection()
             realtimeConnection = connection
             publishConnection(STATE_CONNECTING)
-            connection.connect(profile)
+            connection.connect(profile, invisibleMode)
             try {
                 var connected = false
                 while (serviceScope.isActive) {
@@ -92,6 +121,23 @@ class MessagingService : Service() {
                             connected = true
                             retryDelay = 1_000L
                             publishConnection(STATE_ONLINE)
+                            watchedPeer?.let(connection::subscribePresence)
+                        }
+                        is RealtimeConnection.Event.Presence -> {
+                            sendBroadcast(
+                                Intent(ACTION_PRESENCE_CHANGED)
+                                    .setPackage(packageName)
+                                    .putExtra(EXTRA_PEER, event.nickname)
+                                    .putExtra(EXTRA_ONLINE, event.online),
+                            )
+                        }
+                        is RealtimeConnection.Event.Typing -> {
+                            sendBroadcast(
+                                Intent(ACTION_TYPING_CHANGED)
+                                    .setPackage(packageName)
+                                    .putExtra(EXTRA_PEER, event.nickname)
+                                    .putExtra(EXTRA_TYPING, event.typing),
+                            )
                         }
                         is RealtimeConnection.Event.SyncRequired -> {
                             synchronize(
@@ -307,8 +353,17 @@ class MessagingService : Service() {
         const val ACTION_GROUPS_UPDATED = "ru.hiddi.messenger.GROUPS_UPDATED"
         const val ACTION_PROFILES_UPDATED = "ru.hiddi.messenger.PROFILES_UPDATED"
         const val ACTION_CONNECTION_CHANGED = "ru.hiddi.messenger.CONNECTION_CHANGED"
+        const val ACTION_WATCH_PRESENCE = "ru.hiddi.messenger.WATCH_PRESENCE"
+        const val ACTION_TYPING = "ru.hiddi.messenger.TYPING"
+        const val ACTION_SET_INVISIBLE = "ru.hiddi.messenger.SET_INVISIBLE"
+        const val ACTION_PRESENCE_CHANGED = "ru.hiddi.messenger.PRESENCE_CHANGED"
+        const val ACTION_TYPING_CHANGED = "ru.hiddi.messenger.TYPING_CHANGED"
         const val EXTRA_OPEN_PEER = "ru.hiddi.messenger.extra.OPEN_PEER"
         const val EXTRA_CONNECTION_STATE = "ru.hiddi.messenger.extra.CONNECTION_STATE"
+        const val EXTRA_PEER = "ru.hiddi.messenger.extra.PEER"
+        const val EXTRA_TYPING = "ru.hiddi.messenger.extra.TYPING"
+        const val EXTRA_INVISIBLE = "ru.hiddi.messenger.extra.INVISIBLE"
+        const val EXTRA_ONLINE = "ru.hiddi.messenger.extra.ONLINE"
         const val STATE_CONNECTING = "connecting"
         const val STATE_ONLINE = "online"
         const val STATE_OFFLINE = "offline"

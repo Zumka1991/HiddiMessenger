@@ -4,6 +4,7 @@ data class HiddiProfile(
     val nickname: String,
     val displayName: String,
     val bio: String,
+    val avatarVersion: String? = null,
 )
 
 data class ChatEntry(
@@ -23,6 +24,11 @@ data class DeviceLinkResult(
 data class RegistrationResult(
     val nickname: String,
     val recoveryKey: String,
+)
+
+data class SafetyNumberInfo(
+    val value: String,
+    val trusted: Boolean,
 )
 
 sealed interface AppScreen {

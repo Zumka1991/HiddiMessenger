@@ -1,5 +1,6 @@
 package ru.hiddi.messenger
 
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -65,6 +68,7 @@ import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.network.UserSearchResult
 import ru.hiddi.messenger.security.sanitizeImage
 import ru.hiddi.messenger.security.AndroidKeystoreSecretStore
+import ru.hiddi.messenger.security.PrivacySettingsStore
 import ru.hiddi.messenger.security.SignalCryptoBoundary
 import ru.hiddi.messenger.security.deviceLinkQrBitmap
 
@@ -78,6 +82,8 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val privacySettings = remember { PrivacySettingsStore(context) }
+    var invisibleMode by remember { mutableStateOf(privacySettings.invisibleMode()) }
     var profile by remember { mutableStateOf<UserSearchResult?>(null) }
     var displayName by remember { mutableStateOf("") }
     var bio by remember { mutableStateOf("") }
@@ -340,6 +346,38 @@ fun SettingsScreen(
                             "пользователям. Сообщения и ключи по-прежнему защищены E2EE.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Режим невидимки", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Не показывать статус «в сети» и набор текста",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = invisibleMode,
+                        onCheckedChange = { enabled ->
+                            invisibleMode = enabled
+                            ContextCompat.startForegroundService(
+                                context,
+                                Intent(context, MessagingService::class.java)
+                                    .setAction(MessagingService.ACTION_SET_INVISIBLE)
+                                    .putExtra(MessagingService.EXTRA_INVISIBLE, enabled),
+                            )
+                        },
                     )
                 }
             }

@@ -147,6 +147,9 @@ fun ChatScreen(
     var historyRevision by remember { mutableIntStateOf(0) }
     var connection by remember { mutableStateOf(ServerConnection.CHECKING) }
     var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
+    var peerOnline by remember { mutableStateOf(false) }
+    var peerTyping by remember { mutableStateOf(false) }
+    var typingRevision by remember { mutableIntStateOf(0) }
     var currentPublicProfile by remember { mutableStateOf<UserSearchResult?>(null) }
     var currentAvatar by remember { mutableStateOf<ByteArray?>(null) }
     var knownProfiles by remember { mutableStateOf(emptyMap<String, UserSearchResult>()) }
@@ -650,10 +653,43 @@ fun ChatScreen(
     }
 
     LaunchedEffect(recipient) {
+        peerOnline = false
+        peerTyping = false
+        ContextCompat.startForegroundService(
+            context,
+            Intent(context, MessagingService::class.java)
+                .setAction(MessagingService.ACTION_WATCH_PRESENCE)
+                .apply {
+                    recipient?.let { putExtra(MessagingService.EXTRA_PEER, it) }
+                },
+        )
         recipient?.let {
             historyStore.markRead(it)
             scope.launch { runCatching { api.markPeerMessagesRead(profile, it) } }
             reloadVisibleHistory(it)
+        }
+    }
+
+    LaunchedEffect(recipient, draft) {
+        val target = recipient ?: return@LaunchedEffect
+        fun publishTyping(typing: Boolean) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, MessagingService::class.java)
+                    .setAction(MessagingService.ACTION_TYPING)
+                    .putExtra(MessagingService.EXTRA_PEER, target)
+                    .putExtra(MessagingService.EXTRA_TYPING, typing),
+            )
+        }
+        if (draft.isBlank()) {
+            publishTyping(false)
+        } else {
+            publishTyping(true)
+            try {
+                delay(1_800)
+            } finally {
+                publishTyping(false)
+            }
         }
     }
 
@@ -731,6 +767,25 @@ fun ChatScreen(
                     MessagingService.ACTION_PROFILES_UPDATED -> {
                         scope.launch { refreshKnownProfiles() }
                     }
+                    MessagingService.ACTION_PRESENCE_CHANGED -> {
+                        if (intent.getStringExtra(MessagingService.EXTRA_PEER) == recipient) {
+                            peerOnline =
+                                intent.getBooleanExtra(MessagingService.EXTRA_ONLINE, false)
+                        }
+                    }
+                    MessagingService.ACTION_TYPING_CHANGED -> {
+                        if (intent.getStringExtra(MessagingService.EXTRA_PEER) == recipient) {
+                            peerTyping =
+                                intent.getBooleanExtra(MessagingService.EXTRA_TYPING, false)
+                            val revision = ++typingRevision
+                            if (peerTyping) {
+                                scope.launch {
+                                    delay(3_000)
+                                    if (typingRevision == revision) peerTyping = false
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -742,6 +797,8 @@ fun ChatScreen(
                 addAction(MessagingService.ACTION_CONNECTION_CHANGED)
                 addAction(MessagingService.ACTION_GROUPS_UPDATED)
                 addAction(MessagingService.ACTION_PROFILES_UPDATED)
+                addAction(MessagingService.ACTION_PRESENCE_CHANGED)
+                addAction(MessagingService.ACTION_TYPING_CHANGED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -1063,6 +1120,8 @@ fun ChatScreen(
                 voiceRecording = voiceRecording,
                 identityChanged = identityChanged,
                 isBlocked = recipient in blockedUsers,
+                peerOnline = peerOnline,
+                peerTyping = peerTyping,
                 onDraftChange = { draft = it },
                 onLoadOlder = ::loadOlderHistory,
                 onBack = { recipient = null; draft = ""; focusManager.clearFocus() },

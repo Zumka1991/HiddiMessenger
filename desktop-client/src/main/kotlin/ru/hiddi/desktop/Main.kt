@@ -4,6 +4,7 @@ import androidx.compose.desktop.ui.tooling.preview.Preview
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -30,8 +31,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,15 +47,20 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Contacts
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
@@ -66,6 +77,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -80,11 +92,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
@@ -98,7 +113,14 @@ import java.nio.file.Path
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Cursor
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.io.File
+import javax.imageio.IIOImage
+import javax.imageio.ImageIO
+import javax.imageio.ImageWriteParam
+import org.jetbrains.skia.Image as SkiaImage
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -485,22 +507,38 @@ private fun MessengerScreen(session: HiddiSession) {
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
     var listWidth by remember { mutableStateOf(320.dp) }
+    var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
+    var peerOnline by remember { mutableStateOf(false) }
+    var peerTyping by remember { mutableStateOf(false) }
+    var typingRevision by remember { mutableStateOf(0) }
+    var invisibleMode by remember(session) { mutableStateOf(session.invisibleMode()) }
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val realtime = remember(session) { DesktopRealtime(session.server, session.accessToken) }
 
     suspend fun synchronizeInbox() {
-        val incoming = runCatching { withContext(Dispatchers.IO) { session.syncInbox() } }.getOrDefault(emptyList())
-        incoming.forEach { entry -> if (messages.none { it.messageId == entry.messageId }) messages += entry }
+        val snapshot = runCatching {
+            withContext(Dispatchers.IO) {
+                session.syncInbox()
+                session.history()
+            }
+        }.getOrNull() ?: return
+        messages.clear()
+        messages.addAll(snapshot)
     }
 
     DisposableEffect(session) {
-        realtime.connect()
+        realtime.connect(invisibleMode)
         onDispose {
             realtime.close()
             session.close()
         }
+    }
+    LaunchedEffect(session) {
+        blockedUsers =
+            runCatching { withContext(Dispatchers.IO) { session.blockedUsers() } }
+                .getOrDefault(emptySet())
     }
     LaunchedEffect(session) {
         while (true) {
@@ -514,13 +552,38 @@ private fun MessengerScreen(session: HiddiSession) {
             runCatching { withContext(Dispatchers.IO) { session.search(query) } }
                 .getOrDefault(emptyList())
     }
-    LaunchedEffect(realtime) {
+    LaunchedEffect(selected?.nickname) {
+        peerOnline = false
+        peerTyping = false
+        selected?.let { realtime.subscribePresence(it.nickname) }
+    }
+    LaunchedEffect(realtime, selected?.nickname, invisibleMode) {
         for (event in realtime.events) {
             when (event) {
+                DesktopRealtime.Event.Connected -> {
+                    selected?.let { realtime.subscribePresence(it.nickname) }
+                }
                 DesktopRealtime.Event.SyncRequired -> synchronizeInbox()
+                is DesktopRealtime.Event.Presence -> {
+                    if (event.nickname == selected?.nickname) {
+                        peerOnline = event.online
+                    }
+                }
+                is DesktopRealtime.Event.Typing -> {
+                    if (event.nickname == selected?.nickname) {
+                        peerTyping = event.typing
+                        val revision = ++typingRevision
+                        if (event.typing) {
+                            scope.launch {
+                                delay(3_000)
+                                if (typingRevision == revision) peerTyping = false
+                            }
+                        }
+                    }
+                }
                 DesktopRealtime.Event.Disconnected -> {
                     delay(500)
-                    realtime.connect()
+                    realtime.connect(invisibleMode)
                 }
             }
         }
@@ -562,12 +625,36 @@ private fun MessengerScreen(session: HiddiSession) {
             }
             ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(280.dp, 480.dp) }
             if (section == DesktopSection.Settings) {
-                DesktopSettingsDetail(session, Modifier.weight(1f).fillMaxHeight())
+                DesktopSettingsDetail(
+                    session = session,
+                    invisibleMode = invisibleMode,
+                    onInvisibleModeChange = { enabled ->
+                        invisibleMode = enabled
+                        realtime.setVisible(!enabled)
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    session.setInvisibleMode(enabled)
+                                }
+                            }.onFailure {
+                                invisibleMode = !enabled
+                                realtime.setVisible(enabled)
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                )
             } else {
                 selected?.let { profile ->
                     ChatPane(
                         profile = profile,
                         messages = messages.filter { it.peer == profile.nickname },
+                        isBlocked = profile.nickname in blockedUsers,
+                        peerOnline = peerOnline,
+                        peerTyping = peerTyping,
+                        onTypingChange = { typing ->
+                            realtime.sendTyping(profile.nickname, typing && !invisibleMode)
+                        },
                         onSend = { text, report ->
                             scope.launch {
                                 runCatching {
@@ -577,6 +664,31 @@ private fun MessengerScreen(session: HiddiSession) {
                                     report(null)
                                 }.onFailure { report(it.message ?: "Не удалось отправить") }
                             }
+                        },
+                        onLoadSafetyNumber = {
+                            withContext(Dispatchers.IO) { session.safetyNumber(profile.nickname) }
+                        },
+                        onTrustSafetyNumber = { value ->
+                            withContext(Dispatchers.IO) {
+                                session.trustSafetyNumber(profile.nickname, value)
+                            }
+                        },
+                        onClearConversation = { forBoth ->
+                            withContext(Dispatchers.IO) {
+                                session.clearConversation(profile.nickname, forBoth)
+                            }
+                            messages.removeAll { it.peer == profile.nickname }
+                        },
+                        onSetBlocked = { blocked ->
+                            withContext(Dispatchers.IO) {
+                                session.setBlocked(profile.nickname, blocked)
+                            }
+                            blockedUsers =
+                                if (blocked) {
+                                    blockedUsers + profile.nickname
+                                } else {
+                                    blockedUsers - profile.nickname
+                                }
                         },
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
@@ -785,18 +897,286 @@ private fun DesktopSettingsPane(session: HiddiSession, online: Boolean) {
 }
 
 @Composable
-private fun DesktopSettingsDetail(session: HiddiSession, modifier: Modifier = Modifier) {
-    Column(modifier.background(Ink).padding(42.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("Профиль и безопасность", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-        Text("@${session.nickname}", color = Mint, fontSize = 18.sp)
-        Surface(color = PanelRaised, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Это устройство", fontWeight = FontWeight.Bold)
-                Text("Linux · устройство ${session.deviceNumber}", color = TextMuted)
-                Text("Signal-ключи защищены локальным паролем и не покидают компьютер.", color = TextMuted, fontSize = 13.sp)
+private fun DesktopSettingsDetail(
+    session: HiddiSession,
+    invisibleMode: Boolean,
+    onInvisibleModeChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var profile by remember(session) { mutableStateOf<HiddiProfile?>(null) }
+    var displayName by remember(session) { mutableStateOf("") }
+    var bio by remember(session) { mutableStateOf("") }
+    var avatar by remember(session) { mutableStateOf<ByteArray?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+
+    suspend fun reload() {
+        val loaded = withContext(Dispatchers.IO) { session.profile() }
+        val image =
+            loaded.avatarVersion?.let {
+                runCatching { withContext(Dispatchers.IO) { session.avatar(loaded.nickname) } }
+                    .getOrNull()
+            }
+        profile = loaded
+        displayName = loaded.displayName
+        bio = loaded.bio
+        avatar = image
+    }
+
+    LaunchedEffect(session) {
+        runCatching { reload() }
+            .onFailure { status = it.message ?: "Не удалось загрузить профиль" }
+    }
+
+    val avatarBitmap =
+        remember(avatar?.contentHashCode()) {
+            avatar?.let { bytes ->
+                runCatching { SkiaImage.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
             }
         }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(42.dp),
+        modifier = modifier.background(Ink),
+    ) {
+        item {
+            Text("Профиль и безопасность", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text("@${session.nickname}", color = Mint, fontSize = 18.sp)
+        }
+        item {
+            Surface(
+                color = PanelRaised,
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(20.dp),
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.size(92.dp).clip(CircleShape)
+                            .background(Color(0xFF243B43)),
+                    ) {
+                        if (avatarBitmap != null) {
+                            Image(
+                                bitmap = avatarBitmap,
+                                contentDescription = "Аватар",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                displayName.ifBlank { session.nickname }
+                                    .firstOrNull()?.uppercase() ?: "H",
+                                color = Mint,
+                                fontSize = 30.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(18.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            displayName.ifBlank { "@${session.nickname}" },
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text("@${session.nickname}", color = Mint)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                enabled = !busy,
+                                onClick = {
+                                    val file = chooseAvatarImage() ?: return@OutlinedButton
+                                    busy = true
+                                    status = "Подготавливаем аватар…"
+                                    scope.launch {
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                sanitizeAvatar(file).also(session::uploadAvatar)
+                                            }
+                                        }.onSuccess {
+                                            avatar = it
+                                            status = "Аватар обновлён"
+                                            runCatching { reload() }
+                                        }.onFailure {
+                                            status = it.message ?: "Не удалось обновить аватар"
+                                        }
+                                        busy = false
+                                    }
+                                },
+                            ) {
+                                Text(if (avatar == null) "Добавить фото" else "Сменить фото")
+                            }
+                            if (avatar != null) {
+                                TextButton(
+                                    enabled = !busy,
+                                    onClick = {
+                                        busy = true
+                                        scope.launch {
+                                            runCatching {
+                                                withContext(Dispatchers.IO) { session.deleteAvatar() }
+                                            }.onSuccess {
+                                                avatar = null
+                                                profile = profile?.copy(avatarVersion = null)
+                                                status = "Аватар удалён"
+                                            }.onFailure {
+                                                status = it.message ?: "Не удалось удалить аватар"
+                                            }
+                                            busy = false
+                                        }
+                                    },
+                                ) { Text("Удалить", color = Color(0xFFFF8D91)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Text("ПРОФИЛЬ", color = Mint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            CorporateTextField(
+                value = displayName,
+                onValueChange = { if (it.length <= 64) displayName = it },
+                placeholder = "Видимое имя",
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            CorporateTextField(
+                value = bio,
+                onValueChange = { if (it.length <= 250) bio = it },
+                placeholder = "О себе",
+                enabled = !busy,
+                singleLine = false,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 110.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            Button(
+                enabled = !busy,
+                onClick = {
+                    busy = true
+                    status = "Сохраняем профиль…"
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                session.updateProfile(displayName, bio)
+                            }
+                        }.onSuccess {
+                            profile = it
+                            displayName = it.displayName
+                            bio = it.bio
+                            status = "Профиль сохранён"
+                        }.onFailure {
+                            status = it.message ?: "Не удалось сохранить профиль"
+                        }
+                        busy = false
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink),
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("Сохранить", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        item {
+            Surface(
+                color = PanelRaised,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Режим невидимки", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Не показывать статус «в сети» и набор текста",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Switch(
+                            checked = invisibleMode,
+                            onCheckedChange = onInvisibleModeChange,
+                        )
+                    }
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                    Text("Это устройство", fontWeight = FontWeight.Bold)
+                    Text("Linux · устройство ${session.deviceNumber}", color = TextMuted)
+                    Text(
+                        "Signal-ключи и история защищены локальным паролем и не покидают компьютер.",
+                        color = TextMuted,
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+        }
+        status?.let { message ->
+            item { Text(message, color = TextMuted, fontSize = 13.sp) }
+        }
     }
+}
+
+private fun chooseAvatarImage(): File? {
+    val dialog = FileDialog(null as Frame?, "Выберите аватар Hiddi", FileDialog.LOAD)
+    dialog.setFilenameFilter { _, name ->
+        name.endsWith(".jpg", true) ||
+            name.endsWith(".jpeg", true) ||
+            name.endsWith(".png", true) ||
+            name.endsWith(".webp", true)
+    }
+    dialog.isVisible = true
+    return dialog.file?.let { File(dialog.directory, it) }
+}
+
+private fun sanitizeAvatar(file: File): ByteArray {
+    val source = ImageIO.read(file) ?: error("Не удалось прочитать изображение")
+    val side = minOf(source.width, source.height)
+    require(side > 0) { "Изображение пустое" }
+    val target = BufferedImage(512, 512, BufferedImage.TYPE_INT_RGB)
+    val graphics = target.createGraphics()
+    try {
+        graphics.setRenderingHint(
+            RenderingHints.KEY_INTERPOLATION,
+            RenderingHints.VALUE_INTERPOLATION_BICUBIC,
+        )
+        val x = (source.width - side) / 2
+        val y = (source.height - side) / 2
+        graphics.drawImage(source, 0, 0, 512, 512, x, y, x + side, y + side, null)
+    } finally {
+        graphics.dispose()
+    }
+    val writer = ImageIO.getImageWritersByFormatName("jpeg").next()
+    try {
+        var quality = 0.9f
+        while (quality >= 0.45f) {
+            val output = ByteArrayOutputStream()
+            ImageIO.createImageOutputStream(output).use { stream ->
+                writer.output = stream
+                val params = writer.defaultWriteParam.apply {
+                    compressionMode = ImageWriteParam.MODE_EXPLICIT
+                    compressionQuality = quality
+                }
+                writer.write(null, IIOImage(target, null, null), params)
+            }
+            val bytes = output.toByteArray()
+            if (bytes.size <= 512 * 1024) return bytes
+            bytes.fill(0)
+            quality -= 0.1f
+        }
+    } finally {
+        writer.dispose()
+        source.flush()
+        target.flush()
+    }
+    error("Не удалось уменьшить аватар до 512 КиБ")
 }
 
 @Composable
@@ -875,14 +1255,32 @@ private fun Avatar(profile: HiddiProfile, size: Dp = 42.dp) {
 private fun ChatPane(
     profile: HiddiProfile,
     messages: List<ChatEntry>,
+    isBlocked: Boolean,
+    peerOnline: Boolean,
+    peerTyping: Boolean,
+    onTypingChange: (Boolean) -> Unit,
     onSend: (String, (String?) -> Unit) -> Unit,
+    onLoadSafetyNumber: suspend () -> SafetyNumberInfo,
+    onTrustSafetyNumber: suspend (String) -> Unit,
+    onClearConversation: suspend (Boolean) -> Unit,
+    onSetBlocked: suspend (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draft by remember(profile.nickname) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showClearDialog by remember { mutableStateOf(false) }
+    var clearForBoth by remember { mutableStateOf(false) }
+    var showBlockDialog by remember { mutableStateOf(false) }
+    var showSafetyDialog by remember { mutableStateOf(false) }
+    var safetyInfo by remember { mutableStateOf<SafetyNumberInfo?>(null) }
+    var actionBusy by remember { mutableStateOf(false) }
+    var refocusRevision by remember(profile.nickname) { mutableStateOf(0) }
     var forceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
     var handledForceScrollRevision by remember(profile.nickname) { mutableStateOf(0) }
+    val actionScope = rememberCoroutineScope()
+    val inputFocusRequester = remember(profile.nickname) { FocusRequester() }
     val messageListState = rememberLazyListState()
     val isAtNewestMessage by remember {
         derivedStateOf {
@@ -892,13 +1290,15 @@ private fun ChatPane(
         }
     }
     fun submit() {
-        if (draft.isBlank() || sending) return
+        if (draft.isBlank() || sending || isBlocked) return
         val text = draft
+        onTypingChange(false)
         sending = true
         error = null
         onSend(text) { failure ->
             sending = false
             error = failure
+            refocusRevision++
             if (failure == null) {
                 draft = ""
                 forceScrollRevision++
@@ -915,62 +1315,187 @@ private fun ChatPane(
     LaunchedEffect(profile.nickname) {
         if (messages.isNotEmpty()) messageListState.scrollToItem(messages.size)
     }
+    LaunchedEffect(profile.nickname, refocusRevision, sending) {
+        if (!sending && !isBlocked) inputFocusRequester.requestFocus()
+    }
+    LaunchedEffect(profile.nickname, draft, isBlocked) {
+        if (draft.isNotBlank() && !isBlocked) {
+            onTypingChange(true)
+            delay(1_800)
+            onTypingChange(false)
+        } else {
+            onTypingChange(false)
+        }
+    }
+    DisposableEffect(profile.nickname) {
+        onDispose { onTypingChange(false) }
+    }
     Column(modifier.background(Color(0xFF090F15))) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().background(Color(0xFF111923)).padding(horizontal = 28.dp, vertical = 17.dp),
         ) {
-            Avatar(profile, 46.dp)
+            Box {
+                Avatar(profile, 46.dp)
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF111923))
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(if (peerOnline && !isBlocked) Mint else Color(0xFF66717C)),
+                )
+            }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     profile.displayName.ifBlank { "@${profile.nickname}" },
                     fontWeight = FontWeight.Bold,
                 )
-                Text("В сети", color = Mint, fontSize = 12.sp)
+                Text(
+                    when {
+                        isBlocked -> "В игноре"
+                        peerTyping -> "печатает…"
+                        peerOnline -> "В сети"
+                        else -> "Не в сети"
+                    },
+                    color =
+                        when {
+                            isBlocked -> Color(0xFFFF8D91)
+                            peerTyping || peerOnline -> Mint
+                            else -> TextMuted
+                        },
+                    fontSize = 12.sp,
+                )
             }
             IconButton(onClick = {}) { Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Mint) }
-            IconButton(onClick = {}) { Icon(Icons.Rounded.MoreVert, contentDescription = "Меню", tint = TextMuted) }
-        }
-        LazyColumn(
-            state = messageListState,
-            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
-            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 24.dp),
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-        ) {
-            item {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Surface(color = Color(0xFF202934), shape = RoundedCornerShape(14.dp)) {
-                        Text("Сегодня", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp))
-                    }
+            Box {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "Меню", tint = TextMuted)
                 }
-            }
-            if (messages.isEmpty()) {
-                item {
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
                     Text(
-                        "Начните защищённый диалог. Сейчас Linux-клиент умеет безопасно " +
-                            "отправлять сообщения на основное устройство собеседника.",
-                        color = TextMuted,
+                        "БЕЗОПАСНОСТЬ",
+                        color = Mint,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Проверить E2EE") },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.Security, contentDescription = null, tint = Mint)
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            safetyInfo = null
+                            showSafetyDialog = true
+                            actionBusy = true
+                            actionScope.launch {
+                                runCatching { onLoadSafetyNumber() }
+                                    .onSuccess { safetyInfo = it }
+                                    .onFailure {
+                                        error = it.message ?: "Не удалось получить код безопасности"
+                                        showSafetyDialog = false
+                                    }
+                                actionBusy = false
+                            }
+                        },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Очистить чат") },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.DeleteSweep, contentDescription = null, tint = TextMuted)
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            clearForBoth = false
+                            showClearDialog = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isBlocked) "Разблокировать" else "Заблокировать") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Block,
+                                contentDescription = null,
+                                tint = if (isBlocked) Mint else Color(0xFFFF7C8B),
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            showBlockDialog = true
+                        },
                     )
                 }
             }
-            items(messages) { message ->
-                Row(
-                    horizontalArrangement =
-                        if (message.outgoing) Arrangement.End else Arrangement.Start,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Surface(
-                        color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
-                        shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
-                        modifier = Modifier.widthIn(max = 520.dp),
+        }
+        Box(
+            Modifier.weight(1f).fillMaxWidth().background(Color(0xFF071017)),
+        ) {
+            val backgroundBitmap =
+                remember {
+                    object {}.javaClass.getResourceAsStream("/chat_background.webp")
+                        ?.use { input ->
+                            runCatching {
+                                SkiaImage.makeFromEncoded(input.readBytes()).toComposeImageBitmap()
+                            }.getOrNull()
+                        }
+                }
+            if (backgroundBitmap != null) {
+                Image(
+                    bitmap = backgroundBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    alpha = 0.34f,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            LazyColumn(
+                state = messageListState,
+                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+                contentPadding = PaddingValues(horizontal = 34.dp, vertical = 24.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                item {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Surface(color = Color(0xFF202934), shape = RoundedCornerShape(14.dp)) {
+                            Text("Сегодня", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp))
+                        }
+                    }
+                }
+                if (messages.isEmpty()) {
+                    item {
+                        Text(
+                            "Начните защищённый диалог. Сейчас Linux-клиент умеет безопасно " +
+                                "отправлять сообщения на основное устройство собеседника.",
+                            color = TextMuted,
+                        )
+                    }
+                }
+                items(messages) { message ->
+                    Row(
+                        horizontalArrangement =
+                            if (message.outgoing) Arrangement.End else Arrangement.Start,
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
-                            horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                        Surface(
+                            color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
+                            shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
+                            modifier = Modifier.widthIn(max = 520.dp),
                         ) {
-                            Text(message.text)
-                            MessageMeta(message)
+                            Column(
+                                modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                                horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
+                            ) {
+                                Text(message.text)
+                                MessageMeta(message)
+                            }
                         }
                     }
                 }
@@ -986,11 +1511,12 @@ private fun ChatPane(
                     CorporateTextField(
                         value = draft,
                         onValueChange = { draft = it },
-                        placeholder = "Сообщение",
-                        enabled = !sending,
+                        placeholder = if (isBlocked) "Пользователь заблокирован" else "Сообщение",
+                        enabled = !sending && !isBlocked,
                         singleLine = false,
                         maxLines = 5,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 124.dp)
+                            .focusRequester(inputFocusRequester)
                             .onPreviewKeyEvent { event ->
                                 if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) {
                                     return@onPreviewKeyEvent false
@@ -1012,7 +1538,7 @@ private fun ChatPane(
                 }
                 Spacer(Modifier.width(12.dp))
                 FilledIconButton(
-                    enabled = draft.isNotBlank() && !sending,
+                    enabled = draft.isNotBlank() && !sending && !isBlocked,
                     onClick = ::submit,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = Mint,
@@ -1038,6 +1564,167 @@ private fun ChatPane(
                 }
             }
         }
+    }
+    if (showSafetyDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!actionBusy) showSafetyDialog = false },
+            icon = { Icon(Icons.Rounded.Security, contentDescription = null, tint = Mint) },
+            title = { Text("Проверка E2EE") },
+            text = {
+                val info = safetyInfo
+                if (info == null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                        Text("Получаем код безопасности…")
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "Сравните этот код с кодом на устройстве @${profile.nickname}.",
+                            color = TextMuted,
+                        )
+                        Surface(color = PanelRaised, shape = RoundedCornerShape(14.dp)) {
+                            Text(
+                                info.value,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                lineHeight = 25.sp,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
+                        Text(
+                            if (info.trusted) "Код уже подтверждён" else "Подтвердите только после сравнения",
+                            color = if (info.trusted) Mint else Color(0xFFFFC66D),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                val info = safetyInfo
+                TextButton(
+                    enabled = info != null && !actionBusy,
+                    onClick = {
+                        if (info == null || info.trusted) {
+                            showSafetyDialog = false
+                        } else {
+                            actionBusy = true
+                            actionScope.launch {
+                                runCatching { onTrustSafetyNumber(info.value) }
+                                    .onSuccess {
+                                        safetyInfo = info.copy(trusted = true)
+                                        showSafetyDialog = false
+                                    }
+                                    .onFailure {
+                                        error = it.message ?: "Не удалось подтвердить код"
+                                    }
+                                actionBusy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text(if (info?.trusted == true) "Готово" else "Подтвердить")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !actionBusy,
+                    onClick = { showSafetyDialog = false },
+                ) { Text("Закрыть") }
+            },
+        )
+    }
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!actionBusy) showClearDialog = false },
+            icon = { Icon(Icons.Rounded.DeleteSweep, contentDescription = null, tint = TextMuted) },
+            title = { Text("Очистить диалог?") },
+            text = {
+                Column {
+                    Text("Сообщения будут удалены с этого устройства.")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable(enabled = !actionBusy) {
+                            clearForBoth = !clearForBoth
+                        },
+                    ) {
+                        Checkbox(
+                            checked = clearForBoth,
+                            onCheckedChange = { clearForBoth = it },
+                            enabled = !actionBusy,
+                        )
+                        Text("Также удалить у @${profile.nickname}")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !actionBusy,
+                    onClick = {
+                        actionBusy = true
+                        actionScope.launch {
+                            runCatching { onClearConversation(clearForBoth) }
+                                .onSuccess { showClearDialog = false }
+                                .onFailure { error = it.message ?: "Не удалось очистить диалог" }
+                            actionBusy = false
+                        }
+                    },
+                ) { Text("Очистить", color = Color(0xFFFF8D91)) }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !actionBusy,
+                    onClick = { showClearDialog = false },
+                ) { Text("Отмена") }
+            },
+        )
+    }
+    if (showBlockDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!actionBusy) showBlockDialog = false },
+            icon = {
+                Icon(
+                    Icons.Rounded.Block,
+                    contentDescription = null,
+                    tint = if (isBlocked) Mint else Color(0xFFFF7C8B),
+                )
+            },
+            title = { Text(if (isBlocked) "Разблокировать?" else "Заблокировать?") },
+            text = {
+                Text(
+                    if (isBlocked) {
+                        "@${profile.nickname} снова сможет отправлять вам сообщения."
+                    } else {
+                        "Сообщения от @${profile.nickname} больше не будут приниматься."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !actionBusy,
+                    onClick = {
+                        actionBusy = true
+                        actionScope.launch {
+                            runCatching { onSetBlocked(!isBlocked) }
+                                .onSuccess {
+                                    showBlockDialog = false
+                                    refocusRevision++
+                                }
+                                .onFailure { error = it.message ?: "Не удалось изменить блокировку" }
+                            actionBusy = false
+                        }
+                    },
+                ) { Text(if (isBlocked) "Разблокировать" else "Заблокировать") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !actionBusy,
+                    onClick = { showBlockDialog = false },
+                ) { Text("Отмена") }
+            },
+        )
     }
 }
 

@@ -1295,4 +1295,47 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn realtime_presence_tracks_first_and_last_visible_device() {
+        let hub = RealtimeHub::default();
+        let mut presence = hub.subscribe_presence();
+
+        hub.connection_opened("alice-id", "alice");
+        assert!(hub.is_online("alice-id"));
+        let online = presence.recv().await.unwrap();
+        assert_eq!(online.nickname, "alice");
+        assert!(online.online);
+
+        hub.connection_opened("alice-id", "alice");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), presence.recv())
+                .await
+                .is_err()
+        );
+
+        hub.connection_closed("alice-id", "alice");
+        assert!(hub.is_online("alice-id"));
+        hub.connection_closed("alice-id", "alice");
+        assert!(!hub.is_online("alice-id"));
+        assert!(!presence.recv().await.unwrap().online);
+    }
+
+    #[tokio::test]
+    async fn realtime_typing_is_routed_only_to_the_recipient_account() {
+        let hub = RealtimeHub::default();
+        let mut alice = hub.subscribe("alice");
+        let mut bob = hub.subscribe("bob");
+
+        hub.publish_typing("bob", "alice", true);
+        let typing = bob.recv().await.unwrap();
+        assert_eq!(typing.kind, "typing");
+        assert_eq!(typing.nickname.as_deref(), Some("alice"));
+        assert_eq!(typing.typing, Some(true));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), alice.recv())
+                .await
+                .is_err()
+        );
+    }
 }

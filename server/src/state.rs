@@ -23,12 +23,36 @@ pub(crate) struct AppState {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RealtimeEvent {
+    pub(crate) version: u8,
     pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) typing: Option<bool>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug)]
+pub(crate) struct PresenceEvent {
+    pub(crate) account_id: String,
+    pub(crate) nickname: String,
+    pub(crate) online: bool,
+}
+
+#[derive(Clone)]
 pub(crate) struct RealtimeHub {
     accounts: Arc<Mutex<HashMap<String, broadcast::Sender<RealtimeEvent>>>>,
+    visible_connections: Arc<Mutex<HashMap<String, usize>>>,
+    presence: broadcast::Sender<PresenceEvent>,
+}
+
+impl Default for RealtimeHub {
+    fn default() -> Self {
+        Self {
+            accounts: Arc::new(Mutex::new(HashMap::new())),
+            visible_connections: Arc::new(Mutex::new(HashMap::new())),
+            presence: broadcast::channel(256).0,
+        }
+    }
 }
 
 impl RealtimeHub {
@@ -41,6 +65,30 @@ impl RealtimeHub {
     }
 
     pub(crate) fn publish(&self, account_id: &str, kind: &'static str) {
+        self.publish_event(
+            account_id,
+            RealtimeEvent {
+                version: 1,
+                kind,
+                nickname: None,
+                typing: None,
+            },
+        );
+    }
+
+    pub(crate) fn publish_typing(&self, account_id: &str, sender_nickname: &str, typing: bool) {
+        self.publish_event(
+            account_id,
+            RealtimeEvent {
+                version: 1,
+                kind: "typing",
+                nickname: Some(sender_nickname.to_owned()),
+                typing: Some(typing),
+            },
+        );
+    }
+
+    fn publish_event(&self, account_id: &str, event: RealtimeEvent) {
         let sender = {
             let mut accounts = self.accounts.lock().expect("realtime hub mutex poisoned");
             accounts
@@ -48,7 +96,66 @@ impl RealtimeHub {
                 .or_insert_with(|| broadcast::channel(128).0)
                 .clone()
         };
-        let _ = sender.send(RealtimeEvent { kind });
+        let _ = sender.send(event);
+    }
+
+    pub(crate) fn subscribe_presence(&self) -> broadcast::Receiver<PresenceEvent> {
+        self.presence.subscribe()
+    }
+
+    pub(crate) fn is_online(&self, account_id: &str) -> bool {
+        self.visible_connections
+            .lock()
+            .expect("realtime presence mutex poisoned")
+            .get(account_id)
+            .copied()
+            .unwrap_or_default()
+            > 0
+    }
+
+    pub(crate) fn connection_opened(&self, account_id: &str, nickname: &str) {
+        let became_online = {
+            let mut connections = self
+                .visible_connections
+                .lock()
+                .expect("realtime presence mutex poisoned");
+            let count = connections.entry(account_id.to_owned()).or_default();
+            *count += 1;
+            *count == 1
+        };
+        if became_online {
+            let _ = self.presence.send(PresenceEvent {
+                account_id: account_id.to_owned(),
+                nickname: nickname.to_owned(),
+                online: true,
+            });
+        }
+    }
+
+    pub(crate) fn connection_closed(&self, account_id: &str, nickname: &str) {
+        let became_offline = {
+            let mut connections = self
+                .visible_connections
+                .lock()
+                .expect("realtime presence mutex poisoned");
+            let Some(count) = connections.get_mut(account_id) else {
+                return;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                connections.remove(account_id);
+                true
+            } else {
+                false
+            }
+        };
+        if became_offline {
+            let _ = self.presence.send(PresenceEvent {
+                account_id: account_id.to_owned(),
+                nickname: nickname.to_owned(),
+                online: false,
+            });
+        }
     }
 }
 

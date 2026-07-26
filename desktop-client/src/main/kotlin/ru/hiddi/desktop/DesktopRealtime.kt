@@ -20,19 +20,57 @@ class DesktopRealtime(
     private var socket: WebSocket? = null
 
     sealed interface Event {
+        data object Connected : Event
         data object SyncRequired : Event
+        data class Presence(val nickname: String, val online: Boolean) : Event
+        data class Typing(val nickname: String, val typing: Boolean) : Event
         data object Disconnected : Event
     }
 
-    fun connect() {
+    fun connect(invisible: Boolean = false) {
         if (socket != null) return
         client.newWebSocketBuilder()
             .header("Authorization", "Bearer $token")
+            .header("X-Hiddi-Invisible", invisible.toString())
             .connectTimeout(Duration.ofSeconds(10))
             .buildAsync(URI(endpoint), Listener(events) { socket = null })
             .whenComplete { connected, error ->
-                if (error == null) socket = connected else events.trySend(Event.Disconnected)
+                if (error == null) {
+                    socket = connected
+                    events.trySend(Event.Connected)
+                } else {
+                    events.trySend(Event.Disconnected)
+                }
             }
+    }
+
+    fun subscribePresence(nickname: String) {
+        send("presence_subscribe", nickname, null)
+    }
+
+    fun sendTyping(nickname: String, typing: Boolean) {
+        send("typing", nickname, typing)
+    }
+
+    fun setVisible(visible: Boolean) {
+        socket?.sendText(
+            JSONObject()
+                .put("version", 1)
+                .put("kind", "visibility")
+                .put("visible", visible)
+                .toString(),
+            true,
+        )
+    }
+
+    private fun send(kind: String, nickname: String, typing: Boolean?) {
+        val payload =
+            JSONObject()
+                .put("version", 1)
+                .put("kind", kind)
+                .put("nickname", nickname)
+        typing?.let { payload.put("typing", it) }
+        socket?.sendText(payload.toString(), true)
     }
 
     override fun close() {
@@ -54,8 +92,23 @@ class DesktopRealtime(
         override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletableFuture<*>? {
             text.append(data)
             if (last) {
-                runCatching { JSONObject(text.toString()).getString("kind") }
-                    .onSuccess { events.trySend(Event.SyncRequired) }
+                runCatching {
+                    val payload = JSONObject(text.toString())
+                    when (payload.getString("kind")) {
+                        "presence" ->
+                            Event.Presence(
+                                nickname = payload.getString("nickname"),
+                                online = payload.getBoolean("online"),
+                            )
+                        "typing" ->
+                            Event.Typing(
+                                nickname = payload.getString("nickname"),
+                                typing = payload.optBoolean("typing"),
+                            )
+                        else -> Event.SyncRequired
+                    }
+                }
+                    .onSuccess { events.trySend(it) }
                     .onFailure { webSocket.sendClose(1003, "invalid realtime event") }
                 text.setLength(0)
             }
