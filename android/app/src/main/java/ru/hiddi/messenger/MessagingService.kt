@@ -4,10 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,10 +43,24 @@ class MessagingService : Service() {
     private var realtimeConnection: RealtimeConnection? = null
     @Volatile private var watchedPeer: String? = null
     @Volatile private var invisibleMode: Boolean = false
+    private val appVisibilityReceiver =
+        object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_APP_VISIBILITY) return
+                val appVisible = intent.getBooleanExtra(EXTRA_APP_VISIBLE, false)
+                realtimeConnection?.setVisible(appVisible && !invisibleMode)
+            }
+        }
 
     override fun onCreate() {
         super.onCreate()
         invisibleMode = PrivacySettingsStore(this).invisibleMode()
+        ContextCompat.registerReceiver(
+            this,
+            appVisibilityReceiver,
+            IntentFilter(ACTION_APP_VISIBILITY),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         createNotificationChannels()
         startForeground(FOREGROUND_NOTIFICATION_ID, foregroundNotification())
     }
@@ -70,7 +88,7 @@ class MessagingService : Service() {
             ACTION_SET_INVISIBLE -> {
                 invisibleMode = intent.getBooleanExtra(EXTRA_INVISIBLE, false)
                 PrivacySettingsStore(this).setInvisibleMode(invisibleMode)
-                realtimeConnection?.setVisible(!invisibleMode)
+                realtimeConnection?.setVisible(MainActivity.isVisible && !invisibleMode)
             }
         }
         if (realtimeJob?.isActive != true) {
@@ -89,6 +107,7 @@ class MessagingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        runCatching { unregisterReceiver(appVisibilityReceiver) }
         realtimeJob?.cancel()
         realtimeConnection?.close()
         serviceScope.cancel()
@@ -119,7 +138,7 @@ class MessagingService : Service() {
             val connection = RealtimeConnection()
             realtimeConnection = connection
             publishConnection(STATE_CONNECTING)
-            connection.connect(profile, invisibleMode)
+            connection.connect(profile, invisibleMode || !MainActivity.isVisible)
             try {
                 var connected = false
                 while (serviceScope.isActive) {
@@ -127,6 +146,7 @@ class MessagingService : Service() {
                         RealtimeConnection.Event.Connected -> {
                             connected = true
                             retryDelay = 1_000L
+                            connection.setVisible(MainActivity.isVisible && !invisibleMode)
                             publishConnection(STATE_ONLINE)
                             watchedPeer?.let(connection::subscribePresence)
                         }
@@ -385,6 +405,7 @@ class MessagingService : Service() {
         const val ACTION_WATCH_PRESENCE = "ru.hiddi.messenger.WATCH_PRESENCE"
         const val ACTION_TYPING = "ru.hiddi.messenger.TYPING"
         const val ACTION_SET_INVISIBLE = "ru.hiddi.messenger.SET_INVISIBLE"
+        const val ACTION_APP_VISIBILITY = "ru.hiddi.messenger.APP_VISIBILITY"
         const val ACTION_PRESENCE_CHANGED = "ru.hiddi.messenger.PRESENCE_CHANGED"
         const val ACTION_TYPING_CHANGED = "ru.hiddi.messenger.TYPING_CHANGED"
         const val EXTRA_OPEN_PEER = "ru.hiddi.messenger.extra.OPEN_PEER"
@@ -392,6 +413,7 @@ class MessagingService : Service() {
         const val EXTRA_PEER = "ru.hiddi.messenger.extra.PEER"
         const val EXTRA_TYPING = "ru.hiddi.messenger.extra.TYPING"
         const val EXTRA_INVISIBLE = "ru.hiddi.messenger.extra.INVISIBLE"
+        const val EXTRA_APP_VISIBLE = "ru.hiddi.messenger.extra.APP_VISIBLE"
         const val EXTRA_ONLINE = "ru.hiddi.messenger.extra.ONLINE"
         const val STATE_CONNECTING = "connecting"
         const val STATE_ONLINE = "online"

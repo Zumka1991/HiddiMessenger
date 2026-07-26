@@ -146,15 +146,25 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         isVisible = true
+        publishAppVisibility(true)
         resumeRevision++
     }
 
     override fun onPause() {
         isVisible = false
+        publishAppVisibility(false)
         if (CalculatorLockStore(this).enabled()) {
             stopService(Intent(this, MessagingService::class.java))
         }
         super.onPause()
+    }
+
+    private fun publishAppVisibility(visible: Boolean) {
+        sendBroadcast(
+            Intent(MessagingService.ACTION_APP_VISIBILITY)
+                .setPackage(packageName)
+                .putExtra(MessagingService.EXTRA_APP_VISIBLE, visible),
+        )
     }
 
     companion object {

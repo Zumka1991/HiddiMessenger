@@ -71,6 +71,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,6 +91,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.hiddi.messenger.network.AccountProfile
@@ -721,7 +723,7 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(recipient, draft) {
+    LaunchedEffect(recipient) {
         val target = recipient ?: return@LaunchedEffect
         fun publishTyping(typing: Boolean) {
             ContextCompat.startForegroundService(
@@ -732,15 +734,26 @@ fun ChatScreen(
                     .putExtra(MessagingService.EXTRA_TYPING, typing),
             )
         }
-        if (draft.isBlank()) {
-            publishTyping(false)
-        } else {
-            publishTyping(true)
-            try {
-                delay(1_800)
-            } finally {
-                publishTyping(false)
+        var typingPublished = false
+        try {
+            snapshotFlow { draft }.collectLatest { currentDraft ->
+                if (currentDraft.isBlank()) {
+                    if (typingPublished) {
+                        publishTyping(false)
+                        typingPublished = false
+                    }
+                } else {
+                    if (!typingPublished) {
+                        publishTyping(true)
+                        typingPublished = true
+                    }
+                    delay(1_800)
+                    publishTyping(false)
+                    typingPublished = false
+                }
             }
+        } finally {
+            if (typingPublished) publishTyping(false)
         }
     }
 
