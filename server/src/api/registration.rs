@@ -96,6 +96,7 @@ struct RecoverResponse {
 #[derive(Serialize)]
 struct RegisterResponse {
     account_id: Uuid,
+    nickname: String,
     device_id: Uuid,
     device_number: u32,
     registration_id: u32,
@@ -208,6 +209,7 @@ async fn register(
         StatusCode::CREATED,
         Json(RegisterResponse {
             account_id,
+            nickname,
             device_id,
             device_number: 1,
             registration_id: request.registration_id,
