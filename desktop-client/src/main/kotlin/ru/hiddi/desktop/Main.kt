@@ -111,8 +111,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.rememberWindowState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1983,7 +1984,12 @@ private fun DesktopAttachmentImage(
         }
     }
     if (showFullImage) {
-        Dialog(onDismissRequest = { showFullImage = false }) {
+        Window(
+            onCloseRequest = { showFullImage = false },
+            title = "Hiddi — изображение",
+            state = rememberWindowState(placement = WindowPlacement.Fullscreen),
+            undecorated = true,
+        ) {
             val full = rememberDesktopAttachmentBitmap(descriptor, onLoadAttachment)
             Box(
                 Modifier.fillMaxSize().background(Color(0xFF05090D)),
