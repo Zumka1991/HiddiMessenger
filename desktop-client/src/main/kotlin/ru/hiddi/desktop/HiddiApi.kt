@@ -160,6 +160,25 @@ class HiddiSession internal constructor(
     }
 
     @Synchronized
+    fun contacts(): Set<String> {
+        val values = state.optJSONArray("contacts") ?: return emptySet()
+        return (0 until values.length())
+            .mapNotNull { index -> values.optString(index).takeIf(String::isNotBlank) }
+            .map(::normalizePeer)
+            .toSet()
+    }
+
+    @Synchronized
+    fun setContact(peer: String, added: Boolean) {
+        val normalized = normalizePeer(peer)
+        val updated = contacts().toMutableSet().apply {
+            if (added) add(normalized) else remove(normalized)
+        }
+        state.put("contacts", JSONArray(updated.sorted()))
+        persist()
+    }
+
+    @Synchronized
     fun createDeviceLinkCode(): Pair<String, Long> {
         val json = authenticatedRequest("POST", "$server/v1/devices/link-code", JSONObject()) as JSONObject
         return json.getString("link_code") to json.getLong("expires_at")

@@ -522,6 +522,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
     var listWidth by remember { mutableStateOf(320.dp) }
     var blockedUsers by remember { mutableStateOf(emptySet<String>()) }
+    var contacts by remember(session) { mutableStateOf(session.contacts()) }
     var peerOnline by remember { mutableStateOf(false) }
     var peerTyping by remember { mutableStateOf(false) }
     var typingRevision by remember { mutableStateOf(0) }
@@ -568,9 +569,9 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
             runCatching { withContext(Dispatchers.IO) { session.search(query) } }
                 .getOrDefault(emptyList())
     }
-    val conversationPeers = messages.map(ChatEntry::peer).distinct().sorted()
-    LaunchedEffect(conversationPeers) {
-        conversationPeers.forEach { peer ->
+    val knownPeers = (messages.map(ChatEntry::peer) + contacts).distinct().sorted()
+    LaunchedEffect(knownPeers) {
+        knownPeers.forEach { peer ->
             val profile =
                 runCatching { withContext(Dispatchers.IO) { session.userProfile(peer) } }
                     .getOrNull()
@@ -652,7 +653,15 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
             Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
                 when (section) {
                     DesktopSection.Chats -> ChatListPane(messages, selected, peerProfiles, peerAvatars) { profile -> selected = profile }
-                    DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
+                    DesktopSection.Contacts -> ContactsPane(
+                        query,
+                        { query = it },
+                        results,
+                        contacts,
+                        peerProfiles,
+                        peerAvatars,
+                        selected,
+                    ) { profile ->
                         selected = profile
                         section = DesktopSection.Chats
                     }
@@ -687,6 +696,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                         profile = profile,
                         profileAvatar = peerAvatars[profile.nickname],
                         messages = messages.filter { it.peer == profile.nickname },
+                        isContact = profile.nickname in contacts,
                         isBlocked = profile.nickname in blockedUsers,
                         peerOnline = peerOnline,
                         peerTyping = peerTyping,
@@ -760,7 +770,15 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                                     blockedUsers + profile.nickname
                                 } else {
                                     blockedUsers - profile.nickname
-                                }
+                            }
+                        },
+                        onSetContact = { added ->
+                            withContext(Dispatchers.IO) {
+                                session.setContact(profile.nickname, added)
+                            }
+                            contacts =
+                                if (added) contacts + profile.nickname
+                                else contacts - profile.nickname
                         },
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
@@ -947,6 +965,9 @@ private fun ContactsPane(
     query: String,
     onQueryChange: (String) -> Unit,
     results: List<HiddiProfile>,
+    contacts: Set<String>,
+    profiles: Map<String, HiddiProfile>,
+    avatars: Map<String, ByteArray>,
     selected: HiddiProfile?,
     onOpen: (HiddiProfile) -> Unit,
 ) {
@@ -958,9 +979,34 @@ private fun ContactsPane(
         leadingIcon = Icons.Rounded.Search,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(48.dp),
     )
-    Text(if (query.length < 2) "Введите хотя бы 2 символа" else "НАЙДЕННЫЕ ЛЮДИ", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(18.dp, 16.dp, 18.dp, 8.dp))
+    val visibleProfiles =
+        if (query.trim().removePrefix("@").length < 2) {
+            contacts.sorted().map { profiles[it] ?: HiddiProfile(it, "", "") }
+        } else {
+            results
+        }
+    Text(
+        if (query.trim().removePrefix("@").length < 2) "МОИ КОНТАКТЫ" else "НАЙДЕННЫЕ ЛЮДИ",
+        color = TextMuted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(18.dp, 16.dp, 18.dp, 8.dp),
+    )
     LazyColumn(Modifier.fillMaxSize()) {
-        items(results, key = HiddiProfile::nickname) { profile -> UserRow(profile, selected?.nickname == profile.nickname) { onOpen(profile) } }
+        if (visibleProfiles.isEmpty()) {
+            item {
+                Text(
+                    if (query.length < 2) "Здесь появятся добавленные пользователи" else "Пользователи не найдены",
+                    color = TextMuted,
+                    modifier = Modifier.padding(18.dp),
+                )
+            }
+        }
+        items(visibleProfiles, key = HiddiProfile::nickname) { profile ->
+            UserRow(profile, avatars[profile.nickname], selected?.nickname == profile.nickname) {
+                onOpen(profile)
+            }
+        }
     }
 }
 
@@ -1362,7 +1408,12 @@ private fun AccountHeader(session: HiddiSession, online: Boolean) {
 }
 
 @Composable
-private fun UserRow(profile: HiddiProfile, selected: Boolean, onClick: () -> Unit) {
+private fun UserRow(
+    profile: HiddiProfile,
+    avatar: ByteArray?,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier =
@@ -1371,7 +1422,7 @@ private fun UserRow(profile: HiddiProfile, selected: Boolean, onClick: () -> Uni
                 .background(if (selected) PanelRaised else Color.Transparent)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        Avatar(profile)
+        Avatar(profile, avatar = avatar)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -1426,10 +1477,110 @@ private fun Avatar(profile: HiddiProfile, size: Dp = 42.dp, avatar: ByteArray? =
 }
 
 @Composable
+private fun UserProfileDialog(
+    profile: HiddiProfile,
+    avatar: ByteArray?,
+    online: Boolean,
+    typing: Boolean,
+    isContact: Boolean,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onSetContact: (Boolean) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Профиль пользователя", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                Avatar(profile, 96.dp, avatar)
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    profile.displayName.ifBlank { "@${profile.nickname}" },
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text("@${profile.nickname}", color = TextMuted, fontSize = 14.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    when {
+                        typing -> "печатает…"
+                        online -> "В сети"
+                        else -> "Не в сети"
+                    },
+                    color = if (typing || online) Mint else TextMuted,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+                Surface(
+                    color = PanelRaised,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("О СЕБЕ", color = Mint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(7.dp))
+                        Text(
+                            profile.bio.ifBlank { "Пользователь пока ничего о себе не написал." },
+                            color = if (profile.bio.isBlank()) TextMuted else Color(0xFFEAF3F7),
+                            fontSize = 14.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF102522))
+                            .padding(14.dp),
+                ) {
+                    Icon(Icons.Rounded.Security, contentDescription = null, tint = Mint)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("Signal E2EE", fontWeight = FontWeight.SemiBold)
+                        Text("Личные сообщения защищены", color = TextMuted, fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSetContact(!isContact) },
+                enabled = !busy,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = if (isContact) PanelRaised else Mint,
+                        contentColor = if (isContact) Color(0xFFEAF3F7) else Ink,
+                    ),
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(if (isContact) "Удалить из контактов" else "Добавить в контакты")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) {
+                Text("Закрыть")
+            }
+        },
+        containerColor = Color(0xFF151C26),
+    )
+}
+
+@Composable
 private fun ChatPane(
     profile: HiddiProfile,
     profileAvatar: ByteArray?,
     messages: List<ChatEntry>,
+    isContact: Boolean,
     isBlocked: Boolean,
     peerOnline: Boolean,
     peerTyping: Boolean,
@@ -1442,6 +1593,7 @@ private fun ChatPane(
     onTrustSafetyNumber: suspend (String) -> Unit,
     onClearConversation: suspend (Boolean) -> Unit,
     onSetBlocked: suspend (Boolean) -> Unit,
+    onSetContact: suspend (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draft by remember(profile.nickname) { mutableStateOf("") }
@@ -1456,6 +1608,7 @@ private fun ChatPane(
     var clearForBoth by remember { mutableStateOf(false) }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showSafetyDialog by remember { mutableStateOf(false) }
+    var showProfileDialog by remember(profile.nickname) { mutableStateOf(false) }
     var safetyInfo by remember { mutableStateOf<SafetyNumberInfo?>(null) }
     var actionBusy by remember { mutableStateOf(false) }
     var refocusRevision by remember(profile.nickname) { mutableStateOf(0) }
@@ -1471,6 +1624,25 @@ private fun ChatPane(
             val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index
             lastVisible == null || lastVisible >= layout.totalItemsCount - 2
         }
+    }
+    if (showProfileDialog) {
+        UserProfileDialog(
+            profile = profile,
+            avatar = profileAvatar,
+            online = peerOnline,
+            typing = peerTyping,
+            isContact = isContact,
+            busy = actionBusy,
+            onDismiss = { if (!actionBusy) showProfileDialog = false },
+            onSetContact = { added ->
+                actionBusy = true
+                actionScope.launch {
+                    runCatching { onSetContact(added) }
+                        .onFailure { error = it.message ?: "Не удалось изменить контакты" }
+                    actionBusy = false
+                }
+            },
+        )
     }
     fun submit() {
         if (draft.isBlank() || sending || attachmentBusy || voiceRecording || isBlocked) return
@@ -1579,39 +1751,48 @@ private fun ChatPane(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().background(Color(0xFF111923)).padding(horizontal = 28.dp, vertical = 17.dp),
         ) {
-            Box {
-                Avatar(profile, 46.dp, profileAvatar)
-                Box(
-                    Modifier.align(Alignment.BottomEnd)
-                        .size(12.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF111923))
-                        .padding(2.dp)
-                        .clip(CircleShape)
-                        .background(if (peerOnline && !isBlocked) Mint else Color(0xFF66717C)),
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    profile.displayName.ifBlank { "@${profile.nickname}" },
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    when {
-                        isBlocked -> "В игноре"
-                        peerTyping -> "печатает…"
-                        peerOnline -> "В сети"
-                        else -> "Не в сети"
-                    },
-                    color =
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier =
+                    Modifier.weight(1f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { showProfileDialog = true }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+            ) {
+                Box {
+                    Avatar(profile, 46.dp, profileAvatar)
+                    Box(
+                        Modifier.align(Alignment.BottomEnd)
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF111923))
+                            .padding(2.dp)
+                            .clip(CircleShape)
+                            .background(if (peerOnline && !isBlocked) Mint else Color(0xFF66717C)),
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(
+                        profile.displayName.ifBlank { "@${profile.nickname}" },
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
                         when {
-                            isBlocked -> Color(0xFFFF8D91)
-                            peerTyping || peerOnline -> Mint
-                            else -> TextMuted
+                            isBlocked -> "В игноре"
+                            peerTyping -> "печатает…"
+                            peerOnline -> "В сети"
+                            else -> "Не в сети"
                         },
-                    fontSize = 12.sp,
-                )
+                        color =
+                            when {
+                                isBlocked -> Color(0xFFFF8D91)
+                                peerTyping || peerOnline -> Mint
+                                else -> TextMuted
+                            },
+                        fontSize = 12.sp,
+                    )
+                }
             }
             IconButton(onClick = {}) { Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Mint) }
             Box {
