@@ -1,72 +1,43 @@
 mod attachment_storage;
+mod auth;
+mod config;
+mod crypto;
+mod error;
+mod state;
+mod validation;
 
 use std::{
-    collections::HashMap,
-    env, fs,
+    env,
     net::SocketAddr,
-    path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
 use attachment_storage::AttachmentStorageBackend;
+use auth::{authenticate, authorized};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Query, State},
-    http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
     routing::{get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng;
+use config::ServerConfig;
+use crypto::{hash, random_token};
+use error::Error;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use state::{AppState, RateLimiter};
 use tokio::sync::Notify;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
-
-#[derive(Clone)]
-struct AppState {
-    db: Arc<Mutex<Connection>>,
-    bootstrap_secret: Arc<str>,
-    message_notify: Arc<Notify>,
-    attachment_backend: AttachmentStorageBackend,
-    rate_limiter: Arc<RateLimiter>,
-}
-
-struct RateLimiter {
-    entries: Mutex<HashMap<String, RateLimitWindow>>,
-}
-
-struct RateLimitWindow {
-    started: Instant,
-    count: u32,
-}
-
-impl RateLimiter {
-    fn check(&self, key: impl Into<String>, limit: u32, window: Duration) -> Result<(), Error> {
-        let now = Instant::now();
-        let mut entries = self.entries.lock().map_err(|_| {
-            Error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "rate limiter unavailable",
-            )
-        })?;
-        entries.retain(|_, entry| now.duration_since(entry.started) < window);
-        let entry = entries.entry(key.into()).or_insert(RateLimitWindow {
-            started: now,
-            count: 0,
-        });
-        if entry.count >= limit {
-            return Err(Error(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded"));
-        }
-        entry.count += 1;
-        Ok(())
-    }
-}
+use validation::{
+    MAX_ATTACHMENT_BYTES, MAX_JSON_BODY_BYTES, decode_attachment_ciphertext, decode_avatar,
+    normalize_device_name, normalize_nickname, validate_bio, validate_device_material,
+    validate_display_name,
+};
 
 #[derive(Serialize)]
 struct Health {
@@ -391,55 +362,27 @@ struct StoredPreKey {
     signature: Option<String>,
 }
 
-struct AuthenticatedAccount {
-    account_id: String,
-    device_id: String,
-}
-
-#[derive(Serialize)]
-struct ApiError {
-    error: &'static str,
-}
-
-struct Error(StatusCode, &'static str);
-
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        (self.0, Json(ApiError { error: self.1 })).into_response()
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            env::var("RUST_LOG").unwrap_or_else(|_| "hiddi_server=info,tower_http=info".into()),
-        )
+        .with_env_filter(ServerConfig::log_filter())
         .init();
 
-    let bootstrap_secret = load_bootstrap_secret()?;
-    if bootstrap_secret.len() < 32 {
-        anyhow::bail!("HIDDI_BOOTSTRAP_SECRET must be at least 32 characters");
-    }
-
-    let database_path =
-        env::var("HIDDI_DATABASE_PATH").unwrap_or_else(|_| "../data/hiddi.db".into());
-    if let Some(parent) = Path::new(&database_path).parent() {
+    let config = ServerConfig::from_environment()?;
+    if let Some(parent) = config.database_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let db = Connection::open(&database_path)?;
+    let db = Connection::open(&config.database_path)?;
     migrate(&db)?;
     let attachment_backend = AttachmentStorageBackend::from_environment()?;
     attachment_backend.ensure_ready()?;
 
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
-        bootstrap_secret: bootstrap_secret.into(),
+        bootstrap_secret: config.bootstrap_secret.into(),
         message_notify: Arc::new(Notify::new()),
         attachment_backend,
-        rate_limiter: Arc::new(RateLimiter {
-            entries: Mutex::new(HashMap::new()),
-        }),
+        rate_limiter: Arc::new(RateLimiter::new()),
     };
     let app = build_app(state);
 
@@ -451,16 +394,6 @@ async fn main() -> anyhow::Result<()> {
     info!(%address, attachment_backend = attachment_backend.name(), "Hiddi server is listening");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-fn load_bootstrap_secret() -> anyhow::Result<String> {
-    if let Ok(path) = env::var("HIDDI_BOOTSTRAP_SECRET_FILE") {
-        return fs::read_to_string(&path)
-            .with_context(|| format!("could not read HIDDI_BOOTSTRAP_SECRET_FILE at {path}"))
-            .map(|value| value.trim().to_owned());
-    }
-    env::var("HIDDI_BOOTSTRAP_SECRET")
-        .context("HIDDI_BOOTSTRAP_SECRET or HIDDI_BOOTSTRAP_SECRET_FILE must be set")
 }
 
 fn build_app(state: AppState) -> Router {
@@ -3395,28 +3328,6 @@ async fn delete_attachment(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn decode_attachment_ciphertext(value: &str) -> Result<Vec<u8>, Error> {
-    if value.len() < 24 || value.len() > MAX_ATTACHMENT_BASE64_BYTES {
-        return Err(Error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "encrypted attachment must be at most 8 MiB",
-        ));
-    }
-    let decoded = URL_SAFE_NO_PAD.decode(value).map_err(|_| {
-        Error(
-            StatusCode::BAD_REQUEST,
-            "attachment ciphertext must be URL-safe base64",
-        )
-    })?;
-    if decoded.len() > MAX_ATTACHMENT_BYTES {
-        return Err(Error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "encrypted attachment must be at most 8 MiB",
-        ));
-    }
-    Ok(decoded)
-}
-
 fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -3739,126 +3650,11 @@ fn migrate(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn authorized(headers: &HeaderMap, secret: &str) -> bool {
-    let expected = format!("Bearer {secret}");
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        == Some(expected.as_str())
-}
-
 fn unix_time() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after Unix epoch")
         .as_secs() as i64
-}
-
-fn validate_device_material(identity_public_key: &str, registration_id: u32) -> Result<(), Error> {
-    if identity_public_key.len() < 20 || identity_public_key.len() > 4096 {
-        return Err(Error(
-            StatusCode::BAD_REQUEST,
-            "invalid identity public key",
-        ));
-    }
-    if !(1..=16_380).contains(&registration_id) {
-        return Err(Error(StatusCode::BAD_REQUEST, "invalid registration id"));
-    }
-    Ok(())
-}
-
-fn normalize_device_name(value: &str, fallback: &str) -> String {
-    let normalized = value.trim();
-    if normalized.is_empty() {
-        fallback.to_owned()
-    } else {
-        normalized.chars().take(64).collect()
-    }
-}
-
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthenticatedAccount, Error> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(Error(StatusCode::UNAUTHORIZED, "missing access token"))?;
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| Error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
-    db.query_row(
-        "SELECT account_id, id FROM devices WHERE access_token_hash = ?1",
-        params![hash(token)],
-        |row| {
-            Ok(AuthenticatedAccount {
-                account_id: row.get(0)?,
-                device_id: row.get(1)?,
-            })
-        },
-    )
-    .map_err(|error| match error {
-        rusqlite::Error::QueryReturnedNoRows => {
-            Error(StatusCode::UNAUTHORIZED, "invalid access token")
-        }
-        _ => Error(StatusCode::INTERNAL_SERVER_ERROR, "could not authenticate"),
-    })
-}
-
-fn normalize_nickname(value: &str) -> Option<String> {
-    let value = value.trim();
-    let nickname = value
-        .strip_prefix('@')
-        .unwrap_or(value)
-        .to_ascii_lowercase();
-    let valid = nickname.len() >= 3
-        && nickname.len() <= 32
-        && nickname
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
-    valid.then_some(nickname)
-}
-
-fn validate_display_name(value: &str) -> Result<String, Error> {
-    let normalized = value.trim();
-    if normalized.chars().count() > 64 || normalized.chars().any(char::is_control) {
-        return Err(Error(StatusCode::BAD_REQUEST, "invalid display name"));
-    }
-    Ok(normalized.to_owned())
-}
-
-fn validate_bio(value: &str) -> Result<String, Error> {
-    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized = normalized.trim();
-    if normalized.chars().count() > 250
-        || normalized
-            .chars()
-            .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
-        return Err(Error(StatusCode::BAD_REQUEST, "invalid bio"));
-    }
-    Ok(normalized.to_owned())
-}
-
-fn decode_avatar(value: &str) -> Result<Vec<u8>, Error> {
-    if value.is_empty() || value.len() > MAX_AVATAR_BASE64_BYTES {
-        return Err(Error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "avatar must be at most 512 KiB",
-        ));
-    }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|_| Error(StatusCode::BAD_REQUEST, "avatar must be URL-safe base64"))?;
-    if decoded.len() > MAX_AVATAR_BYTES
-        || !decoded.starts_with(&[0xff, 0xd8, 0xff])
-        || !decoded.ends_with(&[0xff, 0xd9])
-    {
-        return Err(Error(
-            StatusCode::BAD_REQUEST,
-            "avatar must be a JPEG image",
-        ));
-    }
-    Ok(decoded)
 }
 
 fn validate_signed_prekey(key: &PublicPreKey) -> Result<(), Error> {
@@ -3906,21 +3702,6 @@ fn validate_key(value: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn random_token(bytes: usize) -> String {
-    let mut raw = vec![0_u8; bytes];
-    rand::rng().fill(&mut raw[..]);
-    URL_SAFE_NO_PAD.encode(raw)
-}
-
-fn hash(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
-}
-
-const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
-const MAX_AVATAR_BYTES: usize = 512 * 1024;
-const MAX_AVATAR_BASE64_BYTES: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;
-const MAX_JSON_BODY_BYTES: usize = MAX_ATTACHMENT_BASE64_BYTES + 16 * 1024;
 const ATTACHMENT_QUOTA_BYTES: usize = 1024 * 1024 * 1024;
 
 #[cfg(test)]
@@ -3936,7 +3717,6 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use rusqlite::Connection;
     use std::{
-        collections::HashMap,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -3963,9 +3743,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_rejects_excess_and_keeps_keys_independent() {
-        let limiter = RateLimiter {
-            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
-        };
+        let limiter = RateLimiter::new();
         assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_ok());
         assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_ok());
         assert!(limiter.check("alice", 2, Duration::from_secs(60)).is_err());
@@ -3980,9 +3758,7 @@ mod tests {
             bootstrap_secret: "test-bootstrap-secret-with-enough-length".into(),
             message_notify: Arc::new(Notify::new()),
             attachment_backend: AttachmentStorageBackend::Sqlite,
-            rate_limiter: Arc::new(RateLimiter {
-                entries: Mutex::new(HashMap::new()),
-            }),
+            rate_limiter: Arc::new(RateLimiter::new()),
         }
     }
 
