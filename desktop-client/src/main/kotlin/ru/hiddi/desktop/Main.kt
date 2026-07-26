@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -437,7 +438,7 @@ private fun MessengerScreen(session: HiddiSession) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<HiddiProfile>()) }
     var selected by remember { mutableStateOf<HiddiProfile?>(null) }
-    var listWidth by remember { mutableStateOf(350.dp) }
+    var listWidth by remember { mutableStateOf(410.dp) }
     val messages = remember(session) { mutableStateListOf<ChatEntry>().also { it += session.history() } }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -498,9 +499,8 @@ private fun MessengerScreen(session: HiddiSession) {
 
     Surface(color = Ink, contentColor = Color(0xFFEAF3F7), modifier = Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize()) {
-            DesktopNavigation(section, online) { section = it }
+            DesktopNavigation(section, online, session.nickname) { section = it }
             Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
-                AccountHeader(session, online)
                 when (section) {
                     DesktopSection.Chats -> ChatListPane(messages, selected) { profile -> selected = profile }
                     DesktopSection.Contacts -> ContactsPane(query, { query = it }, results, selected) { profile ->
@@ -550,19 +550,22 @@ private fun ResizeHandle(onDrag: (Float) -> Unit) {
 }
 
 @Composable
-private fun DesktopNavigation(selected: DesktopSection, online: Boolean, onSelect: (DesktopSection) -> Unit) {
+private fun DesktopNavigation(selected: DesktopSection, online: Boolean, nickname: String, onSelect: (DesktopSection) -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.width(92.dp).fillMaxHeight().background(Color(0xFF0E151D)).padding(vertical = 18.dp, horizontal = 10.dp),
+        modifier = Modifier.width(118.dp).fillMaxHeight().background(Color(0xFF0D141B)).padding(vertical = 22.dp, horizontal = 14.dp),
     ) {
         AppMark()
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(22.dp))
         DesktopNavButton("Чаты", "●", selected == DesktopSection.Chats) { onSelect(DesktopSection.Chats) }
-        DesktopNavButton("Контакты", "◎", selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
+        DesktopNavButton("Контакты", "◌", selected == DesktopSection.Contacts) { onSelect(DesktopSection.Contacts) }
         Spacer(Modifier.weight(1f))
         DesktopNavButton("Настройки", "⚙", selected == DesktopSection.Settings) { onSelect(DesktopSection.Settings) }
-        Box(Modifier.size(8.dp).clip(CircleShape).background(if (online) Mint else Color(0xFF66717C)))
+        Box(Modifier.size(42.dp).clip(CircleShape).background(Color(0xFF223C43)), contentAlignment = Alignment.Center) {
+            Text(nickname.firstOrNull()?.uppercase() ?: "H", color = Mint, fontWeight = FontWeight.Bold)
+        }
+        Box(Modifier.size(9.dp).clip(CircleShape).background(if (online) Mint else Color(0xFF66717C)))
     }
 }
 
@@ -572,10 +575,10 @@ private fun DesktopNavButton(label: String, symbol: String, selected: Boolean, o
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
             .background(if (selected) Color(0xFF173C37) else Color.Transparent)
-            .clickable(onClick = onClick).padding(vertical = 10.dp),
+            .clickable(onClick = onClick).padding(vertical = 12.dp),
     ) {
         Text(symbol, color = if (selected) Mint else TextMuted, fontSize = 20.sp)
-        Text(label, color = if (selected) Mint else TextMuted, fontSize = 10.sp, maxLines = 1)
+        Text(label, color = if (selected) Mint else TextMuted, fontSize = 11.sp, maxLines = 1)
     }
 }
 
@@ -588,19 +591,19 @@ private fun ChatListPane(
     val conversations = messages.groupBy { it.peer }
         .map { (peer, entries) -> peer to entries.maxBy { it.createdAt } }
         .sortedByDescending { it.second.createdAt }
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 20.dp, bottom = 12.dp)) {
-        Text("Чаты", fontSize = 25.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 26.dp, end = 20.dp, top = 26.dp, bottom = 16.dp)) {
+        Text("Чаты", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         Surface(color = Color(0xFF173C37), shape = CircleShape, modifier = Modifier.size(34.dp).clickable { }) {
             Box(contentAlignment = Alignment.Center) { Text("+", color = Mint, fontSize = 24.sp) }
         }
     }
-    Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-        Text("⌕  Поиск диалогов", color = TextMuted, modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp))
+    Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+        Text("⌕   Поиск", color = TextMuted, modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp))
     }
     if (conversations.isEmpty()) {
         Text("Диалогов пока нет. Найдите близкого человека во вкладке «Контакты».", color = TextMuted, modifier = Modifier.padding(20.dp))
     } else {
-        LazyColumn(Modifier.fillMaxSize().padding(top = 8.dp)) {
+        LazyColumn(Modifier.fillMaxSize().padding(top = 14.dp, start = 12.dp, end = 12.dp)) {
             items(conversations, key = { it.first }) { (peer, last) ->
                 val profile = HiddiProfile(peer, "", "")
                 ConversationRow(profile, last, selected?.nickname == peer) { onSelect(profile) }
@@ -612,12 +615,12 @@ private fun ChatListPane(
 @Composable
 private fun ConversationRow(profile: HiddiProfile, last: ChatEntry, selected: Boolean, onClick: () -> Unit) {
     Surface(
-        color = if (selected) Color(0xFF1B3938) else Color.Transparent,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp).clickable(onClick = onClick),
+        color = if (selected) Color(0xFF1D3C3B) else Color.Transparent,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(onClick = onClick),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(12.dp)) {
-            Avatar(profile)
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(14.dp)) {
+            Avatar(profile, 48.dp)
             Spacer(Modifier.width(11.dp))
             Column(Modifier.weight(1f)) {
                 Text("@${profile.nickname}", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -727,9 +730,9 @@ private fun UserRow(profile: HiddiProfile, selected: Boolean, onClick: () -> Uni
 }
 
 @Composable
-private fun Avatar(profile: HiddiProfile) {
+private fun Avatar(profile: HiddiProfile, size: Dp = 42.dp) {
     Box(
-        Modifier.size(42.dp).clip(CircleShape).background(Color(0xFF243B43)),
+        Modifier.size(size).clip(CircleShape).background(Color(0xFF243B43)),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -764,27 +767,32 @@ private fun ChatPane(
             if (failure == null) draft = ""
         }
     }
-    Column(modifier.background(Ink)) {
+    Column(modifier.background(Color(0xFF090F15))) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().background(Panel).padding(horizontal = 22.dp, vertical = 15.dp),
+            modifier = Modifier.fillMaxWidth().background(Color(0xFF111923)).padding(horizontal = 28.dp, vertical = 17.dp),
         ) {
-            Avatar(profile)
+            Avatar(profile, 46.dp)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     profile.displayName.ifBlank { "@${profile.nickname}" },
                     fontWeight = FontWeight.Bold,
                 )
-                Text("@${profile.nickname}", color = TextMuted, fontSize = 12.sp)
+                Text("В сети · @${profile.nickname}", color = Mint, fontSize = 12.sp)
             }
             Text("⌕", color = Mint, fontSize = 24.sp, modifier = Modifier.padding(horizontal = 10.dp))
             Text("⋮", color = TextMuted, fontSize = 24.sp)
         }
         LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 34.dp, vertical = 28.dp),
         ) {
+            item {
+                Surface(color = Color(0xFF202934), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text("Сегодня", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                }
+            }
             if (messages.isEmpty()) {
                 item {
                     Text(
@@ -803,6 +811,7 @@ private fun ChatPane(
                     Surface(
                         color = if (message.outgoing) Color(0xFF1D5B50) else PanelRaised,
                         shape = RoundedCornerShape(if (message.outgoing) 20.dp else 18.dp),
+                        modifier = Modifier.widthIn(max = 520.dp),
                     ) {
                         Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), horizontalAlignment = Alignment.End) {
                             Text(message.text)
@@ -813,12 +822,12 @@ private fun ChatPane(
             }
         }
         error?.let { ErrorText(it) }
-        Surface(color = Panel, modifier = Modifier.fillMaxWidth()) {
+        Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 20.dp),
             ) {
-                Surface(color = Color(0xFF1A232E), shape = RoundedCornerShape(18.dp), modifier = Modifier.weight(1f)) {
+                Surface(color = Color(0xFF18212B), shape = RoundedCornerShape(20.dp), modifier = Modifier.weight(1f)) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                         OutlinedTextField(
                 value = draft,
