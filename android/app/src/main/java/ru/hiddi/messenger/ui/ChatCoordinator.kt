@@ -111,6 +111,7 @@ import ru.hiddi.messenger.security.sanitizeImage
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 
 @androidx.compose.runtime.Composable
 fun ChatScreen(
@@ -1266,14 +1267,17 @@ fun ChatScreen(
                     }
                     val text = draft.trim()
                     if (text.isEmpty()) return@ConversationScreen
+                    val localMessageId = "local:${UUID.randomUUID()}"
                     val pending =
                         ChatHistoryItem(
                             peer = target,
                             text = text,
                             outgoing = true,
                             time = Instant.now().toString(),
+                            messageId = localMessageId,
                             deliveryStatus = "sending",
                         )
+                    historyStore.append(pending)
                     history = history + pending
                     scrollToNewestRevision++
                     draft = ""
@@ -1286,15 +1290,16 @@ fun ChatScreen(
                                     messageId = messageId,
                                     deliveryStatus = "sent",
                                 )
-                            historyStore.append(item)
+                            historyStore.replaceMessage(localMessageId, item)
                             history = history.map { current ->
-                                if (current === pending) item else current
+                                if (current.messageId == localMessageId) item else current
                             }
                             peers = historyStore.peers()
                             historyRevision++
                             status = "Доставлено на сервер"
                         } catch (error: Exception) {
-                            history = history.filterNot { it === pending }
+                            historyStore.deleteMessage(localMessageId)
+                            history = history.filterNot { it.messageId == localMessageId }
                             if (draft.isBlank()) draft = text
                             status = error.message ?: "Не удалось отправить"
                         }

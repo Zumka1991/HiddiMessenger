@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -55,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -63,8 +66,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.delay
 import ru.hiddi.messenger.security.GroupChatMessage
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.ChatHistoryItem
@@ -97,6 +100,8 @@ fun GroupConversationScreen(
     onSend: () -> Unit,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
     val listState = rememberLazyListState()
     val title = group.name
     val ownRole = group.memberDetails.firstOrNull { it.nickname == profileNickname }?.role
@@ -130,9 +135,9 @@ fun GroupConversationScreen(
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
-    LaunchedEffect(group.messages.size) {
+    LaunchedEffect(group.messages.size, imeBottom) {
         if (group.messages.isNotEmpty()) {
-            delay(60)
+            withFrameNanos { }
             listState.animateScrollToItem(group.messages.lastIndex)
         }
     }

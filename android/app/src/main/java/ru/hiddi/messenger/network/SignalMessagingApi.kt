@@ -748,12 +748,13 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
         val kyberSigned = bundle.getJSONObject("kyber_signed_prekey")
         val oneTime = bundle.optJSONObject("one_time_prekey")
         val kyberOneTime = bundle.optJSONObject("kyber_one_time_prekey")
+        val selectedKyber = kyberOneTime ?: kyberSigned
         return PreKeyBundle(bundle.getInt("registration_id"), bundle.optInt("device_number", DEFAULT_DEVICE_NUMBER),
             oneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID, oneTime?.let { ECPublicKey(it.getString("public_key").decode()) },
             signed.getInt("id"), ECPublicKey(signed.getString("public_key").decode()), signed.getString("signature").decode(), IdentityKey(bundle.getString("identity_public_key").decode()),
-            kyberOneTime?.getInt("id") ?: PreKeyBundle.NULL_PRE_KEY_ID,
-            kyberOneTime?.let { KEMPublicKey(it.getString("public_key").decode()) } ?: KEMPublicKey(kyberSigned.getString("public_key").decode()),
-            (kyberOneTime ?: kyberSigned).getString("signature").decode())
+            selectedKyber.getInt("id"),
+            KEMPublicKey(selectedKyber.getString("public_key").decode()),
+            selectedKyber.getString("signature").decode())
     }
 
     private fun resolveRegistrationId(profile: AccountProfile, state: ru.hiddi.messenger.security.SignalState): ru.hiddi.messenger.security.SignalState {

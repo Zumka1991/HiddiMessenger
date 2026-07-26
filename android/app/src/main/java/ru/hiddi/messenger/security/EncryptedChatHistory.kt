@@ -48,17 +48,25 @@ class EncryptedChatHistory(context: Context) {
         ) {
             return@synchronized
         }
-        entries.put(
-            JSONObject()
-                .put("peer", item.peer)
-                .put("text", item.text)
-                .put("outgoing", item.outgoing)
-                .put("time", item.time)
-                .put("unread", item.unread)
-                .apply { item.messageId?.let { put("message_id", it) } }
-                .put("delivery_status", item.deliveryStatus)
-                .apply { item.attachment?.let { put("attachment", it.toJson()) } },
-        )
+        entries.put(item.toJson())
+        store.write(entries.toString().encodeToByteArray())
+    }
+
+    /**
+     * Atomically replaces an optimistic local message with the server-confirmed
+     * record. Background inbox/status refreshes can therefore never make the
+     * bubble disappear between sending and acknowledgement.
+     */
+    fun replaceMessage(messageId: String, replacement: ChatHistoryItem) = synchronized(historyLock) {
+        val entries = read()
+        for (index in 0 until entries.length()) {
+            if (entries.getJSONObject(index).optString("message_id") == messageId) {
+                entries.put(index, replacement.toJson())
+                store.write(entries.toString().encodeToByteArray())
+                return@synchronized
+            }
+        }
+        entries.put(replacement.toJson())
         store.write(entries.toString().encodeToByteArray())
     }
 
@@ -198,6 +206,17 @@ data class ChatHistoryItem(
     /** sent, delivered, or read. Only meaningful for outgoing messages. */
     val deliveryStatus: String = "sent",
 )
+
+private fun ChatHistoryItem.toJson(): JSONObject =
+    JSONObject()
+        .put("peer", peer)
+        .put("text", text)
+        .put("outgoing", outgoing)
+        .put("time", time)
+        .put("unread", unread)
+        .apply { messageId?.let { put("message_id", it) } }
+        .put("delivery_status", deliveryStatus)
+        .apply { attachment?.let { put("attachment", it.toJson()) } }
 
 private fun AttachmentDescriptor.toJson(): JSONObject = JSONObject()
     .put("attachment_id", attachmentId)

@@ -76,6 +76,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -180,19 +181,22 @@ fun ConversationScreen(
                 listState.scrollToItem(pendingAnchorIndex + added, pendingAnchorOffset)
             }
             pendingPrependSize = -1
-        } else if (history.isNotEmpty() && followNewest) {
+        } else if (history.isNotEmpty() && (followNewest || imeBottom > 0)) {
+            withFrameNanos { }
             listState.animateScrollToItem(history.lastIndex)
         }
     }
     LaunchedEffect(imeBottom) {
         if (imeBottom > 0 && history.isNotEmpty()) {
             followNewest = true
+            withFrameNanos { }
             listState.scrollToItem(history.lastIndex)
         }
     }
     LaunchedEffect(scrollToNewestRevision) {
         if (scrollToNewestRevision > 0 && history.isNotEmpty()) {
             followNewest = true
+            withFrameNanos { }
             listState.animateScrollToItem(history.lastIndex)
         }
     }
