@@ -2,6 +2,7 @@ package ru.hiddi.desktop
 
 import androidx.compose.desktop.ui.tooling.preview.Preview
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -43,7 +44,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -60,6 +72,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Cursor
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -461,7 +474,6 @@ private fun MessengerScreen(session: HiddiSession) {
     Surface(color = Ink, contentColor = Color(0xFFEAF3F7), modifier = Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize()) {
             DesktopNavigation(section, online) { section = it }
-            ResizeHandle { delta -> listWidth = (listWidth + with(density) { delta.toDp() }).clamp(260.dp, 560.dp) }
             Column(Modifier.width(listWidth).fillMaxHeight().background(Panel)) {
                 AccountHeader(session, online)
                 when (section) {
@@ -504,9 +516,12 @@ private fun Dp.clamp(min: Dp, max: Dp): Dp = coerceIn(min, max)
 @Composable
 private fun ResizeHandle(onDrag: (Float) -> Unit) {
     Box(
-        Modifier.width(7.dp).fillMaxHeight().background(Color.White.copy(alpha = 0.04f))
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.width(12.dp).fillMaxHeight()
+            .background(Color.White.copy(alpha = 0.035f))
+            .pointerHoverIcon(PointerIcon(Cursor.getPredefinedCursor(Cursor.E_RESIZE_CURSOR)))
             .pointerInput(Unit) { detectDragGestures { change, amount -> change.consume(); onDrag(amount.x) } },
-    )
+    ) { Box(Modifier.width(2.dp).height(46.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.22f))) }
 }
 
 @Composable
@@ -684,6 +699,17 @@ private fun ChatPane(
     var draft by remember(profile.nickname) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    fun submit() {
+        if (draft.isBlank() || sending) return
+        val text = draft
+        sending = true
+        error = null
+        onSend(text) { failure ->
+            sending = false
+            error = failure
+            if (failure == null) draft = ""
+        }
+    }
     Column(modifier.background(Ink)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -740,21 +766,22 @@ private fun ChatPane(
                 onValueChange = { draft = it },
                 placeholder = { Text("Сообщение") },
                 enabled = !sending,
-                modifier = Modifier.weight(1f),
+                minLines = 1,
+                maxLines = 5,
+                modifier = Modifier.weight(1f).onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown || event.key != Key.Enter) return@onPreviewKeyEvent false
+                    if (event.isCtrlPressed) {
+                        draft += "\n"
+                    } else {
+                        submit()
+                    }
+                    true
+                },
             )
             Spacer(Modifier.width(10.dp))
             Button(
                 enabled = draft.isNotBlank() && !sending,
-                onClick = {
-                    val text = draft
-                    sending = true
-                    error = null
-                    onSend(text) { failure ->
-                        sending = false
-                        error = failure
-                        if (failure == null) draft = ""
-                    }
-                },
+                onClick = ::submit,
             ) {
                 Text(if (sending) "…" else "Отправить")
             }
@@ -767,17 +794,27 @@ private fun MessageMeta(message: ChatEntry) {
     val time = remember(message.createdAt) {
         DateTimeFormatter.ofPattern("HH:mm").format(Instant.ofEpochMilli(message.createdAt).atZone(ZoneId.systemDefault()))
     }
-    val status = when (message.deliveryStatus) {
-        "read" -> "✓✓"
-        "delivered" -> "✓✓"
-        else -> "✓"
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 3.dp)) {
+        Text(time, color = TextMuted, fontSize = 11.sp)
+        if (message.outgoing) {
+            Spacer(Modifier.width(5.dp))
+            DeliveryChecks(message.deliveryStatus)
+        }
     }
-    Text(
-        text = if (message.outgoing) "$time  $status" else time,
-        color = if (message.deliveryStatus == "read") Mint else TextMuted,
-        fontSize = 11.sp,
-        modifier = Modifier.padding(top = 3.dp),
-    )
+}
+
+@Composable
+private fun DeliveryChecks(status: String) {
+    val color = if (status == "read") Mint else Color(0xFFD4E2DD).copy(alpha = 0.78f)
+    val double = status == "delivered" || status == "read"
+    Canvas(Modifier.size(width = 18.dp, height = 12.dp)) {
+        fun mark(offset: Float) {
+            drawLine(color, Offset(1f + offset, 6f), Offset(5f + offset, 10f), strokeWidth = 1.8f, cap = StrokeCap.Round)
+            drawLine(color, Offset(5f + offset, 10f), Offset(12f + offset, 2f), strokeWidth = 1.8f, cap = StrokeCap.Round)
+        }
+        mark(if (double) 0f else 3.5f)
+        if (double) mark(5f)
+    }
 }
 
 @Composable
