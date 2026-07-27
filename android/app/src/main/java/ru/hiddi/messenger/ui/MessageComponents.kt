@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +40,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
@@ -96,6 +98,7 @@ import ru.hiddi.messenger.network.AccountProfile
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
+import ru.hiddi.messenger.security.ReplyReference
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.SignalStateRepository
@@ -116,7 +119,9 @@ fun MessageBubble(
     onLongPress: ((ChatHistoryItem) -> Unit)? = null,
 ) {
     val isImage = item.attachment?.kind == EncryptedAttachmentStore.IMAGE_KIND
-    val longPressModifier = if (item.outgoing && item.messageId != null && onLongPress != null) {
+    // Replying is available on incoming messages too, so the gesture is no
+    // longer restricted to messages this device sent.
+    val longPressModifier = if (item.messageId != null && onLongPress != null) {
         Modifier.pointerInput(item.messageId) {
             detectTapGestures(onLongPress = { onLongPress(item) })
         }
@@ -139,7 +144,14 @@ fun MessageBubble(
             Column(Modifier.padding(if (isImage) 4.dp else 0.dp)) {
                 when (item.attachment?.kind) {
                     EncryptedAttachmentStore.IMAGE_KIND -> Box {
-                        AttachmentImage(item.attachment, attachmentStore)
+                        Column {
+                            item.replyTo?.let {
+                                Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                    ReplyQuote(it)
+                                }
+                            }
+                            AttachmentImage(item.attachment, attachmentStore)
+                        }
                         Surface(
                             modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                             color = Color.Black.copy(alpha = 0.58f),
@@ -148,16 +160,96 @@ fun MessageBubble(
                             MessageMeta(item, Color.White, Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                         }
                     }
+
                     EncryptedAttachmentStore.VOICE_KIND -> Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                        item.replyTo?.let { ReplyQuote(it) }
                         VoiceAttachment(item.attachment, attachmentStore)
                         MessageTime(item)
                     }
                     else -> Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                        item.replyTo?.let { ReplyQuote(it) }
                         Text(item.text, style = MaterialTheme.typography.bodyLarge)
                         MessageTime(item)
                     }
                 }
             }
+        }
+    }
+}
+
+/** Sits above the composer while a reply is being written. */
+@androidx.compose.runtime.Composable
+fun ReplyComposerBar(reply: ReplyReference, onCancel: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(
+            Modifier.padding(start = 12.dp, top = 8.dp, end = 4.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Rounded.Reply,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.size(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Ответ @${reply.sender}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    reply.preview.ifBlank { "Вложение" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onCancel) {
+                Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "Отменить ответ",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The quoted message a reply points at. Renders from the snapshot carried in the
+ * reply itself, so it stays readable when the original is not loaded locally.
+ */
+@androidx.compose.runtime.Composable
+private fun ReplyQuote(reply: ReplyReference) {
+    Row(Modifier.padding(bottom = 6.dp)) {
+        Box(
+            Modifier.width(3.dp)
+                .height(32.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
+        )
+        Spacer(Modifier.size(8.dp))
+        Column {
+            Text(
+                "@${reply.sender}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                reply.preview.ifBlank { "Вложение" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

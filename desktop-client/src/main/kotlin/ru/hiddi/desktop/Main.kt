@@ -56,6 +56,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Group
@@ -798,11 +799,11 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                     GroupChatPane(
                         group = group,
                         ownNickname = session.nickname,
-                        onSend = { text, report ->
+                        onSend = { text, replyTo, report ->
                             scope.launch {
                                 runCatching {
                                     withContext(Dispatchers.IO) {
-                                        session.sendGroupText(group.id, text)
+                                        session.sendGroupText(group.id, text, replyTo)
                                         session.groups()
                                     }
                                 }.onSuccess {
@@ -820,6 +821,7 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                         profile = profile,
                         profileAvatar = peerAvatars[profile.nickname],
                         messages = messages.filter { it.peer == profile.nickname },
+                        ownNickname = session.nickname,
                         isContact = profile.nickname in contacts,
                         isBlocked = profile.nickname in blockedUsers,
                         peerOnline = peerOnline,
@@ -827,10 +829,12 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                         onTypingChange = { typing ->
                             realtime.sendTyping(profile.nickname, typing && !invisibleMode)
                         },
-                        onSend = { text, report ->
+                        onSend = { text, replyTo, report ->
                             scope.launch {
                                 runCatching {
-                                    withContext(Dispatchers.IO) { session.send(profile.nickname, text) }
+                                    withContext(Dispatchers.IO) {
+                                        session.send(profile.nickname, text, replyTo)
+                                    }
                                 }.onSuccess {
                                     messages += it
                                     report(null)
@@ -1204,22 +1208,28 @@ private fun GroupListPane(
 private fun GroupChatPane(
     group: DesktopGroup,
     ownNickname: String,
-    onSend: (String, (String?) -> Unit) -> Unit,
+    onSend: (String, ReplyReference?, (String?) -> Unit) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draft by remember(group.id) { mutableStateOf("") }
     var sending by remember(group.id) { mutableStateOf(false) }
     var error by remember(group.id) { mutableStateOf<String?>(null) }
+    var replyingTo by remember(group.id) { mutableStateOf<ReplyReference?>(null) }
+    var messageMenuId by remember(group.id) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     fun submit() {
         if (sending || draft.isBlank()) return
         val text = draft
+        val reply = replyingTo
         sending = true
         error = null
-        onSend(text) { failure ->
+        onSend(text, reply) { failure ->
             sending = false
             error = failure
-            if (failure == null) draft = ""
+            if (failure == null) {
+                draft = ""
+                replyingTo = null
+            }
         }
     }
     LaunchedEffect(group.id, group.messages.size) {
@@ -1261,17 +1271,43 @@ private fun GroupChatPane(
                     if (!message.outgoing) {
                         Text("@${message.sender}", color = Mint, fontSize = 11.sp, modifier = Modifier.padding(start = 9.dp, bottom = 3.dp))
                     }
-                    Surface(
-                        color = if (message.outgoing) Color(0xFF1E5B51) else Color(0xFF192530),
-                        shape = RoundedCornerShape(18.dp),
-                    ) {
-                        Column(Modifier.widthIn(max = 520.dp).padding(horizontal = 15.dp, vertical = 11.dp)) {
-                            Text(message.text, color = Color(0xFFEAF3F7))
-                            Text(
-                                formatMessageTime(message.createdAt),
-                                color = TextMuted,
-                                fontSize = 10.sp,
-                                modifier = Modifier.align(Alignment.End).padding(top = 4.dp),
+                    Box {
+                        Surface(
+                            color = if (message.outgoing) Color(0xFF1E5B51) else Color(0xFF192530),
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.clickable(enabled = message.messageId != null) {
+                                messageMenuId = message.messageId
+                            },
+                        ) {
+                            Column(Modifier.widthIn(max = 520.dp).padding(horizontal = 15.dp, vertical = 11.dp)) {
+                                message.replyTo?.let { DesktopReplyQuote(it) }
+                                Text(message.text, color = Color(0xFFEAF3F7))
+                                Text(
+                                    formatMessageTime(message.createdAt),
+                                    color = TextMuted,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.align(Alignment.End).padding(top = 4.dp),
+                                )
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = message.messageId != null && messageMenuId == message.messageId,
+                            onDismissRequest = { messageMenuId = null },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Ответить") },
+                                leadingIcon = {
+                                    Icon(Icons.AutoMirrored.Rounded.Reply, contentDescription = null)
+                                },
+                                onClick = {
+                                    val id = message.messageId ?: return@DropdownMenuItem
+                                    messageMenuId = null
+                                    replyingTo = ReplyReference(
+                                        messageId = id,
+                                        sender = message.sender,
+                                        preview = ReplyReference.preview(message.text),
+                                    )
+                                },
                             )
                         }
                     }
@@ -1279,6 +1315,7 @@ private fun GroupChatPane(
             }
         }
         error?.let { ErrorText(it) }
+        replyingTo?.let { DesktopReplyBar(it) { replyingTo = null } }
         Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1976,12 +2013,13 @@ private fun ChatPane(
     profile: HiddiProfile,
     profileAvatar: ByteArray?,
     messages: List<ChatEntry>,
+    ownNickname: String,
     isContact: Boolean,
     isBlocked: Boolean,
     peerOnline: Boolean,
     peerTyping: Boolean,
     onTypingChange: (Boolean) -> Unit,
-    onSend: (String, (String?) -> Unit) -> Unit,
+    onSend: (String, ReplyReference?, (String?) -> Unit) -> Unit,
     onSendImage: (File, (String?) -> Unit) -> Unit,
     onSendVoice: (ByteArray, Long, (String?) -> Unit) -> Unit,
     onLoadAttachment: suspend (AttachmentDescriptor) -> ByteArray,
@@ -2003,6 +2041,7 @@ private fun ChatPane(
     var error by remember { mutableStateOf<String?>(null) }
     var menuExpanded by remember { mutableStateOf(false) }
     var messageMenuId by remember(profile.nickname) { mutableStateOf<String?>(null) }
+    var replyingTo by remember(profile.nickname) { mutableStateOf<ReplyReference?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
     var clearForBoth by remember { mutableStateOf(false) }
     var showBlockDialog by remember { mutableStateOf(false) }
@@ -2047,15 +2086,17 @@ private fun ChatPane(
     fun submit() {
         if (draft.isBlank() || sending || attachmentBusy || voiceRecording || pendingVoice != null || isBlocked) return
         val text = draft
+        val reply = replyingTo
         onTypingChange(false)
         sending = true
         error = null
-        onSend(text) { failure ->
+        onSend(text, reply) { failure ->
             sending = false
             error = failure
             refocusRevision++
             if (failure == null) {
                 draft = ""
+                replyingTo = null
                 forceScrollRevision++
             }
         }
@@ -2339,6 +2380,7 @@ private fun ChatPane(
                                     modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
                                     horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
                                 ) {
+                                    message.replyTo?.let { DesktopReplyQuote(it) }
                                     when (message.attachment?.kind) {
                                         DesktopAttachmentStore.IMAGE_KIND ->
                                             DesktopAttachmentImage(
@@ -2359,6 +2401,21 @@ private fun ChatPane(
                                 expanded = message.messageId != null && messageMenuId == message.messageId,
                                 onDismissRequest = { messageMenuId = null },
                             ) {
+                                DropdownMenuItem(
+                                    text = { Text("Ответить") },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Rounded.Reply, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        val id = message.messageId ?: return@DropdownMenuItem
+                                        messageMenuId = null
+                                        replyingTo = ReplyReference(
+                                            messageId = id,
+                                            sender = if (message.outgoing) ownNickname else message.peer,
+                                            preview = ReplyReference.preview(message.text),
+                                        )
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Удалить у себя") },
                                     leadingIcon = {
@@ -2394,6 +2451,7 @@ private fun ChatPane(
             }
         }
         error?.let { ErrorText(it) }
+        replyingTo?.let { DesktopReplyBar(it) { replyingTo = null } }
         Surface(color = Color(0xFF101822), modifier = Modifier.fillMaxWidth()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -2960,6 +3018,67 @@ private fun DesktopVoiceWaveform(
                 strokeWidth = gap.coerceAtMost(4.dp.toPx()),
                 cap = StrokeCap.Round,
             )
+        }
+    }
+}
+
+/**
+ * The quoted message a reply points at. Renders from the snapshot carried in the
+ * reply itself, so it stays readable when the original is outside the local
+ * history window.
+ */
+@Composable
+private fun DesktopReplyQuote(reply: ReplyReference) {
+    Row(Modifier.padding(bottom = 6.dp)) {
+        Box(
+            Modifier.width(3.dp)
+                .height(30.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Mint),
+        )
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text("@${reply.sender}", color = Mint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                reply.preview.ifBlank { "Вложение" },
+                color = TextMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Sits above the composer while a reply is being written. */
+@Composable
+private fun DesktopReplyBar(reply: ReplyReference, onCancel: () -> Unit) {
+    Surface(color = Color(0xFF16202B), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+                .padding(start = 30.dp, end = 18.dp, top = 9.dp, bottom = 9.dp),
+        ) {
+            Icon(
+                Icons.AutoMirrored.Rounded.Reply,
+                contentDescription = null,
+                tint = Mint,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Ответ @${reply.sender}", color = Mint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    reply.preview.ifBlank { "Вложение" },
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Rounded.Close, contentDescription = "Отменить ответ", tint = TextMuted)
+            }
         }
     }
 }

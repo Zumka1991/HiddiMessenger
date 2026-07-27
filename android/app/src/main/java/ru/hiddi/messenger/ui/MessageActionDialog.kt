@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material3.AlertDialog
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.dp
 fun MessageActionDialog(
     preview: String,
     canDeleteForEveryone: Boolean,
+    onReply: () -> Unit,
     onDeleteLocal: () -> Unit,
     onDeleteEveryone: () -> Unit,
     onDismiss: () -> Unit,
@@ -38,7 +40,7 @@ fun MessageActionDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                "Удалить сообщение",
+                "Сообщение",
                 fontWeight = FontWeight.Bold,
             )
         },
@@ -57,6 +59,15 @@ fun MessageActionDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(14.dp),
                     )
+                }
+                Button(
+                    onClick = onReply,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.Reply, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Ответить")
                 }
                 OutlinedButton(
                     onClick = onDeleteLocal,

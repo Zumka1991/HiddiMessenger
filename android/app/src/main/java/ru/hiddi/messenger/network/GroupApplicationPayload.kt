@@ -4,14 +4,22 @@ import android.util.Base64
 import org.json.JSONObject
 import ru.hiddi.messenger.security.AttachmentDescriptor
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
+import ru.hiddi.messenger.security.ReplyReference
+import ru.hiddi.messenger.security.toJson
+import ru.hiddi.messenger.security.toReplyReference
 import java.security.SecureRandom
 
 /** Versioned application payload encrypted inside an OpenMLS application message. */
 sealed interface GroupApplicationPayload {
-    data class Text(val messageId: String?, val text: String) : GroupApplicationPayload
+    data class Text(
+        val messageId: String?,
+        val text: String,
+        val replyTo: ReplyReference? = null,
+    ) : GroupApplicationPayload
     data class Attachment(
         val messageId: String,
         val descriptor: AttachmentDescriptor,
+        val replyTo: ReplyReference? = null,
     ) : GroupApplicationPayload
     data class Metadata(val name: String) : GroupApplicationPayload
     data class Delete(val messageId: String) : GroupApplicationPayload
@@ -33,18 +41,33 @@ object GroupApplicationPayloadCodec {
             Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
         )
 
-    fun encodeText(messageId: String, text: String): ByteArray =
-        encode(JSONObject().put("type", "text").put("message_id", messageId).put("text", text))
+    fun encodeText(
+        messageId: String,
+        text: String,
+        replyTo: ReplyReference? = null,
+    ): ByteArray =
+        encode(
+            JSONObject()
+                .put("type", "text")
+                .put("message_id", messageId)
+                .put("text", text)
+                .apply { replyTo?.let { put("reply_to", it.toJson()) } },
+        )
 
     fun encodeDelete(messageId: String): ByteArray =
         encode(JSONObject().put("type", "delete").put("message_id", messageId))
 
-    fun encodeAttachment(messageId: String, descriptor: AttachmentDescriptor): ByteArray =
+    fun encodeAttachment(
+        messageId: String,
+        descriptor: AttachmentDescriptor,
+        replyTo: ReplyReference? = null,
+    ): ByteArray =
         encode(
             JSONObject()
                 .put("type", "attachment")
                 .put("message_id", messageId)
-                .put("attachment", EncryptedAttachmentStore.envelope(descriptor)),
+                .put("attachment", EncryptedAttachmentStore.envelope(descriptor))
+                .apply { replyTo?.let { put("reply_to", it.toJson()) } },
         )
 
     fun encodeMetadata(messageId: String, name: String): ByteArray {
@@ -69,13 +92,16 @@ object GroupApplicationPayloadCodec {
                 Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
             ).size in 16..64
         }.getOrDefault(false)) { "Некорректный group message id" }
+        val replyTo = payload.optJSONObject("reply_to")?.toReplyReference()
         return when (payload.getString("type")) {
-            "text" -> GroupApplicationPayload.Text(messageId, payload.getString("text"))
+            "text" ->
+                GroupApplicationPayload.Text(messageId, payload.getString("text"), replyTo)
             "attachment" -> GroupApplicationPayload.Attachment(
                 messageId,
                 requireNotNull(
                     EncryptedAttachmentStore.parseEnvelope(payload.getString("attachment")),
                 ) { "Некорректное group attachment" },
+                replyTo,
             )
             "group_metadata" -> GroupApplicationPayload.Metadata(
                 payload.getString("name").also {

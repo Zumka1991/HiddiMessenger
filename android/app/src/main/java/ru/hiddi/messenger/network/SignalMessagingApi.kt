@@ -21,7 +21,9 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 import ru.hiddi.messenger.security.AndroidSignalProtocolStore
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.NativeMlsBridge
+import ru.hiddi.messenger.security.ReplyReference
 import ru.hiddi.messenger.security.SignalStateRepository
+import ru.hiddi.messenger.security.toReplyReference
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
@@ -482,20 +484,29 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
             )
         }
 
-    suspend fun send(profile: AccountProfile, recipient: String, message: String): String = withContext(Dispatchers.IO) {
+    suspend fun send(
+        profile: AccountProfile,
+        recipient: String,
+        message: String,
+        replyTo: ReplyReference? = null,
+    ): String = withContext(Dispatchers.IO) {
         SIGNAL_STATE_MUTEX.withLock {
             val normalized = recipient.trim().removePrefix("@").lowercase()
             val state = resolveRegistrationId(profile, repository.load())
             val store = AndroidSignalProtocolStore(state)
             val local = SignalProtocolAddress(profile.nickname, resolveDeviceNumber(profile))
-            val deliveries = encryptForDevices(profile, normalized, message, store, local)
+            // What actually travels: the body plus reply metadata when there is
+            // any. Without metadata this is the bare text older clients expect.
+            val wire = HiddiEnvelope.wrap(message, replyTo)
+            val deliveries = encryptForDevices(profile, normalized, wire, store, local)
             repository.save(store.snapshot())
             val messageId = JSONObject(request("POST", "${profile.serverUrl}/v1/messages", JSONObject()
                 .put("recipient_nickname", normalized).put("device_ciphertexts", deliveries).toString(), profile.accessToken))
                 .getString("message_id")
             // Other own devices receive an E2EE-only journal entry, never plaintext metadata.
             if (normalized != profile.nickname) {
-                val sync = JSONObject().put("type", "hiddi.sync.v1").put("peer", normalized).put("text", message).toString()
+                val sync = JSONObject().put("type", HiddiEnvelope.SELF_SYNC)
+                    .put("peer", normalized).put("text", wire).toString()
                 val selfDeliveries = encryptForDevices(profile, profile.nickname, sync, store, local)
                 if (selfDeliveries.length() > 0) {
                     repository.save(store.snapshot())
@@ -671,7 +682,7 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                     val text = plain.decodeToString()
                     val sync = runCatching { JSONObject(text) }.getOrNull()
                     when (sync?.optString("type")) {
-                        "hiddi.sync.batch.v1" -> {
+                        HiddiEnvelope.HISTORY_SYNC -> {
                             val entries = sync.getJSONArray("entries")
                             for (entryIndex in 0 until entries.length()) {
                                 val entry = entries.getJSONObject(entryIndex)
@@ -688,18 +699,35 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                                     deliveryStatus =
                                         entry.optString("delivery_status", "delivered"),
                                     historicalSync = true,
+                                    replyTo =
+                                        entry.optJSONObject("reply_to")?.toReplyReference(),
                                 )
                             }
                         }
-                        "hiddi.sync.v1" ->
+                        HiddiEnvelope.SELF_SYNC -> {
+                            // Own-device journal entries carry the wrapper too,
+                            // so a reply survives on every device the account owns.
+                            val body = HiddiEnvelope.unwrap(sync.optString("text"))
                             output += DecryptedMessage(
                                 messageId = item.getString("message_id"),
                                 senderNickname =
                                     sync.optString("peer").ifBlank { sender },
-                                text = sync.optString("text"),
+                                text = body.text,
                                 createdAt = item.getString("created_at"),
                                 outgoing = true,
+                                replyTo = body.replyTo,
                             )
+                        }
+                        HiddiEnvelope.MESSAGE -> {
+                            val body = HiddiEnvelope.unwrap(text)
+                            output += DecryptedMessage(
+                                messageId = item.getString("message_id"),
+                                senderNickname = sender,
+                                text = body.text,
+                                createdAt = item.getString("created_at"),
+                                replyTo = body.replyTo,
+                            )
+                        }
                         else ->
                             output += DecryptedMessage(
                                 messageId = item.getString("message_id"),
@@ -707,8 +735,8 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                                 // A newer peer may use an envelope this build
                                 // cannot read. A placeholder beats rendering raw
                                 // JSON as if it were the text the sender typed.
-                                text = if (sync.isUnknownHiddiEnvelope()) {
-                                    UNSUPPORTED_MESSAGE_TEXT
+                                text = if (HiddiEnvelope.isUnsupported(sync)) {
+                                    HiddiEnvelope.UNSUPPORTED_TEXT
                                 } else {
                                     text
                                 },
@@ -795,9 +823,6 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     private companion object {
         const val DEFAULT_DEVICE_NUMBER = 1
         val SIGNAL_STATE_MUTEX = Mutex()
-
-        /** Shown instead of raw JSON when a peer uses a newer envelope. */
-        const val UNSUPPORTED_MESSAGE_TEXT = "Сообщение не поддерживается этой версией"
     }
 }
 
@@ -812,6 +837,7 @@ data class DecryptedMessage(
     val outgoing: Boolean = false,
     val deliveryStatus: String = "delivered",
     val historicalSync: Boolean = false,
+    val replyTo: ReplyReference? = null,
 )
 data class DeviceLinkCode(val code: String, val expiresAt: Long)
 data class LinkedDevice(
@@ -852,15 +878,6 @@ data class GroupEvent(
 enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-/**
- * True when the plaintext is a Hiddi envelope this build cannot interpret.
- * Attachment envelopes are excluded: they are unwrapped further down the path.
- */
-private fun JSONObject?.isUnknownHiddiEnvelope(): Boolean {
-    val type = this?.optString("type")?.takeIf(String::isNotBlank) ?: return false
-    return type.startsWith("hiddi.") && type != EncryptedAttachmentStore.ATTACHMENT_TYPE
-}
-
 private fun JSONObject.userProfile() = UserSearchResult(
     nickname = getString("nickname"),
     displayName = optString("display_name"),

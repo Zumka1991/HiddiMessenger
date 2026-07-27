@@ -165,8 +165,11 @@ class HiddiSession internal constructor(
         groupManager.create(name, invitedNickname)
 
     @Synchronized
-    fun sendGroupText(groupId: String, text: String): DesktopGroupMessage =
-        groupManager.sendText(groupId, text)
+    fun sendGroupText(
+        groupId: String,
+        text: String,
+        replyTo: ReplyReference? = null,
+    ): DesktopGroupMessage = groupManager.sendText(groupId, text, replyTo)
 
     @Synchronized
     fun syncGroups(): List<DesktopGroup> {
@@ -365,6 +368,7 @@ class HiddiSession internal constructor(
                                             )
                                         }.getOrNull()
                                     },
+                            replyTo = item.optJSONObject("reply_to")?.toReplyReference(),
                         )
                     }
                 }.getOrNull()
@@ -506,15 +510,34 @@ class HiddiSession internal constructor(
             val envelope = runCatching { JSONObject(plaintext) }.getOrNull()
             val entries = when (envelope?.optString("type")) {
                 HiddiEnvelope.HISTORY_SYNC -> historyBatchEntries(envelope, messageId, knownMessageIds)
-                HiddiEnvelope.SELF_SYNC -> listOf(
-                    inboxEntry(
-                        peer = envelope.optString("peer").ifBlank { sender },
-                        text = envelope.optString("text"),
-                        outgoing = true,
-                        createdAt = wireTimestampMillis(item.getString("created_at")),
-                        messageId = messageId,
-                    ),
-                )
+                HiddiEnvelope.SELF_SYNC -> {
+                    // Own-device journal entries carry the wrapper too, so the
+                    // reply survives on every device the account owns.
+                    val body = HiddiEnvelope.unwrap(envelope.optString("text"))
+                    listOf(
+                        inboxEntry(
+                            peer = envelope.optString("peer").ifBlank { sender },
+                            text = body.text,
+                            outgoing = true,
+                            createdAt = wireTimestampMillis(item.getString("created_at")),
+                            messageId = messageId,
+                            replyTo = body.replyTo,
+                        ),
+                    )
+                }
+                HiddiEnvelope.MESSAGE -> {
+                    val body = HiddiEnvelope.unwrap(plaintext)
+                    listOf(
+                        inboxEntry(
+                            peer = sender,
+                            text = body.text,
+                            outgoing = false,
+                            createdAt = wireTimestampMillis(item.getString("created_at")),
+                            messageId = messageId,
+                            replyTo = body.replyTo,
+                        ),
+                    )
+                }
                 else -> listOf(
                     inboxEntry(
                         peer = sender,
@@ -565,6 +588,7 @@ class HiddiSession internal constructor(
                     createdAt = wireTimestampMillis(entry.getString("created_at")),
                     messageId = sourceId,
                     deliveryStatus = entry.optString("delivery_status", "delivered"),
+                    replyTo = entry.optJSONObject("reply_to")?.toReplyReference(),
                 )
             }.getOrNull()
         }
@@ -577,11 +601,13 @@ class HiddiSession internal constructor(
         createdAt: Long,
         messageId: String,
         deliveryStatus: String = "delivered",
+        replyTo: ReplyReference? = null,
     ): ChatEntry {
         val attachment = DesktopAttachmentStore.parseEnvelope(text)
         attachment?.let { runCatching { cacheAttachment(it) } }
         return ChatEntry(
             peer = peer,
+            replyTo = replyTo,
             text = attachment?.displayText() ?: text,
             outgoing = outgoing,
             createdAt = createdAt,
@@ -675,9 +701,9 @@ class HiddiSession internal constructor(
     }
 
     @Synchronized
-    fun send(recipient: String, plaintext: String): ChatEntry {
+    fun send(recipient: String, plaintext: String, replyTo: ReplyReference? = null): ChatEntry {
         require(plaintext.isNotBlank()) { "Сообщение пустое" }
-        return sendPayload(recipient, plaintext, plaintext, null)
+        return sendPayload(recipient, plaintext, plaintext, null, replyTo)
     }
 
     @Synchronized
@@ -802,10 +828,14 @@ class HiddiSession internal constructor(
         plaintext: String,
         displayText: String,
         attachment: AttachmentDescriptor?,
+        replyTo: ReplyReference? = null,
     ): ChatEntry {
         val peer = recipient.trim().removePrefix("@").lowercase()
         require(peer.matches(Regex("[a-z0-9_]{3,32}"))) { "Некорректный никнейм" }
-        require(plaintext.encodeToByteArray().size <= 32_000) { "Сообщение слишком длинное" }
+        // What actually travels: the body plus reply metadata when there is any.
+        // Without metadata this is the bare plaintext older clients expect.
+        val wire = HiddiEnvelope.wrap(plaintext, replyTo)
+        require(wire.encodeToByteArray().size <= 32_000) { "Сообщение слишком длинное" }
 
         val local = SignalProtocolAddress(nickname, deviceNumber)
         val bundleJson =
@@ -821,7 +851,7 @@ class HiddiSession internal constructor(
             if (!store.containsSession(remote)) {
                 SessionBuilder(store, remote, local).process(bundle(value))
             }
-            val encrypted = SessionCipher(store, local, remote).encrypt(plaintext.encodeToByteArray())
+            val encrypted = SessionCipher(store, local, remote).encrypt(wire.encodeToByteArray())
             val envelope = byteArrayOf(encrypted.type.toByte()) + encrypted.serialize()
             deliveries.put(JSONObject().put("device_number", remote.deviceId).put("ciphertext", envelope.base64Url()))
             envelope.fill(0)
@@ -838,7 +868,7 @@ class HiddiSession internal constructor(
         if (peer != nickname) {
             val ownBundles = authenticatedRequest("GET", "$server/v1/users/$nickname/prekey-bundles", null) as JSONArray
             val ownDeliveries = JSONArray()
-            val syncPayload = JSONObject().put("type", HiddiEnvelope.SELF_SYNC).put("peer", peer).put("text", plaintext).toString()
+            val syncPayload = JSONObject().put("type", HiddiEnvelope.SELF_SYNC).put("peer", peer).put("text", wire).toString()
             for (index in 0 until ownBundles.length()) {
                 val value = ownBundles.getJSONObject(index)
                 val remote = SignalProtocolAddress(nickname, value.optInt("device_number", 1))
@@ -862,6 +892,7 @@ class HiddiSession internal constructor(
                 messageId = result.getString("message_id"),
                 deliveryStatus = "sent",
                 attachment = attachment,
+                replyTo = replyTo,
             )
         appendHistory(entry)
         persist()
@@ -969,6 +1000,7 @@ class HiddiSession internal constructor(
                 .put("delivery_status", entry.deliveryStatus)
                 .apply {
                     entry.attachment?.let { put("attachment", it.toJson()) }
+                    entry.replyTo?.let { put("reply_to", it.toJson()) }
                 },
         )
     }
@@ -1021,6 +1053,7 @@ class HiddiSession internal constructor(
             .put("delivery_status", entry.deliveryStatus)
             .apply {
                 entry.messageId?.let { put("source_message_id", it) }
+                entry.replyTo?.let { put("reply_to", it.toJson()) }
             }
 
     private companion object {
@@ -1120,13 +1153,49 @@ internal object HiddiEnvelope {
     /** Own-device history snapshot delivered to a newly linked device. */
     const val HISTORY_SYNC = "hiddi.sync.batch.v1"
 
+    /**
+     * Wrapper that carries reply metadata around an ordinary message body. It is
+     * only used when there is something to carry, so plain conversations keep
+     * travelling as bare text and stay readable to older clients.
+     */
+    const val MESSAGE = "hiddi.msg.v2"
+
     /** Shown instead of raw JSON when a peer uses a newer envelope. */
     const val UNSUPPORTED_TEXT = "Сообщение не поддерживается этой версией"
 
     private const val PREFIX = "hiddi."
 
     private val KNOWN =
-        setOf(SELF_SYNC, HISTORY_SYNC, DesktopAttachmentStore.ATTACHMENT_TYPE)
+        setOf(SELF_SYNC, HISTORY_SYNC, MESSAGE, DesktopAttachmentStore.ATTACHMENT_TYPE)
+
+    /** A message body together with the reply metadata that wrapped it. */
+    data class Body(val text: String, val replyTo: ReplyReference? = null)
+
+    /**
+     * Wraps [body] only when there is metadata to attach. [body] stays exactly
+     * what an older client would have sent, so an attachment envelope nests
+     * inside the wrapper untouched.
+     */
+    fun wrap(body: String, replyTo: ReplyReference?): String =
+        if (replyTo == null) {
+            body
+        } else {
+            JSONObject()
+                .put("type", MESSAGE)
+                .put("body", body)
+                .put("reply_to", replyTo.toJson())
+                .toString()
+        }
+
+    /** Inverse of [wrap]. A plaintext that is not a wrapper is its own body. */
+    fun unwrap(plaintext: String): Body {
+        val payload = runCatching { JSONObject(plaintext) }.getOrNull()
+        if (payload?.optString("type") != MESSAGE) return Body(plaintext)
+        return Body(
+            text = payload.optString("body"),
+            replyTo = payload.optJSONObject("reply_to")?.toReplyReference(),
+        )
+    }
 
     /**
      * True when the payload announces a Hiddi envelope this build cannot

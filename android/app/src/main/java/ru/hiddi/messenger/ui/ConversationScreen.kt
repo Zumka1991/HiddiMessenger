@@ -103,6 +103,7 @@ import ru.hiddi.messenger.network.AccountProfile
 import ru.hiddi.messenger.network.SignalMessagingApi
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
+import ru.hiddi.messenger.security.ReplyReference
 import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.SignalStateRepository
@@ -145,6 +146,9 @@ fun ConversationScreen(
     onBlockUser: () -> Unit,
     onUnblockUser: () -> Unit,
     onDeleteMessage: (ChatHistoryItem, Boolean) -> Unit,
+    replyingTo: ReplyReference?,
+    onReplyTo: (ChatHistoryItem) -> Unit,
+    onCancelReply: () -> Unit,
     onSend: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -405,6 +409,7 @@ fun ConversationScreen(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        replyingTo?.let { ReplyComposerBar(it, onCancelReply) }
         Surface(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             shape = RoundedCornerShape(28.dp),
@@ -530,6 +535,10 @@ fun ConversationScreen(
         MessageActionDialog(
             preview = item.text,
             canDeleteForEveryone = item.outgoing,
+            onReply = {
+                selectedForActions = null
+                onReplyTo(item)
+            },
             onDeleteLocal = {
                 selectedForActions = null
                 onDeleteMessage(item, false)

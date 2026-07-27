@@ -72,6 +72,7 @@ import ru.hiddi.messenger.security.GroupChatMessage
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.ChatHistoryItem
 import ru.hiddi.messenger.security.EncryptedAttachmentStore
+import ru.hiddi.messenger.security.ReplyReference
 
 @Composable
 fun GroupConversationScreen(
@@ -92,6 +93,9 @@ fun GroupConversationScreen(
     onClearHistory: () -> Unit,
     onDeleteGroup: () -> Unit,
     onDeleteMessage: (GroupChatMessage, Boolean) -> Unit,
+    replyingTo: ReplyReference?,
+    onReplyTo: (GroupChatMessage) -> Unit,
+    onCancelReply: () -> Unit,
     onImageSelected: (Uri) -> Unit,
     onStartVoice: () -> Unit,
     onStopVoice: () -> Unit,
@@ -262,12 +266,11 @@ fun GroupConversationScreen(
                             time = message.time,
                             attachment = message.attachment,
                             messageId = message.messageId,
+                            replyTo = message.replyTo,
                         ),
                         attachmentStore = attachmentStore,
                         onLongPress = {
-                            if (message.outgoing && message.messageId != null) {
-                                selectedForActions = message
-                            }
+                            if (message.messageId != null) selectedForActions = message
                         },
                     )
                 }
@@ -280,6 +283,7 @@ fun GroupConversationScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
         )
+        replyingTo?.let { ReplyComposerBar(it, onCancelReply) }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -541,6 +545,10 @@ fun GroupConversationScreen(
         MessageActionDialog(
             preview = message.text,
             canDeleteForEveryone = message.outgoing,
+            onReply = {
+                selectedForActions = null
+                onReplyTo(message)
+            },
             onDeleteLocal = {
                 selectedForActions = null
                 onDeleteMessage(message, false)

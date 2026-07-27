@@ -104,6 +104,7 @@ import ru.hiddi.messenger.security.EncryptedChatHistory
 import ru.hiddi.messenger.security.EncryptedContactsStore
 import ru.hiddi.messenger.security.InMemoryVoiceRecorder
 import ru.hiddi.messenger.security.LocalGroupChat
+import ru.hiddi.messenger.security.ReplyReference
 import ru.hiddi.messenger.security.SignalStateRepository
 import ru.hiddi.messenger.security.TrustedSafetyNumberStore
 import ru.hiddi.messenger.security.readSafetyQr
@@ -132,6 +133,7 @@ fun ChatScreen(
     var searchError by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
+    var replyingTo by remember { mutableStateOf<ReplyReference?>(null) }
     var status by remember { mutableStateOf("Защищено · E2EE") }
     var attachmentInProgress by remember { mutableStateOf(false) }
     var voiceRecording by remember { mutableStateOf(false) }
@@ -174,6 +176,7 @@ fun ChatScreen(
     var groupRevision by remember { mutableIntStateOf(0) }
     var selectedGroupId by remember { mutableStateOf<String?>(null) }
     var groupDraft by remember { mutableStateOf("") }
+    var groupReplyingTo by remember { mutableStateOf<ReplyReference?>(null) }
     var groupStatus by remember { mutableStateOf("OpenMLS · сквозное шифрование") }
     var groupBusy by remember { mutableStateOf(false) }
     var groupCreationError by remember { mutableStateOf<String?>(null) }
@@ -1117,17 +1120,35 @@ fun ChatScreen(
                 onVoicePermissionDenied = {
                     groupStatus = "Без доступа к микрофону нельзя записать войс"
                 },
+                replyingTo = groupReplyingTo,
+                onReplyTo = { message ->
+                    message.messageId?.let { id ->
+                        groupReplyingTo = ReplyReference(
+                            messageId = id,
+                            sender = message.sender,
+                            preview = ReplyReference.preview(message.text),
+                        )
+                    }
+                },
+                onCancelReply = { groupReplyingTo = null },
                 onSend = {
                     val text = groupDraft.trim()
                     if (text.isEmpty() || groupBusy) return@GroupConversationScreen
+                    val reply = groupReplyingTo
                     groupBusy = true
                     groupStatus = "Шифруем и отправляем…"
                     scope.launch {
                         try {
                             withContext(Dispatchers.IO) {
-                                groupCoordinator.sendText(profile, selectedGroup.groupId, text)
+                                groupCoordinator.sendText(
+                                    profile,
+                                    selectedGroup.groupId,
+                                    text,
+                                    reply,
+                                )
                             }
                             groupDraft = ""
+                            groupReplyingTo = null
                             refreshGroups()
                             groupStatus = "Доставлено серверу в зашифрованном виде"
                         } catch (error: Exception) {
@@ -1272,6 +1293,17 @@ fun ChatScreen(
                         }
                     }
                 },
+                replyingTo = replyingTo,
+                onReplyTo = { item ->
+                    item.messageId?.let { id ->
+                        replyingTo = ReplyReference(
+                            messageId = id,
+                            sender = if (item.outgoing) profile.nickname else item.peer,
+                            preview = ReplyReference.preview(item.text),
+                        )
+                    }
+                },
+                onCancelReply = { replyingTo = null },
                 onSend = {
                     val target = recipient ?: return@ConversationScreen
                     if (identityChanged) {
@@ -1289,15 +1321,18 @@ fun ChatScreen(
                             time = Instant.now().toString(),
                             messageId = localMessageId,
                             deliveryStatus = "sending",
+                            replyTo = replyingTo,
                         )
+                    val reply = replyingTo
                     historyStore.append(pending)
                     history = history + pending
                     scrollToNewestRevision++
                     draft = ""
+                    replyingTo = null
                     status = "Отправляем…"
                     scope.launch {
                         try {
-                            val messageId = api.send(profile, target, text)
+                            val messageId = api.send(profile, target, text, reply)
                             val item =
                                 pending.copy(
                                     messageId = messageId,
@@ -1313,7 +1348,10 @@ fun ChatScreen(
                         } catch (error: Exception) {
                             historyStore.deleteMessage(localMessageId)
                             history = history.filterNot { it.messageId == localMessageId }
-                            if (draft.isBlank()) draft = text
+                            if (draft.isBlank()) {
+                                draft = text
+                                replyingTo = reply
+                            }
                             status = error.message ?: "Не удалось отправить"
                         }
                     }

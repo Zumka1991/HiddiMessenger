@@ -10,6 +10,7 @@ import ru.hiddi.messenger.security.GroupDirectoryMember
 import ru.hiddi.messenger.security.LocalGroupChat
 import ru.hiddi.messenger.security.NativeMlsBridge
 import ru.hiddi.messenger.security.PendingMlsMembershipKind
+import ru.hiddi.messenger.security.ReplyReference
 import java.util.UUID
 
 /**
@@ -189,6 +190,7 @@ class GroupMlsCoordinator(
                 event.senderNickname,
                 payload.text,
                 event.createdAt,
+                replyTo = payload.replyTo,
             )
             is GroupApplicationPayload.Attachment -> {
                 val descriptor = payload.descriptor
@@ -204,6 +206,7 @@ class GroupMlsCoordinator(
                     },
                     event.createdAt,
                     descriptor,
+                    payload.replyTo,
                 )
                 listOfNotNull(descriptor.preview, descriptor).forEach { part ->
                     if (!attachmentStore.exists(part.attachmentId)) {
@@ -228,14 +231,19 @@ class GroupMlsCoordinator(
         }
     }
 
-    suspend fun sendText(profile: AccountProfile, groupId: ByteArray, text: String) {
+    suspend fun sendText(
+        profile: AccountProfile,
+        groupId: ByteArray,
+        text: String,
+        replyTo: ReplyReference? = null,
+    ) {
         val trimmed = text.trim()
         require(trimmed.isNotEmpty()) { "Пустое сообщение" }
         val group = groupStore.groups().firstOrNull { it.groupId.contentEquals(groupId) }
             ?: error("Неизвестная локальная MLS-группа")
         val recipients = group.members.filterNot { it == profile.nickname }
         val messageId = GroupApplicationPayloadCodec.newMessageId()
-        val payload = GroupApplicationPayloadCodec.encodeText(messageId, trimmed)
+        val payload = GroupApplicationPayloadCodec.encodeText(messageId, trimmed, replyTo)
         val envelope = try {
             requireNotNull(NativeMlsBridge.createApplicationMessage(groupId, payload)) {
                 "Не удалось зашифровать group message"
@@ -250,7 +258,13 @@ class GroupMlsCoordinator(
             envelope,
             clientEventId = messageId,
         )
-        groupStore.appendOutgoing(groupId, messageId, profile.nickname, trimmed)
+        groupStore.appendOutgoing(
+            groupId,
+            messageId,
+            profile.nickname,
+            trimmed,
+            replyTo = replyTo,
+        )
         eventOutbox.retry(profile)
     }
 

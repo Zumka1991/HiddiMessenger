@@ -78,6 +78,7 @@ class EncryptedGroupChatStore(context: Context) {
         plaintext: String,
         createdAt: String,
         attachment: AttachmentDescriptor? = null,
+        replyTo: ReplyReference? = null,
     ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
@@ -95,6 +96,7 @@ class EncryptedGroupChatStore(context: Context) {
                         attachment?.let {
                             put("attachment", EncryptedAttachmentStore.envelope(it))
                         }
+                        replyTo?.let { put("reply_to", it.toJson()) }
                     },
             )
             write(root)
@@ -107,6 +109,7 @@ class EncryptedGroupChatStore(context: Context) {
         sender: String,
         plaintext: String,
         attachment: AttachmentDescriptor? = null,
+        replyTo: ReplyReference? = null,
     ) = synchronized(lock) {
         val root = read()
         val group = root.group(groupId) ?: error("Неизвестная локальная MLS-группа")
@@ -121,6 +124,7 @@ class EncryptedGroupChatStore(context: Context) {
                     attachment?.let {
                         put("attachment", EncryptedAttachmentStore.envelope(it))
                     }
+                    replyTo?.let { put("reply_to", it.toJson()) }
                 },
         )
         write(root)
@@ -272,6 +276,7 @@ class EncryptedGroupChatStore(context: Context) {
                 attachment = message.optString("attachment")
                     .takeIf(String::isNotBlank)
                     ?.let(EncryptedAttachmentStore::parseEnvelope),
+                replyTo = message.optJSONObject("reply_to")?.toReplyReference(),
             )
         }
     }
@@ -317,4 +322,5 @@ data class GroupChatMessage(
     val outgoing: Boolean,
     val time: String,
     val attachment: AttachmentDescriptor? = null,
+    val replyTo: ReplyReference? = null,
 )

@@ -16,6 +16,7 @@ data class DesktopGroupMessage(
     val text: String,
     val outgoing: Boolean,
     val createdAt: Long,
+    val replyTo: ReplyReference? = null,
 )
 
 data class DesktopGroup(
@@ -123,7 +124,11 @@ internal class DesktopGroupManager(
         }
     }
 
-    fun sendText(groupId: String, text: String): DesktopGroupMessage {
+    fun sendText(
+        groupId: String,
+        text: String,
+        replyTo: ReplyReference? = null,
+    ): DesktopGroupMessage {
         val trimmed = text.trim()
         require(trimmed.isNotEmpty()) { "Введите сообщение" }
         val group = findGroup(groupId.base64UrlDecode()) ?: error("MLS-группа не найдена")
@@ -133,7 +138,8 @@ internal class DesktopGroupManager(
                 JSONObject()
                     .put("type", "text")
                     .put("message_id", id)
-                    .put("text", trimmed),
+                    .put("text", trimmed)
+                    .apply { replyTo?.let { put("reply_to", it.toJson()) } },
             )
         val envelope = try {
             requireNotNull(
@@ -156,6 +162,7 @@ internal class DesktopGroupManager(
                 .put("text", trimmed)
                 .put("outgoing", true)
                 .put("created_at", System.currentTimeMillis())
+                .apply { replyTo?.let { put("reply_to", it.toJson()) } }
         group.getJSONArray("messages").put(message)
         session.persistGroupState()
         flushOutbox()
@@ -258,6 +265,7 @@ internal class DesktopGroupManager(
                     sender,
                     payload.getString("text"),
                     createdAt,
+                    payload.optJSONObject("reply_to")?.toReplyReference(),
                 )
             "group_metadata" ->
                 group.put(
@@ -273,7 +281,15 @@ internal class DesktopGroupManager(
                     DesktopAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
                     else -> "Вложение"
                 }
-                appendIncoming(group, eventId, messageId, sender, label, createdAt)
+                appendIncoming(
+                    group,
+                    eventId,
+                    messageId,
+                    sender,
+                    label,
+                    createdAt,
+                    payload.optJSONObject("reply_to")?.toReplyReference(),
+                )
             }
             "delete" -> {
                 val messages = group.getJSONArray("messages")
@@ -301,6 +317,7 @@ internal class DesktopGroupManager(
         sender: String,
         text: String,
         createdAt: String,
+        replyTo: ReplyReference? = null,
     ) {
         val messages = group.getJSONArray("messages")
         if (messages.objects().any {
@@ -317,6 +334,7 @@ internal class DesktopGroupManager(
                 .put("sender", sender)
                 .put("text", text)
                 .put("outgoing", false)
+                .apply { replyTo?.let { put("reply_to", it.toJson()) } }
                 .put(
                     "created_at",
                     runCatching { wireTimestampMillis(createdAt) }
@@ -543,6 +561,7 @@ internal class DesktopGroupManager(
             text = json.getString("text"),
             outgoing = json.optBoolean("outgoing"),
             createdAt = json.optLong("created_at", System.currentTimeMillis()),
+            replyTo = json.optJSONObject("reply_to")?.toReplyReference(),
         )
 
     private fun encodePayload(payload: JSONObject): ByteArray =

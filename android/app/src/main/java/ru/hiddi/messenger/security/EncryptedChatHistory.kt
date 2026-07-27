@@ -181,6 +181,7 @@ class EncryptedChatHistory(context: Context) {
                     it.optJSONObject("attachment")?.toAttachmentDescriptor(),
                     it.optString("message_id").takeIf(String::isNotBlank),
                     it.optString("delivery_status", "sent"),
+                    it.optJSONObject("reply_to")?.toReplyReference(),
                 )
             }
 
@@ -205,6 +206,7 @@ data class ChatHistoryItem(
     val messageId: String? = null,
     /** sent, delivered, or read. Only meaningful for outgoing messages. */
     val deliveryStatus: String = "sent",
+    val replyTo: ReplyReference? = null,
 )
 
 private fun ChatHistoryItem.toJson(): JSONObject =
@@ -216,7 +218,10 @@ private fun ChatHistoryItem.toJson(): JSONObject =
         .put("unread", unread)
         .apply { messageId?.let { put("message_id", it) } }
         .put("delivery_status", deliveryStatus)
-        .apply { attachment?.let { put("attachment", it.toJson()) } }
+        .apply {
+            attachment?.let { put("attachment", it.toJson()) }
+            replyTo?.let { put("reply_to", it.toJson()) }
+        }
 
 private fun AttachmentDescriptor.toJson(): JSONObject = JSONObject()
     .put("attachment_id", attachmentId)
