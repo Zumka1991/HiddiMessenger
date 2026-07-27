@@ -408,7 +408,7 @@ class HiddiSession internal constructor(
                 .forEach { entries ->
                     val payload =
                         JSONObject()
-                            .put("type", "hiddi.sync.batch.v1")
+                            .put("type", HISTORY_SYNC_TYPE)
                             .put("entries", JSONArray(entries))
                             .toString()
                     val encrypted =
@@ -457,49 +457,131 @@ class HiddiSession internal constructor(
                 val item = inbox.getJSONObject(index)
                 val messageId = item.getString("message_id")
                 if (!knownMessageIds.add(messageId)) {
-                    authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+                    runCatching { acknowledgeMessage(messageId) }
                     continue
                 }
-                val raw = item.getString("ciphertext").base64UrlDecode()
-                require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
-                val sender = item.getString("sender_nickname")
-                val remote = SignalProtocolAddress(sender, item.optInt("sender_device_number", 1))
-                val local = SignalProtocolAddress(nickname, deviceNumber)
-                val plain = when (raw.first().toInt()) {
-                    CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
-                    CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
-                    else -> error("Неизвестный тип сообщения")
-                }
-                try {
-                    val plaintext = plain.decodeToString()
-                    val sync = runCatching { JSONObject(plaintext) }.getOrNull()?.takeIf { it.optString("type") == "hiddi.sync.v1" }
-                    val visibleText = sync?.optString("text") ?: plaintext
-                    val peer = sync?.optString("peer")?.ifBlank { sender } ?: sender
-                    val attachment = DesktopAttachmentStore.parseEnvelope(visibleText)
-                    attachment?.let { runCatching { cacheAttachment(it) } }
-                    val entry =
-                        ChatEntry(
-                            peer = peer,
-                            text = attachment?.displayText() ?: visibleText,
-                            outgoing = sync != null,
-                            createdAt = wireTimestampMillis(item.getString("created_at")),
-                            messageId = messageId,
-                            deliveryStatus = "delivered",
-                            attachment = attachment,
-                        )
-                    appendHistory(entry)
-                    persist()
-                    authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
-                    received += entry
-                } finally {
-                    plain.fill(0)
-                    raw.fill(0)
-                }
+                // The inbox is ordered oldest-first and every row without an ACK
+                // is returned again on the next poll. One invalid envelope must
+                // not permanently block every newer message, so a failure is
+                // acknowledged and skipped instead of aborting the whole batch.
+                runCatching { received += readInboxItem(item, messageId, knownMessageIds) }
+                    .onFailure { knownMessageIds.remove(messageId) }
+                runCatching { acknowledgeMessage(messageId) }
             }
             batchCount++
             if (inbox.length() < SERVER_INBOX_PAGE_SIZE) break
         } while (batchCount < MAX_INBOX_BATCHES)
         return received
+    }
+
+    private fun acknowledgeMessage(messageId: String) {
+        authenticatedRequest("POST", "$server/v1/messages/$messageId", null)
+    }
+
+    private fun readInboxItem(
+        item: JSONObject,
+        messageId: String,
+        knownMessageIds: MutableSet<String>,
+    ): List<ChatEntry> {
+        val raw = item.getString("ciphertext").base64UrlDecode()
+        val sender = item.getString("sender_nickname")
+        val remote = SignalProtocolAddress(sender, item.optInt("sender_device_number", 1))
+        val local = SignalProtocolAddress(nickname, deviceNumber)
+        val plain =
+            try {
+                require(raw.isNotEmpty()) { "Получен пустой encrypted envelope" }
+                when (raw.first().toInt()) {
+                    CiphertextMessage.PREKEY_TYPE -> SessionCipher(store, local, remote).decrypt(PreKeySignalMessage(raw.drop(1).toByteArray()))
+                    CiphertextMessage.WHISPER_TYPE -> SessionCipher(store, local, remote).decrypt(SignalMessage(raw.drop(1).toByteArray()))
+                    else -> error("Неизвестный тип сообщения")
+                }
+            } finally {
+                raw.fill(0)
+            }
+        // The ratchet advanced even when the decrypted payload turns out to be
+        // unusable: persist before parsing so a retry cannot desynchronize it.
+        persist()
+        try {
+            val plaintext = plain.decodeToString()
+            val envelope = runCatching { JSONObject(plaintext) }.getOrNull()
+            val entries = when (envelope?.optString("type")) {
+                HISTORY_SYNC_TYPE -> historyBatchEntries(envelope, messageId, knownMessageIds)
+                SELF_SYNC_TYPE -> listOf(
+                    inboxEntry(
+                        peer = envelope.optString("peer").ifBlank { sender },
+                        text = envelope.optString("text"),
+                        outgoing = true,
+                        createdAt = wireTimestampMillis(item.getString("created_at")),
+                        messageId = messageId,
+                    ),
+                )
+                else -> listOf(
+                    inboxEntry(
+                        peer = sender,
+                        text = plaintext,
+                        outgoing = false,
+                        createdAt = wireTimestampMillis(item.getString("created_at")),
+                        messageId = messageId,
+                    ),
+                )
+            }
+            entries.forEach(::appendHistory)
+            persist()
+            return entries
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    /**
+     * Expands an encrypted history snapshot from another own device. Entries are
+     * deduplicated by their original message id, so a snapshot overlapping the
+     * local history does not create doubles.
+     */
+    private fun historyBatchEntries(
+        envelope: JSONObject,
+        messageId: String,
+        knownMessageIds: MutableSet<String>,
+    ): List<ChatEntry> {
+        val entries = envelope.optJSONArray("entries") ?: return emptyList()
+        return (0 until entries.length()).mapNotNull { index ->
+            runCatching {
+                val entry = entries.getJSONObject(index)
+                val sourceId =
+                    entry.optString("source_message_id").takeIf(String::isNotBlank)
+                        ?: "$messageId:sync:$index"
+                if (!knownMessageIds.add(sourceId)) return@runCatching null
+                inboxEntry(
+                    peer = entry.getString("peer"),
+                    text = entry.getString("text"),
+                    outgoing = entry.getBoolean("outgoing"),
+                    createdAt = wireTimestampMillis(entry.getString("created_at")),
+                    messageId = sourceId,
+                    deliveryStatus = entry.optString("delivery_status", "delivered"),
+                )
+            }.getOrNull()
+        }
+    }
+
+    private fun inboxEntry(
+        peer: String,
+        text: String,
+        outgoing: Boolean,
+        createdAt: Long,
+        messageId: String,
+        deliveryStatus: String = "delivered",
+    ): ChatEntry {
+        val attachment = DesktopAttachmentStore.parseEnvelope(text)
+        attachment?.let { runCatching { cacheAttachment(it) } }
+        return ChatEntry(
+            peer = peer,
+            text = attachment?.displayText() ?: text,
+            outgoing = outgoing,
+            createdAt = createdAt,
+            messageId = messageId,
+            deliveryStatus = deliveryStatus,
+            attachment = attachment,
+        )
     }
 
     @Synchronized
@@ -749,7 +831,7 @@ class HiddiSession internal constructor(
         if (peer != nickname) {
             val ownBundles = authenticatedRequest("GET", "$server/v1/users/$nickname/prekey-bundles", null) as JSONArray
             val ownDeliveries = JSONArray()
-            val syncPayload = JSONObject().put("type", "hiddi.sync.v1").put("peer", peer).put("text", plaintext).toString()
+            val syncPayload = JSONObject().put("type", SELF_SYNC_TYPE).put("peer", peer).put("text", plaintext).toString()
             for (index in 0 until ownBundles.length()) {
                 val value = ownBundles.getJSONObject(index)
                 val remote = SignalProtocolAddress(nickname, value.optInt("device_number", 1))
@@ -832,6 +914,16 @@ class HiddiSession internal constructor(
         }
         if (changed) persist()
         return result
+    }
+
+    /**
+     * Marks delivered messages from an open conversation as read. The sender
+     * only learns the read state, never which device displayed the message.
+     */
+    @Synchronized
+    fun markConversationRead(peer: String) {
+        val encoded = URLEncoder.encode(normalizePeer(peer), Charsets.UTF_8)
+        authenticatedRequest("POST", "$server/v1/messages/read/$encoded", null)
     }
 
     private fun bundle(json: JSONObject): PreKeyBundle {
@@ -928,6 +1020,12 @@ class HiddiSession internal constructor(
         const val SERVER_INBOX_PAGE_SIZE = 100
         const val MAX_INBOX_BATCHES = 20
         const val HISTORY_SYNC_BATCH_SIZE = 10
+
+        /** Own-device journal entry for a single message this account sent. */
+        const val SELF_SYNC_TYPE = "hiddi.sync.v1"
+
+        /** Own-device history snapshot delivered to a newly linked device. */
+        const val HISTORY_SYNC_TYPE = "hiddi.sync.batch.v1"
     }
 
     private fun synchronizeConversationDeletions() {

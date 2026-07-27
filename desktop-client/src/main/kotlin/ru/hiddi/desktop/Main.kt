@@ -573,10 +573,19 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
     }
 
     DisposableEffect(session) {
-        realtime.connect(invisibleMode)
         onDispose {
             realtime.close()
             session.close()
+        }
+    }
+    // Sole owner of the realtime connection. Keyed only on the socket so that
+    // selecting another chat cannot cancel a pending reconnect: connect() is a
+    // no-op while the socket is live, and heartbeat() retires a half-open one.
+    LaunchedEffect(realtime) {
+        while (true) {
+            realtime.connect(invisibleMode)
+            delay(5_000)
+            realtime.heartbeat()
         }
     }
     LaunchedEffect(session) {
@@ -643,7 +652,17 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
         peerTyping = false
         selected?.let { realtime.subscribePresence(it.nickname) }
     }
-    LaunchedEffect(realtime, selected?.nickname, invisibleMode) {
+    // As on Android, the open conversation reports its read state when selected
+    // and whenever a new incoming message lands in it.
+    val incomingFromSelected =
+        selected?.nickname?.let { peer -> messages.count { !it.outgoing && it.peer == peer } } ?: 0
+    LaunchedEffect(selected?.nickname, incomingFromSelected) {
+        val peer = selected?.nickname ?: return@LaunchedEffect
+        runCatching { withContext(Dispatchers.IO) { session.markConversationRead(peer) } }
+    }
+    // Reads selected/invisibleMode straight from their MutableState, so the loop
+    // never has to be restarted — and never loses a queued event to cancellation.
+    LaunchedEffect(realtime) {
         for (event in realtime.events) {
             when (event) {
                 DesktopRealtime.Event.Connected -> {
@@ -673,8 +692,8 @@ private fun MessengerScreen(session: HiddiSession, onLoggedOut: () -> Unit) {
                     }
                 }
                 DesktopRealtime.Event.Disconnected -> {
-                    delay(500)
-                    realtime.connect(invisibleMode)
+                    peerOnline = false
+                    peerTyping = false
                 }
             }
         }
