@@ -156,55 +156,12 @@ class GroupMlsCoordinator(
                     val plaintext = requireNotNull(
                         NativeMlsBridge.processApplicationMessage(event.groupId, event.envelope),
                     ) { "OpenMLS отклонил group message" }
-                    val payload = try {
-                        GroupApplicationPayloadCodec.decode(plaintext.decodeToString())
-                    } finally {
-                        plaintext.fill(0)
-                    }
-                    when (payload) {
-                        is GroupApplicationPayload.Text -> groupStore.appendIncoming(
-                            event.groupId,
-                            event.eventId,
-                            payload.messageId,
-                            event.senderNickname,
-                            payload.text,
-                            event.createdAt,
-                        )
-                        is GroupApplicationPayload.Attachment -> {
-                            val descriptor = payload.descriptor
-                            groupStore.appendIncoming(
-                                event.groupId,
-                                event.eventId,
-                                payload.messageId,
-                                event.senderNickname,
-                                when (descriptor.kind) {
-                                    EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
-                                    EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
-                                    else -> "Вложение"
-                                },
-                                event.createdAt,
-                                descriptor,
-                            )
-                            listOfNotNull(descriptor.preview, descriptor).forEach { part ->
-                                if (!attachmentStore.exists(part.attachmentId)) {
-                                    attachmentStore.saveCiphertext(
-                                        part.attachmentId,
-                                        api.downloadAttachment(profile, part.attachmentId),
-                                    )
-                                }
-                            }
-                        }
-                        is GroupApplicationPayload.Metadata ->
-                            groupStore.setGroupName(event.groupId, payload.name)
-                        is GroupApplicationPayload.Delete ->
-                            groupStore.deleteMessage(
-                                event.groupId,
-                                payload.messageId,
-                                expectedSender = event.senderNickname,
-                            ).forEach {
-                                attachmentStore.delete(it.attachmentId)
-                            }
-                    }
+                    // The MLS ratchet has already advanced, so this envelope can
+                    // never be decrypted again. A payload that cannot be applied
+                    // is therefore skipped rather than left to block every later
+                    // event: the inbox returns unacknowledged events oldest-first
+                    // and would keep replaying this one forever.
+                    runCatching { applyApplicationPayload(profile, event, plaintext) }
                     changedGroups += event.groupId
                 }
                 else -> error("Неизвестный MLS event kind")
@@ -212,6 +169,63 @@ class GroupMlsCoordinator(
             api.acknowledgeGroupEvent(profile, event.eventId)
         }
         return changedGroups.distinctBy { it.contentHashCode() }
+    }
+
+    private suspend fun applyApplicationPayload(
+        profile: AccountProfile,
+        event: GroupEvent,
+        plaintext: ByteArray,
+    ) {
+        val payload = try {
+            GroupApplicationPayloadCodec.decode(plaintext.decodeToString())
+        } finally {
+            plaintext.fill(0)
+        }
+        when (payload) {
+            is GroupApplicationPayload.Text -> groupStore.appendIncoming(
+                event.groupId,
+                event.eventId,
+                payload.messageId,
+                event.senderNickname,
+                payload.text,
+                event.createdAt,
+            )
+            is GroupApplicationPayload.Attachment -> {
+                val descriptor = payload.descriptor
+                groupStore.appendIncoming(
+                    event.groupId,
+                    event.eventId,
+                    payload.messageId,
+                    event.senderNickname,
+                    when (descriptor.kind) {
+                        EncryptedAttachmentStore.IMAGE_KIND -> "📷 Изображение"
+                        EncryptedAttachmentStore.VOICE_KIND -> "🎙 Голосовое сообщение"
+                        else -> "Вложение"
+                    },
+                    event.createdAt,
+                    descriptor,
+                )
+                listOfNotNull(descriptor.preview, descriptor).forEach { part ->
+                    if (!attachmentStore.exists(part.attachmentId)) {
+                        attachmentStore.saveCiphertext(
+                            part.attachmentId,
+                            api.downloadAttachment(profile, part.attachmentId),
+                        )
+                    }
+                }
+            }
+            is GroupApplicationPayload.Metadata ->
+                groupStore.setGroupName(event.groupId, payload.name)
+            is GroupApplicationPayload.Delete ->
+                groupStore.deleteMessage(
+                    event.groupId,
+                    payload.messageId,
+                    expectedSender = event.senderNickname,
+                ).forEach {
+                    attachmentStore.delete(it.attachmentId)
+                }
+            GroupApplicationPayload.Unsupported -> Unit
+        }
     }
 
     suspend fun sendText(profile: AccountProfile, groupId: ByteArray, text: String) {

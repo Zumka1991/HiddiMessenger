@@ -138,6 +138,9 @@ class EncryptedAttachmentStore(context: Context) {
     companion object {
         const val IMAGE_KIND = "image"
         const val VOICE_KIND = "voice"
+
+        /** Envelope type carrying an attachment descriptor inside a message. */
+        const val ATTACHMENT_TYPE = "hiddi.attachment.v1"
         const val JPEG_MIME = "image/jpeg"
         const val AUDIO_MIME = "audio/x-hiddi-pcm16le"
         const val MAX_PLAIN_BYTES = 8 * 1024 * 1024 - 16
@@ -150,7 +153,7 @@ class EncryptedAttachmentStore(context: Context) {
         fun envelope(descriptor: AttachmentDescriptor): String {
             validateDescriptor(descriptor)
             return descriptor.toJson()
-                .put("type", "hiddi.attachment.v1")
+                .put("type", ATTACHMENT_TYPE)
                 .toString()
         }
 
@@ -169,7 +172,7 @@ class EncryptedAttachmentStore(context: Context) {
 
         fun parseEnvelope(value: String): AttachmentDescriptor? {
             val json = runCatching { JSONObject(value) }.getOrNull() ?: return null
-            if (json.optString("type") != "hiddi.attachment.v1") return null
+            if (json.optString("type") != ATTACHMENT_TYPE) return null
             return json.toDescriptor().also(::validateDescriptor)
         }
 

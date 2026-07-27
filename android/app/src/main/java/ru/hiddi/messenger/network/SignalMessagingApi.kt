@@ -19,6 +19,7 @@ import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import ru.hiddi.messenger.security.AndroidSignalProtocolStore
+import ru.hiddi.messenger.security.EncryptedAttachmentStore
 import ru.hiddi.messenger.security.NativeMlsBridge
 import ru.hiddi.messenger.security.SignalStateRepository
 import java.net.HttpURLConnection
@@ -703,7 +704,14 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
                             output += DecryptedMessage(
                                 messageId = item.getString("message_id"),
                                 senderNickname = sender,
-                                text = text,
+                                // A newer peer may use an envelope this build
+                                // cannot read. A placeholder beats rendering raw
+                                // JSON as if it were the text the sender typed.
+                                text = if (sync.isUnknownHiddiEnvelope()) {
+                                    UNSUPPORTED_MESSAGE_TEXT
+                                } else {
+                                    text
+                                },
                                 createdAt = item.getString("created_at"),
                             )
                     }
@@ -787,6 +795,9 @@ class SignalMessagingApi(private val repository: SignalStateRepository) {
     private companion object {
         const val DEFAULT_DEVICE_NUMBER = 1
         val SIGNAL_STATE_MUTEX = Mutex()
+
+        /** Shown instead of raw JSON when a peer uses a newer envelope. */
+        const val UNSUPPORTED_MESSAGE_TEXT = "Сообщение не поддерживается этой версией"
     }
 }
 
@@ -841,6 +852,15 @@ data class GroupEvent(
 enum class DeliveryStatus { SENT, DELIVERED, READ }
 private fun ByteArray.b64() = Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 private fun String.decode() = Base64.decode(this, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+/**
+ * True when the plaintext is a Hiddi envelope this build cannot interpret.
+ * Attachment envelopes are excluded: they are unwrapped further down the path.
+ */
+private fun JSONObject?.isUnknownHiddiEnvelope(): Boolean {
+    val type = this?.optString("type")?.takeIf(String::isNotBlank) ?: return false
+    return type.startsWith("hiddi.") && type != EncryptedAttachmentStore.ATTACHMENT_TYPE
+}
+
 private fun JSONObject.userProfile() = UserSearchResult(
     nickname = getString("nickname"),
     displayName = optString("display_name"),

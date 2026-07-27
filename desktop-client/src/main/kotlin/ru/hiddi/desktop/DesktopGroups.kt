@@ -232,6 +232,20 @@ internal class DesktopGroupManager(
             appendIncoming(group, eventId, null, sender, decoded, createdAt)
             return
         }
+        // The MLS ratchet has already advanced, so this envelope can never be
+        // decrypted again. A malformed payload is skipped rather than left to
+        // block every later event: the inbox returns unacknowledged events
+        // oldest-first and would keep replaying this one forever.
+        runCatching { applyPayload(group, decoded, eventId, sender, createdAt) }
+    }
+
+    private fun applyPayload(
+        group: JSONObject,
+        decoded: String,
+        eventId: String,
+        sender: String,
+        createdAt: String,
+    ) {
         val payload = JSONObject(decoded.removePrefix(PAYLOAD_PREFIX))
         require(payload.optInt("version") == 1)
         val messageId = payload.getString("message_id")
@@ -273,7 +287,10 @@ internal class DesktopGroupManager(
                     }
                 }
             }
-            else -> error("Неизвестный тип group payload")
+            // A payload type this build does not know is skipped, never fatal:
+            // the caller must still acknowledge the event, otherwise a newer
+            // peer would stall group synchronization for good.
+            else -> Unit
         }
     }
 

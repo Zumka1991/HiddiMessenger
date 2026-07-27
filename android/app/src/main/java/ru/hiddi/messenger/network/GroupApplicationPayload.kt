@@ -15,6 +15,13 @@ sealed interface GroupApplicationPayload {
     ) : GroupApplicationPayload
     data class Metadata(val name: String) : GroupApplicationPayload
     data class Delete(val messageId: String) : GroupApplicationPayload
+
+    /**
+     * A payload type this build does not know. Returned instead of throwing so
+     * that a newer peer cannot stall group synchronization: the event still
+     * gets acknowledged and every later event keeps flowing.
+     */
+    data object Unsupported : GroupApplicationPayload
 }
 
 object GroupApplicationPayloadCodec {
@@ -76,7 +83,7 @@ object GroupApplicationPayloadCodec {
                 },
             )
             "delete" -> GroupApplicationPayload.Delete(messageId)
-            else -> error("Неизвестный тип group payload")
+            else -> GroupApplicationPayload.Unsupported
         }
     }
 

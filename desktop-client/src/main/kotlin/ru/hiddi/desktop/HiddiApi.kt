@@ -408,7 +408,7 @@ class HiddiSession internal constructor(
                 .forEach { entries ->
                     val payload =
                         JSONObject()
-                            .put("type", HISTORY_SYNC_TYPE)
+                            .put("type", HiddiEnvelope.HISTORY_SYNC)
                             .put("entries", JSONArray(entries))
                             .toString()
                     val encrypted =
@@ -505,8 +505,8 @@ class HiddiSession internal constructor(
             val plaintext = plain.decodeToString()
             val envelope = runCatching { JSONObject(plaintext) }.getOrNull()
             val entries = when (envelope?.optString("type")) {
-                HISTORY_SYNC_TYPE -> historyBatchEntries(envelope, messageId, knownMessageIds)
-                SELF_SYNC_TYPE -> listOf(
+                HiddiEnvelope.HISTORY_SYNC -> historyBatchEntries(envelope, messageId, knownMessageIds)
+                HiddiEnvelope.SELF_SYNC -> listOf(
                     inboxEntry(
                         peer = envelope.optString("peer").ifBlank { sender },
                         text = envelope.optString("text"),
@@ -518,7 +518,14 @@ class HiddiSession internal constructor(
                 else -> listOf(
                     inboxEntry(
                         peer = sender,
-                        text = plaintext,
+                        // A newer peer may use an envelope this build cannot read.
+                        // Showing a placeholder beats rendering raw JSON as if it
+                        // were the message the sender typed.
+                        text = if (HiddiEnvelope.isUnsupported(envelope)) {
+                            HiddiEnvelope.UNSUPPORTED_TEXT
+                        } else {
+                            plaintext
+                        },
                         outgoing = false,
                         createdAt = wireTimestampMillis(item.getString("created_at")),
                         messageId = messageId,
@@ -831,7 +838,7 @@ class HiddiSession internal constructor(
         if (peer != nickname) {
             val ownBundles = authenticatedRequest("GET", "$server/v1/users/$nickname/prekey-bundles", null) as JSONArray
             val ownDeliveries = JSONArray()
-            val syncPayload = JSONObject().put("type", SELF_SYNC_TYPE).put("peer", peer).put("text", plaintext).toString()
+            val syncPayload = JSONObject().put("type", HiddiEnvelope.SELF_SYNC).put("peer", peer).put("text", plaintext).toString()
             for (index in 0 until ownBundles.length()) {
                 val value = ownBundles.getJSONObject(index)
                 val remote = SignalProtocolAddress(nickname, value.optInt("device_number", 1))
@@ -1020,12 +1027,6 @@ class HiddiSession internal constructor(
         const val SERVER_INBOX_PAGE_SIZE = 100
         const val MAX_INBOX_BATCHES = 20
         const val HISTORY_SYNC_BATCH_SIZE = 10
-
-        /** Own-device journal entry for a single message this account sent. */
-        const val SELF_SYNC_TYPE = "hiddi.sync.v1"
-
-        /** Own-device history snapshot delivered to a newly linked device. */
-        const val HISTORY_SYNC_TYPE = "hiddi.sync.batch.v1"
     }
 
     private fun synchronizeConversationDeletions() {
@@ -1105,6 +1106,36 @@ class HiddiSession internal constructor(
 
     override fun close() {
         passphrase.fill('\u0000')
+    }
+}
+
+/**
+ * Envelope types carried inside a personal-chat plaintext. A plaintext without
+ * one of these is the message itself, which is how every older client speaks.
+ */
+internal object HiddiEnvelope {
+    /** Own-device journal entry for a single message this account sent. */
+    const val SELF_SYNC = "hiddi.sync.v1"
+
+    /** Own-device history snapshot delivered to a newly linked device. */
+    const val HISTORY_SYNC = "hiddi.sync.batch.v1"
+
+    /** Shown instead of raw JSON when a peer uses a newer envelope. */
+    const val UNSUPPORTED_TEXT = "Сообщение не поддерживается этой версией"
+
+    private const val PREFIX = "hiddi."
+
+    private val KNOWN =
+        setOf(SELF_SYNC, HISTORY_SYNC, DesktopAttachmentStore.ATTACHMENT_TYPE)
+
+    /**
+     * True when the payload announces a Hiddi envelope this build cannot
+     * interpret — a newer peer. Such a message is shown as a placeholder rather
+     * than as the raw JSON the sender never typed.
+     */
+    fun isUnsupported(payload: JSONObject?): Boolean {
+        val type = payload?.optString("type")?.takeIf(String::isNotBlank) ?: return false
+        return type.startsWith(PREFIX) && type !in KNOWN
     }
 }
 

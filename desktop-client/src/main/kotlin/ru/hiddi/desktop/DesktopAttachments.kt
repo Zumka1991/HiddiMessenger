@@ -189,6 +189,9 @@ class DesktopAttachmentStore(private val directory: Path) {
         const val IMAGE_KIND = "image"
         const val VOICE_KIND = "voice"
         const val JPEG_MIME = "image/jpeg"
+
+        /** Envelope type carrying an attachment descriptor inside a message. */
+        const val ATTACHMENT_TYPE = "hiddi.attachment.v1"
         const val AUDIO_MIME = "audio/x-hiddi-pcm16le"
         const val MAX_PLAIN_BYTES = 8 * 1024 * 1024 - 16
         private const val MAX_CIPHERTEXT_BYTES = 8 * 1024 * 1024
@@ -209,11 +212,11 @@ class DesktopAttachmentStore(private val directory: Path) {
             )
 
         fun envelope(descriptor: AttachmentDescriptor): String =
-            descriptor.toJson().put("type", "hiddi.attachment.v1").toString()
+            descriptor.toJson().put("type", ATTACHMENT_TYPE).toString()
 
         fun parseEnvelope(value: String): AttachmentDescriptor? {
             val json = runCatching { JSONObject(value) }.getOrNull() ?: return null
-            if (json.optString("type") != "hiddi.attachment.v1") return null
+            if (json.optString("type") != ATTACHMENT_TYPE) return null
             return json.toAttachmentDescriptor().also(::validateDescriptor)
         }
 
