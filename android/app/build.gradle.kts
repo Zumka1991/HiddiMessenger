@@ -114,6 +114,11 @@ android {
         }
         jniLibs {
             excludes += "**/libsignal_jni_testing.so"
+            // libsignal_jni.so alone is 104 MiB and AGP stores native libraries
+            // uncompressed by default, which is why the APK ballooned past
+            // 160 MiB. These builds are sideloaded, so the file people download
+            // matters more than the extra install-time extraction.
+            useLegacyPackaging = true
         }
     }
 }
